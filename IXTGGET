@@ -1,0 +1,851 @@
+IXTGGET TITLE '- $GETSTOR: ACQUIRE STORAGE'                             00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE: IXTGGET  - $GETSTOR: acquire storage                         00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This routine implements the $GETSTOR service which is used         00080000
+*    to allocate a storage extent of the length and RMODE               00090000
+*    supplied by the requestor.  By default, the storage block          00100000
+*    is enqueued on the Active Extent List (QHDR) supplied or           00110000
+*    designated by default to consolidate cleanup and/or error          00120000
+*    recovery when the work unit terminates.  However, active           00130000
+*    extent list queuing can be suppressed for workunits which          00140000
+*    will provide their own storage resource managers.                  00150000
+*                                                                       00160000
+*                                                                       00170000
+* NOTES:                                                                00180000
+*                                                                       00190000
+*    Storage can be freely acquired on behalf of the current work       00200000
+*    unit or on any other addressable, non-terminating work unit.       00210000
+*    Exclusive control of the target work unit is not required.         00220000
+*    Generally, holding the DISP lock is sufficient to ensure           00230000
+*    that the target work unit is non-terminating.                      00240000
+*                                                                       00250000
+*    The ICTSTEST field of the ICVT is used to convey the type          00260000
+*    of storage integrity tests to apply upon the active extent         00270000
+*    lists addressable to the requester.  Refer to IXTGVAL for          00280000
+*    details.  $TRACE TRC_STG class records are cut (forced)            00290000
+*    for all ABEND completions.  TRC_STG records are cut for'           00300000
+*    normal completions only when ICTSTEST is set to ICTSTES2           00310000
+*    or greater to avoid the overhead of $TRACE invokation in           00320000
+*    all but debugging environments.                                    00330000
+*                                                                       00340000
+*                                                                       00350000
+* ATTRIBUTES:                                                           00360000
+*                                                                       00370000
+*    STDENV or SRB CALLERS                                              00380000
+*    BAKR LINKAGE                                                       00390000
+*    AMODE(31), RMODE(ANY)                                              00400000
+*                                                                       00410000
+*                                                                       00420000
+* SERIALIZATION:                                                        00430000
+*                                                                       00440000
+*    NONE                                                               00450000
+*                                                                       00460000
+*                                                                       00470000
+* ON ENTRY:                                                             00480000
+*                                                                       00490000
+*    R0  CONTAINS THE STORAGE LENGTH REQUIRED IN BYTES 1-3.             00500000
+*        BYTE 0 CONTAINS THE FOLLOWING OPTION FLAG BITS                 00510000
+*                                                                       00520000
+*        BIT0:  0 - COND=NO,  STORAGE FAILURES CAUSE AN $ABEND          00530000
+*                                                                       00540000
+*               1 - COND=YES, STORAGE FAILURES ARE REFLECTED TO         00550000
+*                   THE REQUESTOR VIA A NON-ZERO RETURN CODE            00560000
+*                                                                       00570000
+*        BIT1:  0 - SAVE=NO,  STORAGE FOR USE OTHER THAN SAVAREA        00580000
+*                                                                       00590000
+*               1 - SAVE=YES, STORAGE FOR SAVE AREA STACK FRAME         00600000
+*                                                                       00610000
+*        BIT2:  0 - CLEAR=YES, STORAGE EXTENT IS CLEARED (ZEROED)       00620000
+*                                                                       00630000
+*               1 - CLEAR=NO, STORAGE EXTENT IS NOT CLEARED             00640000
+*                                                                       00650000
+*                                                                       00660000
+*    R1  STORAGE LOCATION DESIGNATION IN BITS 1-31 AS FOLLOWS           00670000
+*                                                                       00680000
+*           00 - LOC=ANY, STORAGE IS OBTAINED ABOVE 16M LINE            00690000
+*                                                                       00700000
+*           /0 - LOC=RES, STORAGE IS OBTAINED ON THE SIDE OF            00710000
+*                THE 16M LINE DESIGNATED BY THE VIRTUAL STORAGE         00720000
+*                ADDRESS CONTAINED IN BITS 1-31                         00730000
+*                                                                       00740000
+*                                                                       00750000
+*    R15 DIRECTLY OR INDIRECTLY DESIGNATES THE $ISTOR ACTIVE            00760000
+*        EXTENT LIST ON WHICH THE STORAGE ACQUIRED WILL BE              00770000
+*        QUEUED.  THIS CONSTITUTES OWNERSHIP OF THE STORAGE             00780000
+*        BLOCK.  OWNERSHIP IS CONVEYED AS FOLLOWS:                      00790000
+*                                                                       00800000
+*           R15 = 0  - THE ACTIVE EXTENT LIST ASSOCIATED WITH           00810000
+*                      THE CURRENT ITASK (IF IN ITASK MODE) OR          00820000
+*                      PROCESS (IF IN PCB MODE) IS SELECTED. AN         00830000
+*                      ERROR IS REPORTED IF THE REQUESTOR IS NOT        00840000
+*                      EXECUTING IN THE STANDARD ENVIRONMENT.           00850000
+*                                                                       00860000
+*           R15 > 0  - THE REGISTER CONTAINS THE ADDRESS OF AN          00870000
+*                      ITASK OR PCB REPRESENTING THE OWNING             00880000
+*                      WORK UNIT                                        00890000
+*                                                                       00900000
+*           R15 < 0  - BITS 1-31 OF THE REGISTER CONTAIN THE            00910000
+*                      ADDRESS OF A DOUBLE WORD (ALIGNED)               00920000
+*                      $ISTOR ACTIVE EXTENT LIST HEADER OR ZERO         00930000
+*                      IF THE EXTENT ACQUIRED IS TO BE UNOWNED.         00940000
+*                      THE HEADER, IF PROVIDED, NEED NOT BE             00950000
+*                      ASSOCIATED WITH A STANDARD WORK UNIT             00960000
+*                      (ITASK OR PCB)                                   00970000
+*                                                                       00980000
+*                                                                       00990000
+* ON EXIT:                                                              01000000
+*                                                                       01010000
+*    R15 CONTAINS ONE OF THE FOLLOWING RETURN CODES                     01020000
+*                                                                       01030000
+*        00 - STORAGE ACQUIRED                                          01040000
+*                                                                       01050000
+*             R1 - ADDRESS OF EXTENT ORIGIN (USER AREA)                 01060000
+*             R0 - LENGTH  OF EXTENT (USER AREA)                        01070000
+*                                                                       01080000
+*        NN - STORAGE ACQUISITION FAILED (COND=YES)                     01090000
+*                                                                       01100000
+**<DOC-OFF>****************************************************         01110000
+                                                                        01120000
+         EJECT                                                          01130000
+***************************************************************         01140000
+*                                                                       01150000
+* MAINTEANCE:                                                           01160000
+*                                                                       01170000
+*    07/15/92 R. TURGEON                                                01180000
+*             INITIAL VERSION                                           01190000
+*                                                                       01200000
+*    03/23/93 R. COLMONE                                                01210000
+*             INTRODUCED BAKR LINKAGE                                   01220000
+*                                                                       01230000
+*    06/10/93 R. TURGEON                                                01240000
+*             ADAPTATION TO STANDARD EXECUTION ENVIRONMENT              01250000
+*                                                                       01260000
+*    08/01/93 R. TURGEON                                                01270000
+*             $ABEND ZERO LENGTH REQUESTS                               01280000
+*                                                                       01290000
+*    03/18/94 R. COLMONE                                                01300000
+*             ADDED SUPPORT FOR NON-OWNED STORAGE ALLOCATION            01310000
+*                                                                       01320000
+*    11/01/94 R. TURGEON                                                01330000
+*             IMPLEMENTED CELL POOLING.  THE IXTGGET ROUTINE            01340000
+*             FUNCTIONALLY AND COMPATIBLY REPLACES IGETSTOR             01350000
+*             AND IGENGSAV.                                             01360000
+*                                                                       01370000
+*    01/26/96 R. COLMONE                                                01380000
+*             CHANGED $TRACE REQUEST TO TEST FOR STDENV.                01390000
+*                                                                       01400000
+***************************************************************         01410000
+                                                                        01420000
+         EJECT                                                          01430000
+         $ISTOR ,                 ACTIVE STORAGE EXTENT DESCRIPTOR      01440000
+                                                                        01450000
+         EJECT                                                          01460000
+         STORLVLS ,               STORAGE MGMT CONTROL AND STATS AREAS  01470000
+                                                                        01480000
+         EJECT                                                          01490000
+         STORCNST ,               STORAGE MGMT CONSTANTS                01500000
+                                                                        01510000
+         EJECT                                                          01520000
+         STORTRAC ,               STORAGE MGMT TRACE RECORD             01530000
+                                                                        01540000
+         EJECT                                                          01550000
+         @CB   WORKUNIT=YES       PREFIX ON ALL WORKUNIT BLOCKS         01560000
+                                                                        01570000
+         EJECT                                                          01580000
+         ABCODES ,                $ABEND CODES                          01590000
+                                                                        01600000
+         TRACODES ,               $TRACE CODES                          01610000
+                                                                        01620000
+         EQUS  STDENV=TEST,LINKAGE=COND                                 01630000
+                                                                        01640000
+         EJECT                                                          01650000
+IXTGGET  CSECT ,                                                        01660000
+IXTGGET  AMODE 31                                                       01670000
+IXTGGET  RMODE ANY                                                      01680000
+                                                                        01690000
+         BAKR  R14,0              SAVE ENVIRONMENT                      01700000
+         BASR  R12,0              ESTABLISH BASE                        01710000
+         USING *,R12              TEMP BASE                             01720000
+         LAE   R12,0(R12,0)       DISCARD ALET                          01730000
+         L     R12,=A(IXTGGET)    RELOCATE TO CSECT ORIGIN              01740000
+         USING IXTGGET,R12        ESTABLISH ADDRESSABILITY              01750000
+                                                                        01760000
+         @CPYRYT ,                COPYRIGHT                             01770000
+                                                                        01780000
+         SYSSTATE ASCENV=P        PRIMARY MODE INTENDED                 01790000
+         SAC   0                  AND ENSURED                           01800000
+                                                                        01810000
+         USING PSA,R0             PSA ADDRESSABILITY                    01820000
+                                                                        01830000
+         EJECT                                                          01840000
+**<DOC-ON>*****************************************************         01850000
+*                                                                       01860000
+*   The request parameters are validated and placed into perm           01870000
+*   registers as depicted below.  STDENV is established and             01880000
+*   the Active Extent List (QHDR) associated with the request           01890000
+*   is located.                                                         01900000
+*                                                                       01910000
+*      R3 - requested (and adjusted) storage length                     01920000
+*      R5 - RMODE of requester or zero if LOC=ANY                       01930000
+*      R6 - SL1ENTRY (subpool) address                                  01940000
+*      R7 - SL2ENTRY (partition) address                                01950000
+*                                                                       01960000
+*      R8 - $GETSTOR option flags saved in byte3 (ref prolog).          01970000
+*                                                                       01980000
+*           Byte0 contains the storage diagnostic test option           01990000
+*           (ICTSTEST) sampled on entry.                                02000000
+*                                                                       02010000
+*           Byte1 is set nonzero if storage manager init had            02020000
+*           not yet completed upon receipt of the request.              02030000
+*                                                                       02040000
+*           Byte2 (bit7) is set non-zero LOC=BELOW or LOC=RES           02050000
+*           and the caller resides below the 16M line                   02060000
+*                                                                       02070000
+*      R9 - Storage ownership expressed as either a workunit            02080000
+*           address, a $ISTOR qhdr address, or zero designating         02090000
+*           the current workunit as the storage owner. If the           02100000
+*           high order bit is set, the storage is unowned.              02110000
+*           Workunit addresses are converted to a QHDR address.         02120000
+*                                                                       02130000
+**<DOC-OFF>****************************************************         02140000
+         LR    R3,R0              LENGTH AND OPTIONS                    02150000
+         N     R3,=X'00FFFFFF'    ISOLATE LENGTH                        02160000
+         BZ    ABN_REQ            INVALID REQUEST IF ZERO               02170000
+                                                                        02180000
+         LR    R5,R1              RESIDENCE REQUIREMENT                 02190000
+         LR    R9,R15             $ISTOR QUEUE HEADER                   02200000
+                                                                        02210000
+         LR    R8,R0              LENGTH AND OPTIONS                    02220000
+         SRL   R8,24              RETAIN OPTIONS IN LOW ORDER BYTE      02230000
+                                                                        02240000
+*--------------------------------------------------------------         02250000
+*   ESTABLISH STDENV - TASK OR SRB MODE REQUESTERS ACCEPTED             02260000
+*--------------------------------------------------------------         02270000
+         USING ICVT,R11           ICVT                                  02280000
+         USING ITASK,R10          ITASK OR ZERO                         02290000
+                                                                        02300000
+         ICM   R10,15,PSATOLD     MVS TASK MODE?                        02310000
+         BZ    SRBMODE            ELSEWHERE IF SRB MODE                 02320000
+                                                                        02330000
+         @RESTENV TASKMODE=YES    R10 - CURRENT ITASK PTR               02340000
+         B     FSTDENV            R11 - ICVT PTR                        02350000
+                                                                        02360000
+SRBMODE  DS    0H                 R10 - ZERO                            02370000
+         @RESTENV TASKMODE=NO     R11 - ICVT PTR                        02380000
+                                                                        02390000
+FSTDENV  DS    0H                                                       02400000
+                                                                        02410000
+*--------------------------------------------------------------         02420000
+*   COMPUTE TRUE STG LENGTH                                             02430000
+*--------------------------------------------------------------         02440000
+         ICM   R8,8,ICTSTEST+3    STORAGE DIAG TEST LEVEL IN HIGH ORDER 02450000
+         CLM   R8,8,ICTZERO       STG BLOCK FRAMING AND OVERLAY TESTS?  02460000
+         BE    *+8                SKIP IF NOT                           02470000
+         LA    R3,4(,R3)          PROVIDE FOR TRAILING EYECATCHER       02480000
+                                                                        02490000
+         LA    R3,$ISHDRLN+7(,R3) STG HEADER PLUS DOUBLEWORD ROUND      02500000
+         SRL   R3,3                                                     02510000
+         SLL   R3,3                                                     02520000
+                                                                        02530000
+*--------------------------------------------------------------         02540000
+*   ACQUIRE SUBPOOL (SL1) AND PARTITION (SL2) ENTRIES                   02550000
+*--------------------------------------------------------------         02560000
+         LR    R0,R3              STORAGE SIZE AS ARGUMENT              02570000
+         BAS   R14,L1L2LOC        LOCATE SL1 AND SL2 ENTRIES            02580000
+         B     *+4(R15)           ANALYZE COMPLETION                    02590000
+         B     INITRDY            SL1 AND SL2 ENTRIES RETURNED          02600000
+         B     INITPEND           STORAGE MANAGER INIT NOT COMPLETED    02610000
+         B     ABN_REQ            FAIL IF INVALID REQUESET              02620000
+                                                                        02630000
+INITPEND DS    0H                 STORAGE MANAGER INIT NOT COMPLETED    02640000
+         ICM   R8,B'0100',=AL1(TRUE)  INDICATE INIT NOT COMPLETE        02650000
+         B     STDSTG             NON-POOLED STORAGE ONLY               02660000
+                                                                        02670000
+INITRDY  DS    0H                                                       02680000
+         LR    R6,R1              SUBPOOL IDENTIFICATION ENTRY          02690000
+         LR    R7,R2              PARTITION  DEFINITION ENTRY           02700000
+                                                                        02710000
+         USING SL1ENTRY,R6        SL1                                   02720000
+         USING SL2ENTRY,R7        SL2                                   02730000
+                                                                        02740000
+         EJECT                                                          02750000
+**<DOC-ON>*****************************************************         02760000
+*                                                                       02770000
+*   If the requester accepts storage above the 16M line and             02780000
+*   the subpool permits cell pooling, first attempt to acquire          02790000
+*   storage from the pool.  If the pool is empty, carve a cell          02800000
+*   from the storage extent assigned to this, and possibly              02810000
+*   other, subpools. If an extent has not yet been allocated or         02820000
+*   has been exhausted IXTGXTNT is called to provide a new one.         02830000
+*   Finally, if additional extents cannot be allocated, resort          02840000
+*   to standard storage allocation.                                     02850000
+*                                                                       02860000
+**<DOC-OFF>****************************************************         02870000
+         TM    SL1ATTRS,SL1A_NO_CPOOL                                   02880000
+         BO    STDSTG             CELL POOLS NOT USED FOR THIS SUBPOOL  02890000
+                                                                        02900000
+         LTR   R5,R5              RMODE RESTRICTION?                    02910000
+         BZ    POOLUSE            CELL POOL AVAILABLE IF NOT            02920000
+         CLM   R5,8,ICTZERO       RMODE24 CALLER?                       02930000
+         BE    STDSTG             CELL POOL NOT AVAIL BELOW THE LINE    02940000
+                                                                        02950000
+*--------------------------------------------------------------         02960000
+*   ACQUIRE A CELL ANCHORED IN THE PARTITION                            02970000
+*--------------------------------------------------------------         02980000
+POOLUSE  DS    0H                                                       02990000
+         LM    R0,R1,SL2POOL      UNIQUIFIER / STORAGE BLOCK CHAIN      03000000
+                                                                        03010000
+POOLSWAP DS    0H                                                       03020000
+         LR    R14,R0             UNIQUIFIER UPDATED FOR ADDS ONLY      03030000
+         LTR   R1,R1              CELLS AVAILABLE?                      03040000
+         BZ    POOLXTNT           SKIP IF NOT                           03050000
+         L     R15,0(,R1)         TRAVERSE STACK CHAIN                  03060000
+         CDS   R0,R14,SL2POOL     INTERLOCKED POP                       03070000
+         BNE   POOLSWAP           WHEN CPT, R1 CONTAINS BLOCK ADDR      03080000
+         LA    R2,$ISTPOOL        INDICATE STORAGE ACQUIRED FROM CPOOL  03090000
+         B     QUEUESTG           RETURN STORAGE TO REQUESTER           03100000
+                                                                        03110000
+*--------------------------------------------------------------         03120000
+*   ACQUIRE CELL FROM COMMON STORAGE BLOCK                              03130000
+*--------------------------------------------------------------         03140000
+POOLXTNT DS    0H                                                       03150000
+         ICM   R4,15,SL2PXTNT     STORAGE EXTENT AWARDED?               03160000
+         BZ    POOLREAL           SEE IF PARTITION IS ELIGIBLE          03170000
+         USING STXTENT,R4         FORMAT OF STORAGE EXTENT              03180000
+         LM    R0,R1,STXAVAIL     AVAILABLE BLOCK LENGTH AND ADDRESS    03190000
+                                                                        03200000
+POOLCARV DS    0H                 CARVE OUT A CELL FROM STG EXTENT      03210000
+         LR    R14,R0             AVAILABLE LENGTH                      03220000
+         SH    R14,SL2MAX         ACCOUNT FOR NEW CELL                  03230000
+         BM    POOLREAL           STORAGE EXTENT EXHAUSTED              03240000
+         LR    R15,R1             ADJUST FREE AREA PTR                  03250000
+         AH    R15,SL2MAX         POINT PAST PARTITION CELL SIZE        03260000
+         CDS   R0,R14,STXAVAIL    REMOVE CELL FROM EXTENT / CARRY IN R1 03270000
+         BNE   POOLCARV           TRY AGAIN IF NEEDED                   03280000
+         DROP  R4                 STXTENT                               03290000
+                                                                        03300000
+         L     R15,SL2PTOTL       NUMBER OF CELLS CURRENTLY ASSIGNED    03310000
+                                                                        03320000
+         LA    R0,1(,R15)         ACCOUNT FOR NEW BLOCK                 03330000
+         CS    R15,R0,SL2PTOTL    INTERLOCKED UPDATE                    03340000
+         BNE   *-8                RETRY                                 03350000
+         LA    R2,$ISTPOOL        INDICATE STORAGE ACQUIRED FROM CPOOL  03360000
+         B     QUEUESTG           RETURN STORAGE TO REQUESTER           03370000
+                                                                        03380000
+*--------------------------------------------------------------         03390000
+*   NO CELLS REMAIN IN ASSIGNED STORAGE EXTENT, ATTEMPT REALLOC         03400000
+*--------------------------------------------------------------         03410000
+POOLREAL DS    0H                 STORAGE EXTENT EXHAUSTED              03420000
+         L     R15,ICTXTANC       LOCATE STORAGE CONTROL AREA           03430000
+         USING STANCHOR,R15       TEMPORARY ADDRESSABILITY              03440000
+         TM    STAFLAGS,STAFNSTG+STAFNEXP  EXPANSION CALL DESIRABLE?    03450000
+         BNZ   POOLNA             REQUEST IS NOT RETRIED OTHERWISE      03460000
+         DROP  R15                STANCHOR                              03470000
+                                                                        03480000
+         LA    R0,SL1ENTRY        SL1 AS PARM                           03490000
+         LA    R1,SL2ENTRY        SL2 AS PARM                           03500000
+                                                                        03510000
+         @CALL IXTGXTNT           ATTEMPT REALLOCATION                  03520000
+         LTR   R15,R15            STORAGE EXTENT PROVIDED TO PARTITION? 03530000
+         BZ    POOLXTNT           RETRY CELL ALLOCATION IF SO           03540000
+                                                                        03550000
+POOLNA   DS    0H                                                       03560000
+         SR    R0,R0              PREPARE FOR BLOCK CONCURRENT CLEAR    03570000
+         ST    R0,SL2PXTNT        WITHDRAW USE OF FILLED EXTENT         03580000
+                                                                        03590000
+         EJECT                                                          03600000
+***************************************************************         03610000
+*                                                                       03620000
+*   Acquire addrspc storage in the indicated LOC.  The size             03630000
+*   of the largest block acquired is maintained in the                  03640000
+*   partition table entry if storage manager initialization             03650000
+*   has completed.  This allows the STORAGE command to maintain         03660000
+*   an upper limit for the last 'unbounded' storage subpool.            03670000
+*                                                                       03680000
+***************************************************************         03690000
+STDSTG   DS    0H                                                       03700000
+         LTR   R5,R5              RMODE COMPLIANCE REQUESTED?           03710000
+         BZ    LOCANY             APPLY DEFAULTS IF NOT                 03720000
+         CLM   R5,8,ICTZERO       RMODE31 CALLER?                       03730000
+         BNE   LOCANY             ACQUIRE ABOVE THE LINE IF SO          03740000
+         ICM   R8,B'0010',=AL1(TRUE)  INDICATE LOC=BELOW REQUEST        03750000
+                                                                        03760000
+*--------------------------------------------------------------         03770000
+*   AUTHORIZED, LOC=BELOW                                               03780000
+*--------------------------------------------------------------         03790000
+LOCRES   DS    0H                                                       03800000
+         ICM   R0,15,PSATOLD      TASK MODE?                            03810000
+         BNZ   LOCRESX            STANDARD SUBPOOL HANDLING IF SO       03820000
+         L     R2,ICTTSKMN        ASSIGN STORAGE TO MAIN TASK           03830000
+         L     R2,TSKTCB@-ITASK(,R2)   TRAVERSE ITASK TO TCB            03840000
+                                                                        03850000
+         STORAGE OBTAIN,LENGTH=(R3),COND=YES,LOC=BELOW,TCBADDR=(R2)     03860000
+                                                                        03870000
+         LA    R2,$ISTESA+$ISTMAIN                                      03880000
+         B     REQTEST            R2 SUMMARIZES STORAGE ATTRIBUTES      03890000
+                                                                        03900000
+*--------------------------------------------------------------         03910000
+*   UNAUTHORIZED, LOC=BELOW                                             03920000
+*--------------------------------------------------------------         03930000
+LOCRESX  DS    0H                                                       03940000
+         STORAGE OBTAIN,LENGTH=(R3),COND=YES,LOC=BELOW                  03950000
+                                                                        03960000
+         LA    R2,$ISTESA                                               03970000
+         B     REQTEST            R2 SUMMARIZES STORAGE ATTRIBUTES      03980000
+                                                                        03990000
+*--------------------------------------------------------------         04000000
+*   AUTHORIZED, LOC=ANY                                                 04010000
+*--------------------------------------------------------------         04020000
+LOCANY   DS    0H                                                       04030000
+         ICM   R0,15,PSATOLD      TASK MODE?                            04040000
+         BNZ   LOCANYX            STANDARD SUBPOOL HANDLING IF SO       04050000
+         L     R2,ICTTSKMN        ASSIGN STORAGE TO MAIN TASK           04060000
+         L     R2,TSKTCB@-ITASK(,R2)   TRAVERSE ITASK TO TCB            04070000
+                                                                        04080000
+         STORAGE OBTAIN,LENGTH=(R3),COND=YES,LOC=ANY,TCBADDR=(R2)       04090000
+                                                                        04100000
+         LA    R2,$ISTESA+$ISTMAIN                                      04110000
+         B     REQTEST            R2 SUMMARIZES STORAGE ATTRIBUTES      04120000
+                                                                        04130000
+*--------------------------------------------------------------         04140000
+*   UNAUTHORIZED, LOC=ANY                                               04150000
+*--------------------------------------------------------------         04160000
+LOCANYX  DS    0H                                                       04170000
+         STORAGE OBTAIN,LENGTH=(R3),COND=YES,LOC=ANY                    04180000
+                                                                        04190000
+         LA    R2,$ISTESA         INDICATE STORAGE ACQUIRED FROM SYSTEM 04200000
+                                                                        04210000
+*--------------------------------------------------------------         04220000
+*   COMMON 'STORAGE OBTAIN' CONTINUATION                                04230000
+*--------------------------------------------------------------         04240000
+REQTEST  DS    0H                                                       04250000
+         LTR   R15,R15            SUCCESS?                              04260000
+         BNZ   GET_COND           FAIL OTHERWISE                        04270000
+                                                                        04280000
+*--------------------------------------------------------------         04290000
+*   RETAIN SIZE OF LARGEST BLOCK ACQUIRED                               04300000
+*--------------------------------------------------------------         04310000
+         CLM   R8,B'0100',ICTZERO STORAGE MANAGER INIT COMPLETE?        04320000
+         BNE   STD_FIN            NO STATS MAINTAINED IF NOT            04330000
+         L     R0,SL2UMVSB        LARGEST BLOCK OUTSIDE OF CELL         04340000
+                                                                        04350000
+STD_LARG DS    0H                                                       04360000
+         CR    R3,R0              CURRENT BLOCK IS LARGEST?             04370000
+         BNH   STD_FIN            NO UPDATES OTHERWISE                  04380000
+         CS    R0,R3,SL2UMVSB                                           04390000
+         BNE   STD_LARG                                                 04400000
+                                                                        04410000
+STD_FIN  DS    0H                                                       04420000
+                                                                        04430000
+         EJECT                                                          04440000
+**<DOC-ON>*****************************************************         04450000
+*                                                                       04460000
+*   Initialize user storage and add diagnostic tags as                  04470000
+*   determined by the storage diagnostic level set upon entry.          04480000
+*   Storage areas acquired by $GETSTOR are zeroed unless                04490000
+*   CLEAR=NO is specified.  To make this relatively expensive           04500000
+*   process cheaper, the $ISTOR header is not zeroed, requiring         04510000
+*   that the initialization to follow completes every field             04520000
+*   appropriately.                                                      04530000
+*                                                                       04540000
+*   Requirements:                                                       04550000
+*                                                                       04560000
+*      R1 - addr of allocated extent $ISTOR                             04570000
+*      R2 - $ISTOR.ISTYPE attributes in low order byte                  04580000
+*                                                                       04590000
+**<DOC-OFF>****************************************************         04600000
+                                                                        04610000
+         USING $ISTOR,R1          EXTENT HEADER FORMAT                  04620000
+                                                                        04630000
+QUEUESTG DS    0H                                                       04640000
+         TM    =AL1(CLEARNO),*-*  EX OBJECT                             04650000
+         EX    R8,*-4             CLEAR=NO SPECIFIED?                   04660000
+         BO    QUEUECLR           SKIP STORAGE CLEAR IF SO              04670000
+                                                                        04680000
+         LA    R4,$ISHDRLN(,R1)   BEGINNING OF USER STORAGE AREA        04690000
+         LR    R5,R3              LENGTH OF ENTIRE BLOCK                04700000
+         SH    R5,=AL2($ISHDRLN)  MINUS LENGTH OF $ISTOR HEADER         04710000
+         SR    R15,R15                                                  04720000
+         MVCL  R4,R14                                                   04730000
+                                                                        04740000
+QUEUECLR DS    0H                                                       04750000
+                                                                        04760000
+*--------------------------------------------------------------         04770000
+*   FORMAT THE $ISTOR PRIVATE STORAGE BLOCK HEADER                      04780000
+*--------------------------------------------------------------         04790000
+         TM    =AL1(SAVEYES),*-*  EX OBJECT                             04800000
+         EX    R8,*-4             SAVE=YES SPECIFIED?                   04810000
+         BZ    *+8                SKIP IF NOT                           04820000
+         LA    R2,$ISTSAVE(,R2)   QUICKOR INDICATE BLOCK IS A SAVEAREA  04830000
+                                                                        04840000
+         MVC   $ISEYE1,=CL4'STG0' EYECATCHER, OVERLAY DETECTOR          04850000
+         ST    R7,$ISTSL2         PARTITION ENTRY ADDRESS               04860000
+         STCM  R3,7,$ISTOTLN      TOTAL LENGTH OF EXTENT                04870000
+         STC   R2,$ISTYPE         INDICATE STORAGE ACQUISITION SOURCE   04880000
+                                                                        04890000
+         CLM   R8,8,ICTZERO       STG BLOCK FRAMING AND OVERLAY TESTS?  04900000
+         BE    QUENDIAG           SKIP IF NOT                           04910000
+         MVI   $ISEYE1+3,C'1'     ALLOCATED WHILE EXENT MONITORING      04920000
+         LA    R4,0(R3,R1)        END OF EXTENT                         04930000
+         SH    R4,=H'4'           LOCATE SLOT FOR EYECATCHER            04940000
+         MVC   0(4,R4),=CL4'STG2' FENCE USER STORAGE AREA               04950000
+                                                                        04960000
+QUENDIAG DS    0H                                                       04970000
+                                                                        04980000
+*--------------------------------------------------------------         04990000
+*   LOC WORKUNIT ACTIVE EXTENT LIST - STORAGE MAY BE UNOWNED            05000000
+*--------------------------------------------------------------         05010000
+         SR    R0,R0              PREPARE FOR CLEAR                     05020000
+         ST    R0,$ISTWU          OWNING WORKUNIT NOT YET IDENTIFIED    05030000
+                                                                        05040000
+         USING @CB,R9             ASSUME POINTER TO WORKUNIT CB         05050000
+         LTR   R9,R9              OWNER/QHDR IDENTITY                   05060000
+         BM    QHDR_DIR           QHDR PROVIDED DIRECTLY OR ZERO        05070000
+         BP    QHDR_WU            OWNER WORKUNIT PROVIDED               05080000
+                                                                        05090000
+         LTR   R9,R10             ITASK IF STDENV                       05100000
+         BZ    ABN_ENV            CANT ACCOUNT FOR IT OTHERWISE         05110000
+         ICM   R15,15,TSKPCBC     RUNNING IN PROCESS MODE?              05120000
+         BZ    QHDR_WU            SKIP IF NOT                           05130000
+         LR    R9,R15             PROCESS MODE                          05140000
+                                                                        05150000
+QHDR_WU  DS    0H                 OWNER ADDRESS PROVIDED OR IMPLIED     05160000
+         ST    R9,$ISTWU          IDENTIFY OWNING WORKUNIT              05170000
+         L     R9,@CBSTORQ        LOCATE ACTIVE EXTENT LIST QHDR        05180000
+                                                                        05190000
+QHDR_DIR DS    0H                 QHDR ADDRESS ACQUIRED                 05200000
+         LA    R9,0(,R9)          SANITIZED                             05210000
+         ST    R9,$ISTQHDR        ACTIVE EXTENT LIST ANCHOR AREA        05220000
+         DROP  R9                 @CB                                   05230000
+                                                                        05240000
+*--------------------------------------------------------------         05250000
+*   ADD THE STORAGE BLOCK TO THE DESIGNATED ACTIVE EXTENT CHAIN         05260000
+*--------------------------------------------------------------         05270000
+         LTR   R9,R9              ADDRESS OF QUEUE HEADER               05280000
+         BZ    QUEUECPT           STORAGE NOT OWNED                     05290000
+         LM    R14,R15,0(R9)      QUEUE COUNT / CHAIN PTR               05300000
+                                                                        05310000
+QUEUESWP DS    0H                                                       05320000
+         LR    R0,R14             QUEUE COUNT                           05330000
+         AL    R0,=F'1'           ACCOUNT FOR NEW BLOCK                 05340000
+         ST    R15,$ISNEXT        ADD TO TOP OF BLOCK STACK             05350000
+         CDS   R14,R0,0(R9)       INTERLOCKED PUSH                      05360000
+         BNE   QUEUESWP           RETRY                                 05370000
+                                                                        05380000
+QUEUECPT DS    0H                                                       05390000
+                                                                        05400000
+         EJECT                                                          05410000
+***************************************************************         05420000
+*                                                                       05430000
+*   UPDATE STORAGE UTILIZATION STATISTICS  (PRESERVE R1, R3)            05440000
+*                                                                       05450000
+***************************************************************         05460000
+         CLM   R8,B'0100',ICTZERO STORAGE MANAGER INIT COMPLETE?        05470000
+         BNE   GET_CPT            NO STATS MAINTAINED IF NOT            05480000
+         OI    $ISTYPE,$ISTSTAT   INDICATE STATS RECORDED FOR REQUEST   05490000
+                                                                        05500000
+         TM    $ISTYPE,$ISTPOOL   BLOCK ACQUIRED OUTSIDE OF CELLPOOL?   05510000
+         BO    STATCELL           SKIP IF NOT                           05520000
+         L     R2,SL2UMVSA        TOTAL NON-CELLED STORAGE AMOUNT       05530000
+         LA    R0,0(R3,R2)        ACCOUNT FOR THIS ALLOCATION           05540000
+         CS    R2,R0,SL2UMVSA     INTERLOCKED UPDATE                    05550000
+         BNE   *-8                RETRY                                 05560000
+STATCELL DS    0H                                                       05570000
+                                                                        05580000
+         L     R2,SL2UBLKS        OUTSTANDING BLOCKS                    05590000
+         LA    R0,1(,R2)          ACCOUNT FOR THIS ALLOCATION           05600000
+         CS    R2,R0,SL2UBLKS     INTERLOCKED UPDATE                    05610000
+         BNE   *-8                RETRY                                 05620000
+                                                                        05630000
+         L     R2,SL2UTOTL        TOTAL ALLOCATED STORAGE SIZE          05640000
+         LA    R0,0(R3,R2)        ACCOUNT FOR THIS REQ                  05650000
+         CS    R2,R0,SL2UTOTL     UPDATE                                05660000
+         BNE   *-8                TRY AGAIN                             05670000
+                                                                        05680000
+         C     R0,SL2UHWM         NEW HIGH WATER MARK?                  05690000
+         BNH   *+8                SKIP IF NOT                           05700000
+         ST    R0,SL2UHWM         POST                                  05710000
+                                                                        05720000
+         L     R2,SL2UREQS        TOTAL NUMBER OF REQUESTS THIS PARTN   05730000
+         LA    R0,1(,R2)          ACCOUNT FOR THIS ALLOCATION           05740000
+         CS    R2,R0,SL2UREQS     INTERLOCKED UPDATE                    05750000
+         BNE   *-8                RETRY                                 05760000
+                                                                        05770000
+         CLM   R8,B'0010',ICTZERO STORAGE ACQUIRED BELOW THE 16M LINE?  05780000
+         BE    STATB16M           SKIP IF NOT                           05790000
+         L     R2,SL2UB16M        REQS BELOW THE 16M LINE               05800000
+         LA    R0,1(,R2)          ACCOUNT FOR THIS ALLOCATION           05810000
+         CS    R2,R0,SL2UB16M     INTERLOCKED UPDATE                    05820000
+         BNE   *-8                RETRY                                 05830000
+STATB16M DS    0H                                                       05840000
+                                                                        05850000
+         EJECT                                                          05860000
+***************************************************************         05870000
+*                                                                       05880000
+*   RETURN ACQUIRED STORAGE TO REQUESTOR                                05890000
+*                                                                       05900000
+***************************************************************         05910000
+GET_CPT  DS    0H                 R1 <== $ISTOR                         05920000
+         LA    R15,RC00           SUCCESSFUL COMPLETION                 05930000
+                                                                        05940000
+         CLM   R8,8,=AL1(ICTSTES2)                                      05950000
+         BL    GET_SET            TRACING NOT DONE AT LOWER DIAG LEVELS 05960000
+         EREG  R14,R14            RECOVER CALLERS RETURN ADDRESS        05970000
+         LR    R0,R14             CALLERS ADDRESS AS PARM               05980000
+         BAS   R14,TRACEREC       JOURNAL SUCCESSFUL COMPLETION         05990000
+                                                                        06000000
+GET_SET  DS    0H                                                       06010000
+         LR    R0,R3              COMPUTE LENGTH OF USER AREA           06020000
+         SH    R0,=AL2($ISHDRLN)  BY BACKING OUT HEADER LENGTH          06030000
+         CLM   R8,8,ICTZERO       STG BLOCK FRAMING AND OVERLAY TESTS?  06040000
+         BE    *+8                SKIP IF NOT                           06050000
+         SH    R0,=H'4'           USER REMAINS UNAWARE                  06060000
+                                                                        06070000
+         LA    R1,$ISAVAIL        RETURN ADDR OF USER AREA              06080000
+         B     GET_RET            REQUEST COMPLETE                      06090000
+         DROP  R1                 $ISTOR                                06100000
+                                                                        06110000
+*--------------------------------------------------------------         06120000
+*   RETURN STORAGE AND COMPLETION STATUS TO REQUESTOR                   06130000
+*--------------------------------------------------------------         06140000
+GET_COND DS    0H                 STORAGE REQUEST FAILED                06150000
+         TM    =AL1(CONDYES),*-*  EX OBJECT                             06160000
+         EX    R8,*-4             COND=YES SPECIFIED?                   06170000
+         BZ    ABN_FAIL           TERMINATE OTHERWISE                   06180000
+                                                                        06190000
+         CLM   R8,8,=AL1(ICTSTES2)                                      06200000
+         BL    GET_RET            TRACING NOT DONE AT LOWER DIAG LEVELS 06210000
+         SR    R1,R1              $ISTOR NOT AVAILABLE                  06220000
+         EREG  R14,R14            RECOVER CALLERS RETURN ADDRESS        06230000
+         LR    R0,R14             CALLERS ADDRESS AS PARM               06240000
+         BAS   R14,TRACEREC       JOURNAL THE FAILURE                   06250000
+                                                                        06260000
+GET_RET  DS    0H                 R1 <== ADDR, R0 <== LENGTH            06270000
+         PR    ,                  RESTORE CALLERS ENV AND RETURN        06280000
+                                                                        06290000
+         EJECT                                                          06300000
+***************************************************************         06310000
+*                                                                       06320000
+*   CATASTROPHIC FAILURES                                               06330000
+*                                                                       06340000
+***************************************************************         06350000
+ABN_FAIL DS    0H                                                       06360000
+         LA    R2,ABE_STORAGE                                           06370000
+         LR    R15,R2             COMPLETION CODE                       06380000
+         SR    R1,R1              $ISTOR NOT AVAILABLE                  06390000
+         EREG  R14,R14            RECOVER CALLERS RETURN ADDRESS        06400000
+         LR    R0,R14             CALLERS ADDRESS                       06410000
+         BAS   R14,TRACEREC                                             06420000
+                                                                        06430000
+         $ABEND (R2),(R3),DUMP=YES,                                    X06440000
+               TITLE='STORAGE MANAGEMENT FAILURE'                       06450000
+                                                                        06460000
+ABN_ENV  DS    0H                                                       06470000
+         LA    R2,ABE_ENV                                               06480000
+         LR    R15,R2             COMPLETION CODE                       06490000
+         SR    R1,R1              $ISTOR NOT AVAILABLE                  06500000
+         EREG  R14,R14            RECOVER CALLERS RETURN ADDRESS        06510000
+         LR    R0,R14             CALLERS ADDRESS                       06520000
+         BAS   R14,TRACEREC                                             06530000
+                                                                        06540000
+         $ABEND (R2),DUMP=NO,                                          X06550000
+               TITLE='$GETSTOR - INVALID SERVICE ENVIRONMENT'           06560000
+                                                                        06570000
+ABN_REQ  DS    0H                                                       06580000
+         LA    R2,ABE_STGREQ                                            06590000
+         LR    R15,R2             COMPLETION CODE                       06600000
+         SR    R1,R1              $ISTOR NOT AVAILABLE                  06610000
+         EREG  R14,R14            RECOVER CALLERS RETURN ADDRESS        06620000
+         LR    R0,R14             CALLERS ADDRESS                       06630000
+         BAS   R14,TRACEREC                                             06640000
+                                                                        06650000
+         $ABEND (R2),DUMP=YES,                                         X06660000
+               TITLE='$GETSTOR - INVALID STORAGE LENGTH'                06670000
+                                                                        06680000
+         EJECT                                                          06690000
+***************************************************************         06700000
+*                                                                       06710000
+* ROUTINE: TRACEREC - WRITE STORAGE MGR TRACE RECORD                    06720000
+*                                                                       06730000
+* ON ENTRY:                                                             06740000
+*                                                                       06750000
+*    R15 - COMPLETION CODE OR $ABEND CODE                               06760000
+*    R0  - CALLERS REQUEST (RETURN) ADDRESS                             06770000
+*    R1  - $ISTOR ADDRESS OR ZERO                                       06780000
+*                                                                       06790000
+* ON EXIT:                                                              06800000
+*                                                                       06810000
+*    REGISTERS R15-R1 ARE RESTORED                                      06820000
+*                                                                       06830000
+***************************************************************         06840000
+TRACEREC DS    0H                                                       06850000
+         BAKR  R14,0                                                    06860000
+         LR    R7,R15                                                   06870000
+         LR    R8,R0                                                    06880000
+         LR    R9,R1                                                    06890000
+                                                                        06900000
+         ICM   R0,15,#TRCREC      TRACE SERVICE AVAILABLE?              06910000
+         BZ    TRACEFIN           FAST OUT IF NOT                       06920000
+                                                                        06930000
+*-------------------------------------------------------------          06940000
+*   CUT THE TRACE RECORD LOGGING $ISTOR DATA IF PROVIDED                06950000
+*-------------------------------------------------------------          06960000
+I        USING $ISTOR,R9                                                06970000
+                                                                        06980000
+         $TRACE *=A(TRC_STG_GET),STORTRLN,FORCE=(R7),STDENV=(R10)       06990000
+         BNZ   TRACEFIN                                                 07000000
+                                                                        07010000
+         USING STORTRAC,R1                                              07020000
+         ST    R7,STRCCOMP        COMPLETION CODE                       07030000
+         ST    R8,STRCALLR        POST IN TRACE RECORD                  07040000
+                                                                        07050000
+         LTR   R9,R9              $ISTOR PROVIDED?                      07060000
+         BZ    TRACEFIN           DONE IF NOT                           07070000
+                                                                        07080000
+         ST    R9,STRCBLK                                               07090000
+         MVC   STRCTYPE,I.$ISTYPE                                       07100000
+         MVC   STRCTOTL,I.$ISTOTLN                                      07110000
+         MVC   STRCQHDR,I.$ISTQHDR                                      07120000
+         MVC   STRCWU,I.$ISTWU                                          07130000
+         DROP  I,R1               $ISTOR, STORTRAC                      07140000
+                                                                        07150000
+*-------------------------------------------------------------          07160000
+*   RESTORE CALLERS STATUS REGS AND RETURN                              07170000
+*-------------------------------------------------------------          07180000
+TRACEFIN DS    0H                                                       07190000
+         LR    R15,R7                                                   07200000
+         LR    R0,R8                                                    07210000
+         LR    R1,R9                                                    07220000
+         PR    ,                                                        07230000
+                                                                        07240000
+         EJECT                                                          07250000
+**<DOC-ON>*****************************************************         07260000
+*                                                                       07270000
+* ROUTINE: L1L2LOC - Locate SL1ENTRY & SL2ENTRY by storage size         07280000
+*                                                                       07290000
+* DESCRIPTION:                                                          07300000
+*                                                                       07310000
+*    This routine accepts a storage length and returns the              07320000
+*    corresponding SL1ENTRY and SL2ENTRY structures jointly             07330000
+*    responsible for managing storage blocks of that size.              07340000
+*                                                                       07350000
+* NOTES:                                                                07360000
+*                                                                       07370000
+*    No saveareas used, R15-R2 are modified.                            07380000
+*                                                                       07390000
+*                                                                       07400000
+* ON ENTRY:                                                             07410000
+*                                                                       07420000
+*    R0 - size of storage area (unsigned)                               07430000
+*                                                                       07440000
+*                                                                       07450000
+* ON EXIT:                                                              07460000
+*                                                                       07470000
+*    R15 contains one of the following return codes.                    07480000
+*        The condition code is set accordingly.                         07490000
+*                                                                       07500000
+*        RC00 - normal completion                                       07510000
+*                                                                       07520000
+*               R1 - addr of SL1ENTRY                                   07530000
+*               R2 - addr of SL2ENTRY                                   07540000
+*                                                                       07550000
+*        RC04 - Storage management block not yet allocated              07560000
+*                                                                       07570000
+*        RC08 - ERROR: (SIZE < 2) OR (SIZE > 16M)                       07580000
+*                                                                       07590000
+**<DOC-OFF>****************************************************         07600000
+                                                                        07610000
+L1L2LOC  DS    0H                                                       07620000
+         ICM   R15,15,ICTXTANC         LOCATE STORAGE MANAGEMENT BLOCK  07630000
+         BZ    L1L2WARN                NOT YET INITIALIZED              07640000
+         USING STANCHOR,R15            DECLARE INTENTIONS               07650000
+                                                                        07660000
+         CLM   R0,B'1000',ICTZERO      LENGTH SATISIFIES CONSTRAINTS?   07670000
+         BNE   L1L2ERR                 REQUEST REJECTED IF NOT          07680000
+         BCTR  R0,0                    REQ LENGTH MINUS 1               07690000
+         LTR   R2,R0                   SPLIT HIGH ORDER / LOW ORDER     07700000
+         BNP   L1L2ERR                 INVALID REQUEST                  07710000
+                                                                        07720000
+*--------------------------------------------------------------         07730000
+*   LOCATE SUBPOOL SUMMARY TABLE SL1ENTRY                               07740000
+*--------------------------------------------------------------         07750000
+         SRA   R2,8                    HIGH ORDER BYTE OF REQ LENGTH    07760000
+         BNZ   L1L2BIG                 REQUEST AMOUNT > 256 BYTES       07770000
+         LR    R1,R0                   USABLE INDEX REG                 07780000
+         IC    R2,L1L2EXP2(R1)         FETCH LOG2 (SIZE-1) LOW ORDER    07790000
+         B     L1L2COMN                ONWARD                           07800000
+                                                                        07810000
+L1L2BIG  DS    0H                                                       07820000
+         IC    R2,L1L2EXP2(R2)         FETCH LOG2 (SIZE-1) HIGH ORDER   07830000
+         LA    R2,8(,R2)               ADJUST EXPONENT ACCORDINGLY      07840000
+                                                                        07850000
+L1L2COMN DS    0H                                                       07860000
+         L     R1,STAHILV1             CHOOSE SL1ENTRY OF LARGEST BLOCK 07870000
+         CH    R2,STAHIEXP             COMPARE EXP2, ASSUMPTION TRUE?   07880000
+         BNL   L1L2PART                LARGE BLOCK SUMMARY CHOSEN IF SO 07890000
+         SLL   R2,4                    ELSE COMPUTE SL1 TABLE INDEX     07900000
+         L     R1,STALVL1              TABLE BASE                       07910000
+         AR    R1,R2                   ASSOCIATED SL1ENTRY              07920000
+                                                                        07930000
+L1       USING SL1ENTRY,R1             SUBPOOL SUMMARY TABLE ENTRY      07940000
+                                                                        07950000
+         TM    L1.SL1ATTRS,SL1A_INACTIVE   ACTIVE ENTRY?                07960000
+         BNO   *+8                     SKIP IF SO                       07970000
+         L     R1,L1.SL1LVL2           ELSE TRAVERSE TO PROXY SL1ENTRY  07980000
+         DROP  R15                     STANCHOR                         07990000
+                                                                        08000000
+*--------------------------------------------------------------         08010000
+*   LOCATE ASSOCIATED PARTITION TABLE SL2ENTRY                          08020000
+*--------------------------------------------------------------         08030000
+L1L2PART DS    0H                                                       08040000
+         L     R2,L1.SL1LVL2           ORIGIN OF ASSOC PARTITION TABLE  08050000
+         CLC   L1.SL1PARTS,=H'1'       SINGLE PARTITION?                08060000
+         BNH   L1L2FIN                 DONE IF SO                       08070000
+                                                                        08080000
+         SH    R0,L1.SL1MIN            CONVERT LENGTH TO INTERVAL SIZE  08090000
+         BNP   L1L2FIN                 LENGTH FALLS IN FIRST PARTITION  08100000
+         LH    R15,L1.SL1SHIFT         INTERVAL -> PARTITION CONVERTER  08110000
+         SRL   R0,0(R15)               ACQUIRE PARTITION INDEX          08120000
+         MH    R0,=AL2(SL2ENTLN)       CONVERT INDEX TO ENTRY OFFSET    08130000
+         AR    R2,R0                   R2 <== SL2ENTRY                  08140000
+         DROP  L1                      R1 <== SL1ENTRY                  08150000
+                                                                        08160000
+*--------------------------------------------------------------         08170000
+*   RETURN TO CALLER                                                    08180000
+*--------------------------------------------------------------         08190000
+L1L2FIN  DS    0H                                                       08200000
+         SR    R15,R15                 NORMAL COMPLETION                08210000
+         B     L1L2RET                 DONE                             08220000
+                                                                        08230000
+L1L2WARN DS    0H                      STGMGMT NOT YET INITIALIZED      08240000
+         LA    R15,RC04                WARNING                          08250000
+         B     L1L2RET                 DONE                             08260000
+                                                                        08270000
+L1L2ERR  DS    0H                      INVALID STORAGE LENGTH PROVIDED  08280000
+         LA    R15,RC08                INDICATE FAILURE                 08290000
+                                                                        08300000
+L1L2RET  DS    0H                      RETURN                           08310000
+         LTR   R15,R15                 SET CC                           08320000
+         BR    R14                     COMPLETE                         08330000
+                                                                        08340000
+         EJECT ,                                                        08350000
+***************************************************************         08360000
+*                                                                       08370000
+*   LOCAL READ ONLY STORAGE                                             08380000
+*                                                                       08390000
+***************************************************************         08400000
+L1L2EXP2 EXP2  ,                       LOG2 (SIZE) RESOLUTION TABLE     08410000
+                                                                        08420000
+         LTORG ,                                                        08430000
+                                                                        08440000
+         PRINT NOGEN                                                    08450000
+         ICVT  ,                                                        08460000
+         ITASK ,                                                        08470000
+                                                                        08480000
+         IHAPSA ,                                                       08490000
+         IKJTCB ,                                                       08500000
+         END   ,                                                        08510000

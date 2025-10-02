@@ -1,0 +1,503 @@
+IWULSERV TITLE 'IWULSERV - WORKUNIT LOCATOR SERVICE ROUTINE'            00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE: IWULSERV - WORKUNIT LOCATOR SERVICE ROUTINE                  00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*   This routine manages the workunit locator entity and                00080000
+*   userdata.  Each workunit ITASK or ITASK.IPCB is a unique            00090000
+*   entity and contains userdata used to locate the workunit            00100000
+*   or manage manage data associated with a workunit even               00110000
+*   while is it not active.  This facility provides two                 00120000
+*   services:                                                           00130000
+*                                                                       00140000
+*     LOCATE:                                                           00150000
+*                                                                       00160000
+*        This function extracts the locator userdata mapped             00170000
+*        by IWUENTUD and returns it in the area provided by             00180000
+*        the caller.                                                    00190000
+*                                                                       00200000
+*     POST:                                                             00210000
+*                                                                       00220000
+*        This function will update the specified components             00230000
+*        of the workunit locator data.  If the workunit                 00240000
+*        entity does not exists, one will be added.  When               00250000
+*        all components of the locator data are set to 0,               00260000
+*        the entity is deleted.                                         00270000
+*                                                                       00280000
+* ON ENTRY:                                                             00290000
+*                                                                       00300000
+*    R1  contains the address of a parameter list mapped by             00310000
+*        WLPLIST, which is expanded via $WULOC DSECT=YES                00320000
+*                                                                       00330000
+* ON EXIT:                                                              00340000
+*                                                                       00350000
+*    R15 CONTAINS ONE OF THE FOLLOWING RETURN CODES                     00360000
+*                                                                       00370000
+*        RC00 - Request completed sucessfully                           00380000
+*                                                                       00390000
+*               R0 = RSN04 - Duplicate entry exists                     00400000
+*                                                                       00410000
+*               ( Workunit status info code returned on LOCATE req )    00420000
+*               R1 = 0 - Workunit active                                00430000
+*                    4 - Workunit in termination status                 00440000
+*                    8 - Workunit is not active                         00450000
+*                                                                       00460000
+*        RC04 - Workunit not found (LOCATE request)                     00470000
+*                                                                       00480000
+*        RC08 - $ENTITY service error                                   00490000
+*                                                                       00500000
+*               R0 = Return code from $ENTITY                           00510000
+*                                                                       00520000
+*        RC12 - Service failure                                         00530000
+*                                                                       00540000
+*               R0 = RSN04 - Lock obtain failure                        00550000
+*                                                                       00560000
+*        RC20 - Request Error                                           00570000
+*                                                                       00580000
+*               R0 = RSN04 - User data required                         00590000
+*                                                                       00600000
+**<DOC-OFF>****************************************************         00610000
+                                                                        00620000
+***************************************************************         00630000
+*                                                                       00640000
+* MAINTENANCE:                                                          00650000
+*                                                                       00660000
+*    08/13/93 Ron Colmone                                               00670000
+*             Initial Version                                           00680000
+*                                                                       00690000
+*    10/24/94 R. Turgeon                                                00700000
+*             Reduce size of $ENTITY workarea and restructure           00710000
+*             the #WORK working storage area accordingly.               00720000
+*                                                                       00730000
+*    12/16/94 Ron Colmone                                               00740000
+*             Added workunit status information on locate request.      00750000
+*                                                                       00760000
+*    01/19/96 Ron Colmone                                               00770000
+*                                                                       00780000
+*             Added option to WULOC and WUSTAT service to               00790000
+*             in indicate that the caller is holding the                00800000
+*             DISP lock.  When this option is set to TRUE,              00810000
+*             the service will not attempt to acquire the lock.         00820000
+*                                                                       00830000
+***************************************************************         00840000
+                                                                        00850000
+         EJECT ,                                                        00860000
+         $WULOC  DSECT=YES        PARAMETER LIST                        00870000
+                                                                        00880000
+         EJECT ,                                                        00890000
+         IWUENTUD ,               WORKUNIT LOCATE USERDATA              00900000
+                                                                        00910000
+         EJECT ,                                                        00920000
+         $WUSTAT DSECT=YES        WORKUNIT STATUS PLIST                 00930000
+                                                                        00940000
+         EJECT ,                                                        00950000
+         $ENTITY DSECT=YES        $ENTITY SERVICE PLIST                 00960000
+                                                                        00970000
+         EJECT ,                                                        00980000
+         EQUS  ,                  GENERAL EQUATES                       00990000
+                                                                        01000000
+         EJECT ,                                                        01010000
+         #WORK LENGTH=512                                               01020000
+                                                                        01030000
+REGSAVE  DS    16F                REGISTER SAVEAREA                     01040000
+WRK256   DS    XL256              GENERAL WORKAREA                      01050000
+WUIDENT  DS    XL16               WORKUNIT LOCATOR USER DATA            01060000
+ETOKEN   DS    XL8                ENTITY ENTRY TOKEN                    01070000
+                                                                        01080000
+FLAGS    DS    X                  CONTROL FLAGS                         01090000
+$LOCKED  EQU   X'80'                DISP LOCK ACQUIRED                  01100000
+$ENTFND  EQU   X'40'                ENTITY ENTRY EXISTS                 01110000
+$DUPENT  EQU   X'20'                DUPLICATE ENTITY                    01120000
+                                                                        01130000
+$ENT_MFL $ENTITY MF=(L,*)         ENTITY MANAGER  PLIST                 01140000
+$WST_MFL $WUSTAT MF=(L,*)         WORKUNIT STATUS PLIST                 01150000
+                                                                        01160000
+         #ENDWORK ,               END OF WORKAREA                       01170000
+                                                                        01180000
+         EJECT                                                          01190000
+IWULSERV #ENTER BASE=R12,PREG=R8,WAPASS=YES                             01200000
+                                                                        01210000
+         USING ITASK,R10          ITASK ADDRESSABILITY                  01220000
+         USING WLPLIST,R8         PARAMETER LIST                        01230000
+                                                                        01240000
+*---------------------------------------------------------------        01250000
+                                                                        01260000
+         SR    R2,R2              PREPARE FOR INSERT                    01270000
+         IC    R2,WLPLREQ         OBTAIN REQUESTED FUNCTION CODE        01280000
+         BCTR  R2,0               CONVERT TO INDEX                      01290000
+         SLL   R2,2                                                     01300000
+                                                                        01310000
+         B     *+4(R2)            BRANCH ON REQUEST CODE                01320000
+         B     LOCATE             LOCATE REQUEST                        01330000
+         B     POST               POST   REQUEST                        01340000
+         EX    0,*                UNSUPPORTTED                          01350000
+         EX    0,*                UNSUPPORTTED                          01360000
+         EX    0,*                UNSUPPORTTED                          01370000
+                                                                        01380000
+         EJECT ,                                                        01390000
+****************************************************************        01400000
+*                                                                       01410000
+*  LOCATE ENTITY ENTRY FOR WORKUNIT AND RETURN LOCATOR INFORMATION      01420000
+*                                                                       01430000
+****************************************************************        01440000
+LOCATE   DS    0H                                                       01450000
+         BAS   R14,GETLOCK        OBTAIN DISPATCHER LOCK                01460000
+         BNZ   ERR_LOCK           LOCK FAILURE                          01470000
+                                                                        01480000
+         BAS   R14,EXTRDATA       EXTRACT ENTITY USERDATA               01490000
+         BNZ   WRN_NF             ENTRY NOT FOUND                       01500000
+                                                                        01510000
+         LTR   R0,R0              DUPLICATE ENTRY                       01520000
+         BZ    *+8                NO, CONTINUE                          01530000
+         OI    FLAGS,$DUPENT      DUPLICATE ENTITY ENTRY                01540000
+         LR    R3,R0              RETAIN DUP INDICATOR                  01550000
+                                                                        01560000
+         ICM   R1,15,WLPLUDAT     ADDRESS OF USER DATA AREA             01570000
+         BZ    *+10               NO USER DATA AREA PROVIDED            01580000
+         MVC   0(WUDLN,R1),WUIDENT  RETURN USER DATA                    01590000
+                                                                        01600000
+         ICM   R1,15,WLPLTKN@     ADDRESS OF TOKEN                      01610000
+         BZ    *+10               NO TOKEN AREA PROVIDED                01620000
+         MVC   0(L'ETOKEN,R1),ETOKEN RETURN ENTITY ENTRY TOKEN          01630000
+                                                                        01640000
+*---------------------------------------------------------------        01650000
+*  DETERMINE STATUS OF WORKUNIT                                         01660000
+*---------------------------------------------------------------        01670000
+U        USING IWUENTUD,WUIDENT   USERDATA TEMP ADDRESSABILITY          01680000
+         ICM   R2,15,U.WUDIPCB    PCB WORKUNIT ACTIVE                   01690000
+         BNZ   LOC_STAT           YES, RETRIEVE WORKUNIT STATUS         01700000
+         ICM   R2,15,U.WUDITASK   TASK WORKUNIT ACTIVE                  01710000
+         BZ    LOC_NACT           NO, WORKUNIT NOT ACTIVE               01720000
+                                                                        01730000
+LOC_STAT DS    0H                                                       01740000
+         $WUSTAT TEST,            TEST WORKUNIT STATUS                 +01750000
+               WU=(R2),                                                +01760000
+               ACTIVE=LOC_ACTV,                                        +01770000
+               LOCKED=YES,                                             +01780000
+               TERM=LOC_TERM,                                          +01790000
+               WKA=WRK256,                                             +01800000
+               MF=(E,$WST_MFL)                                          01810000
+                                                                        01820000
+LOC_NACT DS    0H                                                       01830000
+         LA    R1,8               WORKUNIT NOT ACTIVE                   01840000
+         LR    R0,R3              RESTORE DUPICATE ENTRY IND            01850000
+         B     RET_OK             RETURN                                01860000
+                                                                        01870000
+LOC_TERM DS    0H                                                       01880000
+         LA    R1,4               WORKUNIT IN TERMINATION PROCESS       01890000
+         LR    R0,R3              RESTORE DUPICATE ENTRY IND            01900000
+         B     RET_OK             RETURN                                01910000
+                                                                        01920000
+LOC_ACTV DS    0H                                                       01930000
+         LA    R1,0               WORKUNIT ACTIVE                       01940000
+         LR    R0,R3              RESTORE DUPICATE ENTRY IND            01950000
+         B     RET_OK             RETURN                                01960000
+                                                                        01970000
+         DROP  U                  IWUENTUD                              01980000
+                                                                        01990000
+         EJECT ,                                                        02000000
+****************************************************************        02010000
+*                                                                       02020000
+*  POST WORKUNIT LOCATOR INFO WORKUNIT ENTITY USERDATA.  IF             02030000
+*  ENTITY ENTRY EXIST,  UPDATE OR DELETE ENTITY ENTRY.  IF              02040000
+*  ENTITY ENTRY IS NOT AVAILABLE, THEN ADD ENTITY ENTRY.                02050000
+*                                                                       02060000
+****************************************************************        02070000
+POST     DS    0H                                                       02080000
+         BAS   R14,GETLOCK        OBTAIN DISPATCHER LOCK                02090000
+         BNZ   ERR_LOCK           LOCK FAILURE                          02100000
+                                                                        02110000
+         BAS   R14,EXTRDATA       EXTRACT ENTITY USERDATA               02120000
+         BNZ   POST_CHG           ENTITY NOT FOUND                      02130000
+         OI    FLAGS,$ENTFND      INDICATE ENTRY EXISTS                 02140000
+                                                                        02150000
+         LTR   R0,R0              DUPLICATE ENTRY                       02160000
+         BZ    POST_CHG           NO, CONTINUE                          02170000
+         OI    FLAGS,$DUPENT      DUPLICATE ENTITY ENTRY                02180000
+                                                                        02190000
+*---------------------------------------------------------------        02200000
+*  UPDATE WORKUNIT LOCATOR USERDATA                                     02210000
+*---------------------------------------------------------------        02220000
+POST_CHG DS    0H                                                       02230000
+         LA    R4,WUIDENT         ADDRESS OF CURRENT LOCATOR INFO       02240000
+O        USING IWUENTUD,R4        ADDRESSABILITY                        02250000
+                                                                        02260000
+         ICM   R5,15,WLPLUDAT     ADDRESS OF UPDATE INFO                02270000
+         BZ    ERR_UDAT           ERROR,  USER DATA REQ ON POST         02280000
+N        USING IWUENTUD,R5        ADDRESSABILITY                        02290000
+                                                                        02300000
+         CLC   N.WUDITASK,OMITTED ITASK VALUE PROVIDED?                 02310000
+         BE    *+10               NO,  BYPASS UPDATE                    02320000
+         MVC   O.WUDITASK,N.WUDITASK   UPDATE ITASK ADDRESS             02330000
+                                                                        02340000
+         CLC   N.WUDIPCB,OMITTED  IPCB VALUE PROVIDED?                  02350000
+         BE    *+10               NO,  BYPASS UPDATE                    02360000
+         MVC   O.WUDIPCB,N.WUDIPCB     UPDATE IPCB ADDRESS              02370000
+                                                                        02380000
+         CLC   N.WUDECM,OMITTED   ECM VALUE PROVIDED?                   02390000
+         BE    *+10               NO,  BYPASS UPDATE                    02400000
+         MVC   O.WUDECM,N.WUDECM       UPDATE ECM ADDRESS               02410000
+                                                                        02420000
+         CLC   N.WUDMSGCL,OMITTED MCM VALUE PROVIDED?                   02430000
+         BE    *+10               NO,  BYPASS UPDATE                    02440000
+         MVC   O.WUDMSGCL,N.WUDMSGCL   UPDATE MCM ADDRESS               02450000
+                                                                        02460000
+         DROP  O,N                IWUENTUD                              02470000
+                                                                        02480000
+*---------------------------------------------------------------        02490000
+*  IF ENTITY ENTRY EXISTS,  THEN VERIFY IF DUPLICATE ENTRIES            02500000
+*  SHOULD BE CREATED FOR POST REQUEST.  IF NOT,  VERIFY IF              02510000
+*  DUPLICATE ENTRY EXISTS AND DUPLICATE IS TO BE DELETED.               02520000
+*  ALL OTHER UPDATE REQUESTS INDICATE THAT THE MOST RECENT              02530000
+*  ENTRY SPECIFIED BY NAME OR TOKEN SHOULD BE UPDATED.                  02540000
+*---------------------------------------------------------------        02550000
+         TM    FLAGS,$ENTFND      ENTITY EXIST IN STRUCTURE             02560000
+         BZ    POST_ADD           NO,  ADD ENTRY IF REQUIRED            02570000
+         L     R0,WLPLDUP         GET DUPLICATE ENTRY OPTION            02580000
+         C     R0,=A(WLPL$ADD)    ADD    DUPLICATE ENTITY               02590000
+         BE    POST_ADD           YES, ADD ENTRY                        02600000
+                                                                        02610000
+         TM    FLAGS,$DUPENT      DUPLICATE ENTRY                       02620000
+         BZ    POST_UPD           NO, CONTINUE WITH UPDATE              02630000
+         C     R0,=A(WLPL$DEL)    DELETE DUPLICATE ENTITY               02640000
+         BE    POST_DEL           YES, DEL ENTRY                        02650000
+                                                                        02660000
+POST_UPD DS    0H                                                       02670000
+         OC    WUIDENT,WUIDENT    USERDATA AVAILABLE?                   02680000
+         BZ    POST_DEL           NO,  DELETE ENTITY ENTRY              02690000
+                                                                        02700000
+         BAS   R14,POSTDATA       POST USERDATA TO ENTITY ENTRY         02710000
+         BNZ   ERR_ENTY           ENTITY UPDATE FAILED                  02720000
+         B     POST_RET           RETURN                                02730000
+                                                                        02740000
+POST_DEL DS    0H                                                       02750000
+         BAS   R14,DELENTRY       DELETE VACATED ENTRY                  02760000
+         BNZ   ERR_ENTY           ENTITY DELETE FAILED                  02770000
+         B     POST_RET           RETURN                                02780000
+                                                                        02790000
+*---------------------------------------------------------------        02800000
+*  ENTITY ENTRY DOES NOT EXIST IN STRUCTURE, ADD ENTRY IF NECESSARY     02810000
+*---------------------------------------------------------------        02820000
+POST_ADD DS    0H                                                       02830000
+         OC    WUIDENT,WUIDENT    USERDATA AVAILABLE?                   02840000
+         BZ    POST_RET           NO,  RETURN NORMAL                    02850000
+                                                                        02860000
+         BAS   R14,ADDENTRY       ADD ENTITY ENTRY                      02870000
+         BNZ   ERR_ENTY           ENTITY ADD FAILURE                    02880000
+                                                                        02890000
+POST_RET DS    0H                                                       02900000
+         ICM   R1,15,WLPLTKN@     TOKEN ADDRESS PROVIDED                02910000
+         BZ    *+10               NO, CONTINUE                          02920000
+         MVC   0(L'ETOKEN,R1),ETOKEN  RETURN ENTRY TOKEN                02930000
+                                                                        02940000
+         B     RET_OK             RETURN                                02950000
+                                                                        02960000
+         EJECT ,                                                        02970000
+***************************************************************         02980000
+*                                                                       02990000
+*   RETURN COMPLETION STATUS TO CALLER                                  03000000
+*                                                                       03010000
+***************************************************************         03020000
+WRN_NF   DS    0H                 WORKUNIT NOT FOUND    (LOC)           03030000
+         LA    R15,RC04           WARNING                               03040000
+         B     RETURN             RETURN                                03050000
+                                                                        03060000
+ERR_LOCK DS    0H                                                       03070000
+         LA    R0,RSN04           LOCK FAILURE                          03080000
+         LA    R15,RC12           SERVICE ERROR                         03090000
+         B     RETURN             RETURN                                03100000
+                                                                        03110000
+ERR_ENTY DS    0H                 ENTITY SERVICE FAILURE                03120000
+         LR    R0,R15             ENTITY MANAGER RETURN CODE            03130000
+         LA    R15,RC08           ENTITY FAILURE                        03140000
+         B     RETURN             RETURN                                03150000
+                                                                        03160000
+ERR_UDAT DS    0H                                                       03170000
+         LA    R0,RSN04           USER DATA REQUIRED ON POST            03180000
+         LA    R15,RC20           REQUEST ERROR                         03190000
+         B     RETURN             RETURN                                03200000
+                                                                        03210000
+RET_OK   DS    0H                                                       03220000
+         LA    R14,RC00           NORMAL COMPLETION                     03230000
+         LA    R0,RSN00           ASSUME NO DUPLICATE ENTRY             03240000
+         TM    FLAGS,$DUPENT      DUPLICATE ENTRY EXIST                 03250000
+         BZ    RETURN             NO, RETURN                            03260000
+         LA    R0,RSN04           INDICATE DUPLICATE ENTRY              03270000
+                                                                        03280000
+RETURN   DS    0H                                                       03290000
+         BAS   R14,RELLOCK        RELEASE DISPATCHER LOCK               03300000
+                                                                        03310000
+         #EXIT ,                  RETURN                                03320000
+                                                                        03330000
+         EJECT ,                                                        03340000
+**************************************************************          03350000
+*                                                                       03360000
+* ROUTINE: GETLOCK - OBTAIN DISPATCHER LOCK                             03370000
+*                                                                       03380000
+**************************************************************          03390000
+GETLOCK  DS    0H                                                       03400000
+         STM   R0,R15,REGSAVE     SAVE CALLER'S REGISTERS               03410000
+                                                                        03420000
+         CLI   WLPLLOCK,FALSE     LOCK OBTAINED BY CALLER?              03430000
+         BNE   LOCK_HAV           YES, SKIP LOCK OBTAIN                 03440000
+                                                                        03450000
+         $SER  OBTAIN,DISP        ACQUIRE DISP LOCK                     03460000
+         B     *+4(R15)           BRANCH ON RETURN CODE                 03470000
+         B     LOCK_ACQ           OK, LOCK ACQUIRED                     03480000
+         B     LOCK_HAV           LOCK ALREADY OWNED                    03490000
+         B     LOCK_RET           ERROR ACQUIRING LOCK                  03500000
+                                                                        03510000
+LOCK_ACQ DS    0H                                                       03520000
+         OI    FLAGS,$LOCKED      LOCK ACQUIRED                         03530000
+                                                                        03540000
+LOCK_HAV DS    0H                                                       03550000
+         LA    R15,RC00           NORMAL COMPLETION                     03560000
+                                                                        03570000
+LOCK_RET DS    0H                                                       03580000
+         LM    R0,R14,REGSAVE     RESTORE CALLER'S REGISTERS            03590000
+         LTR   R15,R15            SET CONDITION CODE                    03600000
+         BR    R14                RETURN                                03610000
+                                                                        03620000
+         EJECT ,                                                        03630000
+**************************************************************          03640000
+*                                                                       03650000
+* ROUTINE: RELLOCK - RELEASE DISPATCHER LOCK                            03660000
+*                                                                       03670000
+**************************************************************          03680000
+RELLOCK  DS    0H                                                       03690000
+         STM   R0,R15,REGSAVE     SAVE CALLER'S REGISTERS               03700000
+                                                                        03710000
+         TM    FLAGS,$LOCKED      LOCK ACQUIRED?                        03720000
+         BZ    RLK_EXIT           NO RETURN                             03730000
+                                                                        03740000
+         $SER  RELEASE,DISP       RELEASE DISP LOCK                     03750000
+                                                                        03760000
+RLK_EXIT DS    0H                                                       03770000
+         LM    R0,R15,REGSAVE     RESTORE CALLER'S REGISTERS            03780000
+         BR    R14                RETURN                                03790000
+                                                                        03800000
+         EJECT ,                                                        03810000
+**************************************************************          03820000
+*                                                                       03830000
+* ROUTINE: EXTRACT - EXTRACT USER DATA FROM WORKUNIT ENTITY             03840000
+*                                                                       03850000
+**************************************************************          03860000
+EXTRDATA DS    0H                                                       03870000
+         STM   R0,R15,REGSAVE     SAVE CALLER'S REGISTER                03880000
+                                                                        03890000
+         SR    R2,R2              ASSUME LOOKUP BY TASK NAME            03900000
+         ICM   R0,15,WLPLTSKN     TASK NAME SPECIFIED                   03910000
+         BNZ   *+8                YES, CONTINUE WITH EXTRACT            03920000
+         L     R2,WLPLTKN@        TOKEN LOCATE                          03930000
+                                                                        03940000
+         L     R3,WLPLTSKN        ADDRESS OF TASK NAME                  03950000
+         ICM   R4,15,WLPLPCBN     ADDRESS OF PCB NAME                   03960000
+         BZ    EXTR_ENT           NONE,  LOCATE BY TASK NAME            03970000
+         L     R3,WLPLPCBN        PROCESS NAME IS ENTITY                03980000
+         L     R4,WLPLTSKN        TASK NAME IS QNAME                    03990000
+                                                                        04000000
+EXTR_ENT DS    0H                                                       04010000
+         $ENTITY EXTR,            LOCATE WORKUNIT ENTITY ENTRY         +04020000
+               ENTITY=((R3),L'PCBNAME),                                +04030000
+               QNAME=((R4),L'TSKNAME),                                 +04040000
+               TOKEN=(R2),                                             +04050000
+               USERDATA=WUIDENT,                                       +04060000
+               ANCHOR=ICTENTWU,                                        +04070000
+               WKA=wrk256,                                             +04080000
+               MF=(E,$ENT_MFL)                                          04090000
+         BNZ   EXTR_RET           NOT FOUND, RETURN                     04100000
+                                                                        04110000
+         MVC   ETOKEN,0(R1)       COPY ENTRY TOKEN                      04120000
+                                                                        04130000
+EXTR_RET DS    0H                                                       04140000
+         LM    R1,R14,REGSAVE+4   RESTORE CALLER'S REGISTERS            04150000
+         LTR   R15,R15            SET CONDITION CODE                    04160000
+         BR    R14                RETURN                                04170000
+                                                                        04180000
+         EJECT ,                                                        04190000
+**************************************************************          04200000
+*                                                                       04210000
+* ROUTINE: POST - POST USER DATA TO WORKUNIT ENTITY                     04220000
+*                                                                       04230000
+**************************************************************          04240000
+POSTDATA DS    0H                                                       04250000
+         STM   R0,R15,REGSAVE     SAVE CALLER'S REGISTER                04260000
+                                                                        04270000
+         $ENTITY POST,            LOCATE WORKUNIT ENTITY ENTRY         +04280000
+               TOKEN=ETOKEN,                                           +04290000
+               USERDATA=WUIDENT,                                       +04300000
+               ANCHOR=ICTENTWU,                                        +04310000
+               WKA=wrk256,                                             +04320000
+               MF=(E,$ENT_MFL)                                          04330000
+                                                                        04340000
+         LM    R0,R14,REGSAVE     RESTORE CALLER'S REGISTERS            04350000
+         LTR   R15,R15            SET CONDITION CODE                    04360000
+         BR    R14                RETURN                                04370000
+                                                                        04380000
+         EJECT ,                                                        04390000
+**************************************************************          04400000
+*                                                                       04410000
+* ROUTINE: ADD - ADD WORKUNIT ENTITY ENTRY                              04420000
+*                                                                       04430000
+**************************************************************          04440000
+ADDENTRY DS    0H                                                       04450000
+         STM   R0,R15,REGSAVE     SAVE CALLER'S REGISTER                04460000
+                                                                        04470000
+         L     R3,WLPLTSKN        ADDRESS OF TASK NAME                  04480000
+         ICM   R4,15,WLPLPCBN     ADDRESS OF PCB NAME                   04490000
+         BZ    ADD_ENT            NONE,  LOCATE BY TASK NAME            04500000
+         L     R3,WLPLPCBN        PROCESS NAME IS ENTITY                04510000
+         L     R4,WLPLTSKN        TASK NAME IS QNAME                    04520000
+                                                                        04530000
+ADD_ENT  DS    0H                                                       04540000
+         $ENTITY ADD,             ADD WORKUNIT ENTITY ENTRY            +04550000
+               ENTITY=((R3),L'PCBNAME),                                +04560000
+               QNAME=((R4),L'PCBNAME),                                 +04570000
+               TOKEN=ETOKEN,                                           +04580000
+               USERDATA=WUIDENT,                                       +04590000
+               ANCHOR=ICTENTWU,                                        +04600000
+               WKA=wrk256,                                             +04610000
+               MF=(E,$ENT_MFL)                                          04620000
+                                                                        04630000
+         LM    R0,R14,REGSAVE     RESTORE CALLER'S REGISTERS            04640000
+         LTR   R15,R15            SET CONDITION CODE                    04650000
+         BR    R14                RETURN                                04660000
+                                                                        04670000
+         EJECT ,                                                        04680000
+**************************************************************          04690000
+*                                                                       04700000
+* ROUTINE: DELETE - DELETE WORKUNIT ENTITY ENTRY                        04710000
+*                                                                       04720000
+**************************************************************          04730000
+DELENTRY DS    0H                                                       04740000
+         STM   R0,R15,REGSAVE     SAVE CALLER'S REGISTER                04750000
+                                                                        04760000
+         $ENTITY DEL,             DELETE WORKUNIT ENTITY ENTRY         +04770000
+               TOKEN=ETOKEN,                                           +04780000
+               ANCHOR=ICTENTWU,                                        +04790000
+               WKA=wrk256,                                             +04800000
+               MF=(E,$ENT_MFL)                                          04810000
+                                                                        04820000
+         LM    R0,R14,REGSAVE     RESTORE CALLER'S REGISTERS            04830000
+         LTR   R15,R15            SET CONDITION CODE                    04840000
+         BR    R14                RETURN                                04850000
+                                                                        04860000
+         EJECT ,                                                        04870000
+***************************************************************         04880000
+*                                                                       04890000
+*   LOCAL READ/ONLY DATA AREAS, ETC.                                    04900000
+*                                                                       04910000
+***************************************************************         04920000
+OMITTED  DC    F'-1'              VALUE OMITTED                         04930000
+                                                                        04940000
+         LTORG ,                                                        04950000
+                                                                        04960000
+         PRINT NOGEN                                                    04970000
+         ICVT  ,                                                        04980000
+         ITASK ,                                                        04990000
+         IPCB  ,                                                        05000000
+         PRINT GEN                                                      05010000
+                                                                        05020000
+         END   ,                                                        05030000

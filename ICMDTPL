@@ -1,0 +1,992 @@
+ICMDTPL  TITLE 'INTEGRATOR - TPLIMITS COMMAND PROCESSOR'                00010000
+                                                                        00020000
+         L62INCL ,                                                      00030000
+         CMINCL ,                                                       00040000
+                                                                        00050000
+**<DOC-ON>************************************************************* 00060000
+*                                                                       00070000
+*     ROUTINE: ICMDTPL - INTEGRATOR TPLIMITS COMMAND PROCESSOR          00080000
+*                                                                       00090000
+* DESCRIPTION: THIS ROUTINE PROCESSES THE VARIOUS FORMS OF THE TPLIMITS 00100000
+*              COMMAND WHICH IS USED TO CONTROL/DISPLAY THE SESSION     00110000
+*              LIMITS FOR LU6.2 SESSIONS.                               00120000
+*                                                                       00130000
+*      SYNTAX: TPLIMITS DISPLAY PARTNER() MODE()                        00140000
+*              TPLIMITS RESET   PARTNER() MODE()                        00150000
+*              TPLIMITS SET     PARTNER() MODE() TOTAL() WIN() LOSE()   00160000
+*                                                                       00170000
+* ON ENTRY:                                                             00180000
+*                                                                       00190000
+*    R15 = ENTRY POINT ADDRESS                                          00200000
+*    R14 = RETURN      ADDRESS                                          00210000
+*    R13 = SAVE AREA   ADDRESS                                          00220000
+*    R11 = ICVT        ADDRESS                                          00230000
+*    R10 = ITASK       ADDRESS                                          00240000
+*    R01 = CMDREQ      ADDRESS                                          00250000
+*                                                                       00260000
+* ON EXIT:                                                              00270000
+*                                                                       00280000
+*    R15 = 0                                                            00290000
+*    R00 = 0                                                            00300000
+*    R01 = 0                                                            00310000
+*                                                                       00320000
+*    ALL OTHER REGISTERS ARE RESTORED.                                  00330000
+*                                                                       00340000
+**<DOC-OFF>************************************************************ 00350000
+                                                                        00360000
+*********************************************************************** 00370000
+*                                                                       00380000
+* MAINTENANCE:                                                          00390000
+*                                                                       00400000
+*   10/10/94 RANDY WITEK                                                00410000
+*                                                                       00420000
+*********************************************************************** 00430000
+                                                                        00440000
+         EQUS  ,                  GENERAL EQUATES                       00450000
+                                                                        00460000
+RICVT    EQU   R11                                                      00470000
+RITASK   EQU   R10                                                      00480000
+RIVTAM   EQU   R9                                                       00490000
+RCMDREQ  EQU   R8                                                       00500000
+RCCSUMRY EQU   R7                                                       00510000
+RIVUSER  EQU   R6                                                       00520000
+RMDE     EQU   R5                                                       00530000
+                                                                        00540000
+         USING ICVT,RICVT         ESTABLISH ADDRESSABILITY              00550000
+         USING ITASK,RITASK       ESTABLISH ADDRESSABILITY              00560000
+         USING IVTAMCVT,RIVTAM    ESTABLISH ADDRESSABILITY              00570000
+         USING CMDREQ,RCMDREQ     ESTABLISH ADDRESSABILITY              00580000
+         USING CCSUMRY,RCCSUMRY   ESTABLISH ADDRESSIBILITY              00590000
+         USING IVUSER,RIVUSER     ESTABLISH ADDRESSIBILITY              00600000
+         USING MDE,RMDE           ESTABLISH ADDRESSIBILITY              00610000
+                                                                        00620000
+WORKAREA #WORK ,                  READ/WRITE WORKAREA                   00630000
+WRK256   DS    XL256              GENERAL WORKAREA                      00640000
+SUB0SAVE DS    18F                SUBROUTINE SAVE AREA                  00650000
+SUB1SAVE DS    18F                SUBROUTINE SAVE AREA                  00660000
+L62MFL   L62CSL MF=L              PARM LIST CONSTRUCTION                00670000
+L62RETPB DS    F                  IVUSER/PLB RETURN AREA                00680000
+L62RETMD DS    F                  MDE RETURN AREA                       00690000
+L62RETCD DS    F                  RETURN CODE AREA                      00700000
+                                                                        00710000
+KMDNAME  DS    CL8                REQUEST NAME                          00720000
+KMDSTAT  DS    CL8                COMMAND COMPLETION STATUS             00730000
+KMDRSN   DS    CL32               COMMAND FAILURE REASON                00740000
+                                                                        00750000
+KMDREQ   DS    XL(L'CCSID)        REQUEST CODE                          00760000
+KMDPART  DS    CL(L'IVULOCAL)     PARTNER NAME                          00770000
+KMDMODE  DS    CL(L'MDENAME)      MODE NAME                             00780000
+KMDTOT   DS    CL8                TOTAL SESSIONS                        00790000
+KMDWIN   DS    CL8                CONWINNER SESSIONS                    00800000
+KMDLOSE  DS    CL8                CONLOSER SESSIONS                     00810000
+KMD#TOT  DS    F                  TOTAL SESSIONS     (BINARY)           00820000
+KMD#WIN  DS    F                  CONWINNER SESSIONS (BINARY)           00830000
+KMD#LOSE DS    F                  CONLOSER SESSIONS  (BINARY)           00840000
+                                                                        00850000
+RETR15   DS    F                                                        00860000
+RETR0    DS    F                                                        00870000
+RETR1    DS    F                                                        00880000
+RETREGS  EQU   RETR15,*-RETR15    INCLUSIVE SYMBOL                      00890000
+                                                                        00900000
+LOCALNM  DS    CL8                                                      00910000
+LOCALFQ  DS    CL17                                                     00920000
+FLAG     DS    X                                                        00930000
+FLAGLOCK EQU   X'80'              VTAM GLOBAL LOCK HELD                 00940000
+FLAGLCKD EQU   X'40'              VTAM GLOBAL LOCK HELD ON ENTRY        00950000
+FLAGPART EQU   X'20'              PARTNER SPECIFIED                     00960000
+FLAGMODE EQU   X'10'              MODE    SPECIFIED                     00970000
+FLAGTOT  EQU   X'08'              TOTAL   SPECIFIED                     00980000
+FLAGWIN  EQU   X'04'              WIN     SPECIFIED                     00990000
+FLAGLOSE EQU   X'02'              LOSE    SPECIFIED                     01000000
+WORKLEN  #ENDWORK                 END OF WORKAREA                       01010000
+                                                                        01020000
+         $MSGDFT PREFIX=ICTPID,                                        +01030000
+               COMPID='CMD',                                           +01040000
+               TABLE=*#MSGS,                                           +01050000
+               WORKA=0,                                                +01060000
+               CONID=*CMRQCNID,CONNAME=CMRQCNAM,CART=CMRQCART,         +01070000
+               DESTADD=*CMRQDMSK,                                      X01080000
+               MSGQA=*CMRQMQA,STGQH=*CMRQSTGQ,                         +01090000
+               MF=(E,WRK256),                                          +01100000
+               PRINT=NOGEN                                              01110000
+                                                                        01120000
+ICMDTPL  #ENTER BASE=R12,                                              +01130000
+               PREG=(RCMDREQ),     R1 --> RCMDREQ                      +01140000
+               AMODE=31,                                               +01150000
+               RMODE=ANY                                                01160000
+                                                                        01170000
+*--------------------------------------------------------------         01180000
+* INITIALIZATION                                                        01190000
+*--------------------------------------------------------------         01200000
+                                                                        01210000
+         L     RIVTAM,ICTVTCVT      VTAM CVT                            01220000
+X        USING IACB,R1                                                  01230000
+         L     R1,IVTACB62          MAIN 6.2 ACB ******************     01240000
+         MVC   LOCALFQ,X.IACFQNM    SET LOCAL NAME FOR MESSAGES         01250000
+         MVC   LOCALNM,X.IACNAME    SET LOCAL NAME FOR MESSAGES         01260000
+         DROP  X                                                        01270000
+                                                                        01280000
+         MVC   KMDSTAT,=CL8'complete'                                   01290000
+         ICM   RCCSUMRY,15,CMRQSMRY ASSOC COMMAND SUMMARY               01300000
+         BZ    PARSDONE             AMBIGUOUS REQUEST                   01310000
+         ICM   R0,15,CMRQSMR#       TOTAL NUMBER OF OPERAND ENTRIES     01320000
+         BZ    PARSDONE             AMBIGUOUS REQUEST IF ZERO           01330000
+                                                                        01340000
+*---------------------------------------------------------------------- 01350000
+* IDENTIFY AND VALIDATE THE KEYWORDS AND VALUES THAT WERE SPECIFIED     01360000
+*---------------------------------------------------------------------- 01370000
+                                                                        01380000
+PARSENXT DS    0H                                                       01390000
+                                                                        01400000
+         CLC   CCSID,=AL2(TPLIMITS_SET)                                 01410000
+         BE    PARSREQ                  BRANCH IF SET     REQUEST       01420000
+         CLC   CCSID,=AL2(TPLIMITS_RESET)                               01430000
+         BE    PARSREQ                  BRANCH IF RESET   REQUEST       01440000
+         CLC   CCSID,=AL2(TPLIMITS_DISPLAY)                             01450000
+         BE    PARSREQ                  BRANCH IF DISPLAY REQUEST       01460000
+                                                                        01470000
+         CLC   CCSID,=AL2(TPLIMITS_PARTNER)                             01480000
+         BE    PARSPART                 BRANCH IF PARTNER PARM          01490000
+         CLC   CCSID,=AL2(TPLIMITS_MODE)                                01500000
+         BE    PARSMODE                 BRANCH IF MODE    PARM          01510000
+         CLC   CCSID,=AL2(TPLIMITS_TOTAL)                               01520000
+         BE    PARSTOT                  BRANCH IF TOTAL   PARM          01530000
+         CLC   CCSID,=AL2(TPLIMITS_WIN)                                 01540000
+         BE    PARSWIN                  BRANCH IF WIN     PARM          01550000
+         CLC   CCSID,=AL2(TPLIMITS_LOSE)                                01560000
+         BE    PARSLOSE                 BRANCH IF LOSE    PARM          01570000
+                                                                        01580000
+         B     ERREJECT                 REJECT OTHERWISE                01590000
+                                                                        01600000
+*                                                                       01610000
+* A REQUEST KEYWORD WAS FOUND                                           01620000
+*---------------------------------------------------------------------- 01630000
+                                                                        01640000
+PARSREQ  DS    0H                                                       01650000
+                                                                        01660000
+         OC    KMDREQ,KMDREQ         WAS A REQUEST KEYWORD ALREADY HIT? 01670000
+         BNZ   ERRCNFLC              BRANCH IF YES                      01680000
+         MVC   KMDREQ(L'CCSID),CCSID SAVE THE REQUEST CODE              01690000
+         B     PARSBUMP              ADVANCE TO NEXT OPERAND            01700000
+                                                                        01710000
+*                                                                       01720000
+* PARTNER(AAA...) KEYWORD WAS SPECIFIED                                 01730000
+*---------------------------------------------------------------------- 01740000
+                                                                        01750000
+PARSPART DS    0H                                                       01760000
+                                                                        01770000
+         LA    R2,KMDPART            MVCL COPY-TO ADDRESS               01780000
+         LA    R3,L'KMDPART          MVCL COPY-TO LENGTH                01790000
+         TM    FLAG,FLAGPART         ALREADY SPECIFIED?                 01800000
+         BNZ   ERRCNFLC              BRANCH IF YES                      01810000
+         OI    FLAG,FLAGPART         PARTNER PROVIDED                   01820000
+         B     PARSCOMM              GO COPY PARM TO LOCAL STORAGE      01830000
+                                                                        01840000
+*                                                                       01850000
+* MODE(AAA...) KEYWORD WAS SPECIFIED                                    01860000
+*---------------------------------------------------------------------- 01870000
+                                                                        01880000
+PARSMODE DS    0H                                                       01890000
+                                                                        01900000
+         LA    R2,KMDMODE            MVCL COPY-TO ADDRESS               01910000
+         LA    R3,L'KMDMODE          MVCL COPY-TO LENGTH                01920000
+         TM    FLAG,FLAGMODE         ALREADY SPECIFIED?                 01930000
+         BNZ   ERRCNFLC              BRANCH IF YES                      01940000
+         OI    FLAG,FLAGMODE         MODE PROVIDED                      01950000
+         B     PARSCOMM              GO COPY PARM TO LOCAL STORAGE      01960000
+                                                                        01970000
+*                                                                       01980000
+* TOTAL(###...) KEYWORD WAS SPECIFIED                                   01990000
+*---------------------------------------------------------------------- 02000000
+                                                                        02010000
+PARSTOT  DS    0H                                                       02020000
+                                                                        02030000
+         LA    R1,KMD#TOT            BINARY RECEIVING AREA              02040000
+         LA    R2,KMDTOT             MVCL COPY-TO ADDRESS               02050000
+         LA    R3,L'KMDTOT           MVCL COPY-TO LENGTH                02060000
+         TM    FLAG,FLAGTOT          WAS TOTAL ALREADY GIVEN?           02070000
+         BNZ   ERRCNFLC              BRANCH IF YES                      02080000
+         OI    FLAG,FLAGTOT          TOTAL PROVIDED                     02090000
+         B     PARSNUM               GO COPY PARM & CONVERT NUMERIC     02100000
+                                                                        02110000
+*                                                                       02120000
+* WIN(###...) KEYWORD WAS SPECIFIED                                     02130000
+*---------------------------------------------------------------------- 02140000
+                                                                        02150000
+PARSWIN  DS    0H                                                       02160000
+                                                                        02170000
+         LA    R1,KMD#WIN            BINARY RECEIVING AREA              02180000
+         LA    R2,KMDWIN             MVCL COPY-TO ADDRESS               02190000
+         LA    R3,L'KMDWIN           MVCL COPY-TO LENGTH                02200000
+         TM    FLAG,FLAGWIN          WAS WIN ALREADY GIVEN?             02210000
+         BNZ   ERRCNFLC              BRANCH IF YES                      02220000
+         OI    FLAG,FLAGWIN          WIN PROVIDED                       02230000
+         B     PARSNUM               GO COPY PARM & CONVERT NUMERIC     02240000
+                                                                        02250000
+*                                                                       02260000
+* LOSE(###...) KEYWORD WAS SPECIFIED                                    02270000
+*---------------------------------------------------------------------- 02280000
+                                                                        02290000
+PARSLOSE DS    0H                                                       02300000
+                                                                        02310000
+         LA    R1,KMD#LOSE           BINARY RECEIVING AREA              02320000
+         LA    R2,KMDLOSE            MVCL COPY-TO ADDRESS               02330000
+         LA    R3,L'KMDLOSE          MVCL COPY-TO LENGTH                02340000
+         TM    FLAG,FLAGLOSE         WAS LOSE ALREADY GIVEN?            02350000
+         BNZ   ERRCNFLC              BRANCH IF YES                      02360000
+         OI    FLAG,FLAGLOSE         LOSE PROVIDED                      02370000
+         B     PARSNUM               GO COPY PARM & CONVERT NUMERIC     02380000
+                                                                        02390000
+*                                                                       02400000
+* COMMON HANDLING FOR NUMERIC PARAMETERS                                02410000
+*---------------------------------------------------------------------- 02420000
+                                                                        02430000
+PARSNUM  DS    0H                                                       02440000
+                                                                        02450000
+         CLC   CCSVALCT,=H'1'        SINGLE VALUE SPECIFIED?            02460000
+         BNE   ERRSYNTX              BRANCH IF NOT                      02470000
+         LH    R15,CCSVLEN           LENGTH OF SPECIFIED VALUE          02480000
+         LTR   R15,R15               IS THE LENGTH OK?                  02490000
+         BNP   ERRSYNTX              BRANCH IF NOT                      02500000
+         CR    R15,R3                IS THE LENGTH OK?                  02510000
+         BH    ERRSYNTX              BRANCH IF NOT                      02520000
+         L     R14,CCSVDISP          OFFSET TO PARM IN CMD LINE         02530000
+         A     R14,CMRQOPST          CONVERT OFFSET TO ADDRESS          02540000
+         ST    R2,WRK256             SAVE ADDRESS OF VALUE              02550000
+         MVCL  R2,R14                COPY PARM                          02560000
+                                                                        02570000
+         L     R2,WRK256             RESTORE ADDRESS OF VALUE           02580000
+         LH    R3,CCSVLEN            LENGTH OF VALUE                    02590000
+         BCTR  R3,0                  LENGTH CODE                        02600000
+         EX    R3,PACKIT             PACKED FORMAT IN DWORD             02610000
+         ZAP   DWORD,DWORD                                              02620000
+         CVB   R2,DWORD              CONVERT TO BINARY                  02630000
+         ST    R2,0(R1)              SAVE BINARY VALUE                  02640000
+         B     PARSBUMP              CONTINUE ON WITH THE PARSE         02650000
+                                                                        02660000
+PACKIT   PACK  DWORD,0(0,R2)         CONVERT EBCDIC TO DECIMAL          02670000
+                                                                        02680000
+*                                                                       02690000
+* COMMON HANDLING FOR STRING PARAMETERS                                 02700000
+*---------------------------------------------------------------------- 02710000
+                                                                        02720000
+PARSCOMM DS    0H                                                       02730000
+                                                                        02740000
+         CLC   CCSVALCT,=H'1'        SINGLE VALUE SPECIFIED?            02750000
+         BNE   ERRSYNTX              BRANCH IF NOT                      02760000
+         LH    R15,CCSVLEN           LENGTH OF SPECIFIED VALUE          02770000
+         LTR   R15,R15               IS THE LENGTH OK?                  02780000
+         BNP   ERRSYNTX              BRANCH IF NOT                      02790000
+         CR    R15,R3                IS THE LENGTH OK?                  02800000
+         BH    ERRSYNTX              BRANCH IF NOT                      02810000
+         L     R14,CCSVDISP          OFFSET TO PARM IN CMD LINE         02820000
+         A     R14,CMRQOPST          CONVERT OFFSET TO ADDRESS          02830000
+         ICM   R15,8,=C' '           MVCL PAD BYTE                      02840000
+         MVCL  R2,R14                COPY PARM                          02850000
+         B     PARSBUMP              CONTINUE ON WITH THE PARSE         02860000
+                                                                        02870000
+*                                                                       02880000
+* ADVANCE THE SCAN TO THE NEXT KEYWORD ENTRY IN THE SUMMARY             02890000
+*---------------------------------------------------------------------- 02900000
+                                                                        02910000
+PARSBUMP DS    0H                                                       02920000
+                                                                        02930000
+         LA    R15,CCSVSLN                    LENGTH OF VALUE ENTRY     02940000
+         MH    R15,CCSVALCT                   TIMES NUMBER OF ENTRIES   02950000
+         LA    RCCSUMRY,CCSPFXL(R15,RCCSUMRY) ADDRESS OF NEXT KEYWORD   02960000
+         BCT   R0,PARSENXT                    BRANCH IF MORE KEYWORDS   02970000
+                                                                        02980000
+PARSDONE DS    0H                                                       02990000
+                                                                        03000000
+*---------------------------------------------------------------------- 03010000
+* COMMAND WAS PARSED.  JUMP TO THE SPECIFIC REQUEST ROUTINE.            03020000
+*---------------------------------------------------------------------- 03030000
+                                                                        03040000
+         BAS   R14,VTAMLOCK       SERIALIZE                             03050000
+                                                                        03060000
+         SR    R1,R1              CLEAR                                 03070000
+         ICM   R1,3,KMDREQ        GET THE REQUEST ID                    03080000
+         BNP   ERRSYNTX           BRANCH IF NO REQUEST KEYWORD          03090000
+         BCTR  R1,0               NORMALIZE                             03100000
+         C     R1,=A(RQMAX)       IS REQUEST ID VALID?                  03110000
+         BH    ERRSYNTX           BRANCH IF NOT                         03120000
+         SLL   R1,2               MULTIPLY BY 4                         03130000
+         B     RQJUMP(R1)         JUMP TO ROUTINE                       03140000
+                                                                        03150000
+RQJUMP   B     RQSET              1=SET                                 03160000
+         B     RQRESET            2=RESET                               03170000
+         B     RQDISP             3=DISPLAY                             03180000
+RQMAX    EQU   ((*-RQJUMP)/4)-1                                         03190000
+                                                                        03200000
+*---------------------------------------------------------------------- 03210000
+* REQUEST = SET                                                         03220000
+*---------------------------------------------------------------------- 03230000
+                                                                        03240000
+RQSET    DS    0H                                                       03250000
+                                                                        03260000
+         TM    FLAG,FLAGPART      PARTNER SPECIFIED?                    03270000
+         BZ    ERRSYNTX           BRANCH IF NOT                         03280000
+         TM    FLAG,FLAGMODE      MODE    SPECIFIED?                    03290000
+         BZ    ERRSYNTX           BRANCH IF NOT                         03300000
+         TM    FLAG,FLAGTOT       TOTAL   SPECIFIED?                    03310000
+         BZ    ERRSYNTX           BRANCH IF NOT                         03320000
+         MVC   KMDNAME,=CL8'set'                                        03330000
+         ICM   R1,15,KMD#TOT      SPECIFIED TOTAL                       03340000
+         BNP   ERRTOTAL           BRANCH IF BAD                         03350000
+                                                                        03360000
+         CLC   KMDPART,=CL8'ALL'  ALL PARTNERS?                         03370000
+         BNE   RQSONEU            BRANCH IF NOT                         03380000
+         L     R1,IVTACB62        MAIN 6.2 ACB                          03390000
+         LA    RIVUSER,IACPL1ST-IAC(,R1)                                03400000
+         S     RIVUSER,=A(IVUPLNXT-IVUSER)                              03410000
+                                                                        03420000
+RQSNXTU  DS    0H                                                       03430000
+                                                                        03440000
+         ICM   RIVUSER,15,IVUPLNXT NEXT IVUSER                          03450000
+         BM    RETURNOK            BRANCH IF ALL DONE                   03460000
+         TM    IVUF1,IVUF1PSC      IS IT PARALLEL?                      03470000
+         BNO   RQSNXTU             NO L62CSL IF NOT PARALLEL            03480000
+         MVC   KMDPART,IVULOCAL    SET PARTNER NAME                     03490000
+         CLC   KMDMODE,=CL8'ALL'   ALL MODES?                           03500000
+         BNE   RQSONEM             BRANCH IF NOT                        03510000
+         LA    RMDE,IVUMD1ST                                            03520000
+         S     RMDE,=A(MDENEXT-MDE)                                     03530000
+                                                                        03540000
+RQSNXTUM DS    0H                                                       03550000
+                                                                        03560000
+         ICM   RMDE,15,MDENEXT     NEXT MDE                             03570000
+         BM    RQSNXTU             BRANCH IF ALL MODES DONE             03580000
+         CLC   MDENAME,=CL8'SNASVCMG'                                   03590000
+         BE    RQSNXTUM            NO L62CSL FOR SNASVCMG               03600000
+         MVC   KMDMODE,MDENAME     SET MODE NAME                        03610000
+         BAS   R14,L62CSL          ISSUE THE CHANGE                     03620000
+         B     RQSNXTUM            DO THE NEXT MODE                     03630000
+                                                                        03640000
+RQSONEM  DS    0H                                                       03650000
+                                                                        03660000
+         CLC   KMDMODE,=CL8'SNASVCMG'                                   03670000
+         BE    ERRSVCMG            NO L62CSL FOR SNASVCMG               03680000
+         BAS   R14,L62CSL          ISSUE THE CHANGE                     03690000
+         B     RQSNXTU             DO THE NEXT PARTNER                  03700000
+                                                                        03710000
+RQSONEU  DS    0H                                                       03720000
+                                                                        03730000
+         BAS   R14,L62DSPL         LOCATE THE PLB FOR THE PARTNER       03740000
+         TM    IVUF1,IVUF1PSC      IS PARTNER PARALLEL?                 03750000
+         BNO   ERRPSC              BRANCH IF NOT                        03760000
+         CLC   KMDMODE,=CL8'ALL'   ALL MODES?                           03770000
+         BNE   RQS1U1M             BRANCH IF NOT                        03780000
+         LA    RMDE,IVUMD1ST                                            03790000
+         S     RMDE,=A(MDENEXT-MDE)                                     03800000
+                                                                        03810000
+RQS1UAM  DS    0H                                                       03820000
+                                                                        03830000
+         ICM   RMDE,15,MDENEXT     NEXT MDE                             03840000
+         BM    RETURNOK            BRANCH IF ALL MODES DONE             03850000
+         CLC   MDENAME,=CL8'SNASVCMG'                                   03860000
+         BE    RQS1UAM             NO L62CSL FOR SNASVCMG               03870000
+         MVC   KMDMODE,MDENAME     SET MODE NAME                        03880000
+         BAS   R14,L62CSL          ISSUE THE CHANGE                     03890000
+         B     RQS1UAM             DO THE NEXT MODE                     03900000
+                                                                        03910000
+RQS1U1M  DS    0H                                                       03920000
+                                                                        03930000
+         CLC   KMDMODE,=CL8'SNASVCMG'                                   03940000
+         BE    ERRSVCMG            NO L62CSL FOR SNASVCMG               03950000
+         BAS   R14,L62CSL          ISSUE THE CHANGE                     03960000
+         B     RETURNOK            ALL DONE                             03970000
+                                                                        03980000
+*---------------------------------------------------------------------- 03990000
+* REQUEST = RESET                                                       04000000
+*---------------------------------------------------------------------- 04010000
+                                                                        04020000
+RQRESET  DS    0H                                                       04030000
+                                                                        04040000
+         TM    FLAG,FLAGPART      PARTNER SPECIFIED?                    04050000
+         BZ    ERRSYNTX           BRANCH IF NOT                         04060000
+         TM    FLAG,FLAGMODE      MODE    SPECIFIED?                    04070000
+         BZ    ERRSYNTX           BRANCH IF NOT                         04080000
+         MVC   KMDNAME,=CL8'reset'                                      04090000
+                                                                        04100000
+         CLC   KMDPART,=CL8'ALL'  ALL PARTNERS?                         04110000
+         BNE   RQRONEU            BRANCH IF NOT                         04120000
+         L     R1,IVTACB62        MAIN 6.2 ACB                          04130000
+         LA    RIVUSER,IACPL1ST-IAC(,R1)                                04140000
+         S     RIVUSER,=A(IVUPLNXT-IVUSER)                              04150000
+                                                                        04160000
+RQRNXTU  DS    0H                                                       04170000
+                                                                        04180000
+         ICM   RIVUSER,15,IVUPLNXT NEXT IVUSER                          04190000
+         BM    RETURNOK            BRANCH IF ALL DONE                   04200000
+         TM    IVUF1,IVUF1PSC      IS IT PARALLEL?                      04210000
+         BNO   RQRNXTU             NO L62CSL IF NOT PARALLEL            04220000
+         MVC   KMDPART,IVULOCAL    SET PARTNER NAME                     04230000
+         CLC   KMDMODE,=CL8'ALL'   ALL MODES?                           04240000
+         BNE   RQRONEM             BRANCH IF NOT                        04250000
+         BAS   R14,L62RSLA         RESET ALL MODES FOR THIS PARTNER     04260000
+         B     RQRNXTU             GO GET THE NEXT PARTNER              04270000
+                                                                        04280000
+RQRONEM  DS    0H                                                       04290000
+                                                                        04300000
+         CLC   KMDMODE,=CL8'SNASVCMG'                                   04310000
+         BE    ERRSVCMG            NO L62RSL FOR SNASVCMG               04320000
+         BAS   R14,L62RSL1         ISSUE THE RESET FOR ONE MODE NAME    04330000
+         B     RQRNXTU             DO THE NEXT PARTNER                  04340000
+                                                                        04350000
+RQRONEU  DS    0H                                                       04360000
+                                                                        04370000
+         BAS   R14,L62DSPL         LOCATE THE PLB FOR THE PARTNER       04380000
+         TM    IVUF1,IVUF1PSC      IS PARTNER PARALLEL?                 04390000
+         BNO   ERRPSC              BRANCH IF NOT                        04400000
+         CLC   KMDMODE,=CL8'ALL'   ALL MODES?                           04410000
+         BNE   RQR1U1M             BRANCH IF NOT                        04420000
+         BAS   R14,L62RSLA         RESET ALL MODES FOR THIS PARTNER     04430000
+         B     RETURNOK            ALL DONE                             04440000
+                                                                        04450000
+RQR1U1M  DS    0H                                                       04460000
+                                                                        04470000
+         CLC   KMDMODE,=CL8'SNASVCMG'                                   04480000
+         BE    ERRSVCMG            NO L62RSL FOR SNASVCMG               04490000
+         BAS   R14,L62RSL1         ISSUE THE RESET FOR ONE MODE NAME    04500000
+         B     RETURNOK            ALL DONE                             04510000
+                                                                        04520000
+*---------------------------------------------------------------------- 04530000
+* REQUEST = DISPLAY                                                     04540000
+*---------------------------------------------------------------------- 04550000
+                                                                        04560000
+RQDISP   DS    0H                                                       04570000
+                                                                        04580000
+         TM    FLAG,FLAGPART      PARTNER SPECIFIED?                    04590000
+         BZ    ERRSYNTX           BRANCH IF NOT                         04600000
+         TM    FLAG,FLAGMODE      MODE    SPECIFIED?                    04610000
+         BZ    ERRSYNTX           BRANCH IF NOT                         04620000
+         MVC   KMDNAME,=CL8'display'                                    04630000
+                                                                        04640000
+         CLC   KMDPART,=CL8'ALL'  ALL PARTNERS?                         04650000
+         BNE   RQDONEU            BRANCH IF NOT                         04660000
+         L     R1,IVTACB62        MAIN 6.2 ACB                          04670000
+         LA    RIVUSER,IACPL1ST-IAC(,R1)                                04680000
+         S     RIVUSER,=A(IVUPLNXT-IVUSER)                              04690000
+                                                                        04700000
+RQDNXTU  DS    0H                                                       04710000
+                                                                        04720000
+         ICM   RIVUSER,15,IVUPLNXT NEXT IVUSER                          04730000
+         BM    RETURNOK            BRANCH IF ALL DONE                   04740000
+         BAS   R14,DISPPART        DO THE DISPLAY                       04750000
+         CLC   KMDMODE,=CL8'ALL'   ALL MODES?                           04760000
+         BNE   RQDONEM             BRANCH IF NOT                        04770000
+         LA    RMDE,IVUMD1ST                                            04780000
+         S     RMDE,=A(MDENEXT-MDE)                                     04790000
+                                                                        04800000
+RQDNXTUM DS    0H                                                       04810000
+                                                                        04820000
+         ICM   RMDE,15,MDENEXT     NEXT MDE                             04830000
+         BM    RQDNXTU             BRANCH IF ALL MODES DONE             04840000
+         BAS   R14,DISPMODE        DO THE DISPLAY                       04850000
+         B     RQDNXTUM            DO THE NEXT MODE                     04860000
+                                                                        04870000
+RQDONEM  DS    0H                                                       04880000
+                                                                        04890000
+         BAS   R14,L62DSMD         LOCATE THE MDE                       04900000
+         BAS   R14,DISPMODE        DO THE DISPLAY                       04910000
+         B     RQDNXTU             DO THE NEXT PARTNER                  04920000
+                                                                        04930000
+RQDONEU  DS    0H                                                       04940000
+                                                                        04950000
+         BAS   R14,L62DSPL         LOCATE THE PLB FOR THE PARTNER       04960000
+         BAS   R14,DISPPART        DO THE DISPLAY                       04970000
+         CLC   KMDMODE,=CL8'ALL'   ALL MODES?                           04980000
+         BNE   RQD1U1M             BRANCH IF NOT                        04990000
+         LA    RMDE,IVUMD1ST                                            05000000
+         S     RMDE,=A(MDENEXT-MDE)                                     05010000
+                                                                        05020000
+RQD1UAM  DS    0H                                                       05030000
+                                                                        05040000
+         ICM   RMDE,15,MDENEXT     NEXT MDE                             05050000
+         BM    RETURNOK            BRANCH IF ALL MODES DONE             05060000
+         BAS   R14,DISPMODE        DO THE DISPLAY                       05070000
+         B     RQD1UAM             DO THE NEXT MODE                     05080000
+                                                                        05090000
+RQD1U1M  DS    0H                                                       05100000
+                                                                        05110000
+         BAS   R14,L62DSMD         LOCATE THE MDE                       05120000
+         BAS   R14,DISPMODE        DO THE DISPLAY                       05130000
+         B     RETURNOK            ALL DONE                             05140000
+                                                                        05150000
+*---------------------------------------------------------------------- 05160000
+* EXCEPTION ROUTINES                                                    05170000
+*---------------------------------------------------------------------- 05180000
+                                                                        05190000
+ERRSYNTX DS    0H                                                       05200000
+         MVC   RETR15,=A(CCODE_SYNTAX)   SYNTAX ERROR                   05210000
+         B     RETURN                                                   05220000
+                                                                        05230000
+ERRCNFLC DS    0H                                                       05240000
+         MVC   RETR15,=A(CCODE_CONFLICT) CONFLICTING OPERANDS           05250000
+         B     RETURN                                                   05260000
+                                                                        05270000
+ERREJECT DS    0H                                                       05280000
+         MVC   RETR15,=A(CCODE_REJECT)   COMMAND REJECTED               05290000
+         B     RETURN                                                   05300000
+                                                                        05310000
+ERRTOTAL DS    0H                                                       05320000
+         MVC   L62RETCD,=F'900'          INVALID TOTAL SPECIFIED        05330000
+         B     ERRL62                                                   05340000
+                                                                        05350000
+ERRSVCMG DS    0H                                                       05360000
+         MVC   L62RETCD,=F'901'          FUNCTION INVALID FOR SNASVCMG  05370000
+         B     ERRL62                                                   05380000
+                                                                        05390000
+ERRPSC   DS    0H                                                       05400000
+         MVC   L62RETCD,=F'902'          PARTNER NOT PARALLEL           05410000
+         B     ERRL62                                                   05420000
+                                                                        05430000
+ERRL62   DS    0H                                                       05440000
+         BAS   R14,L62TEXT               GET RETURN CODE TEXT           05450000
+         LR    R2,R0                     TEXT LENGTH                    05460000
+         LR    R3,R1                     TEXT ADDRESS                   05470000
+         MVC   KMDSTAT,=CL8'failed-'                                    05480000
+         B     RETURNMG                                                 05490000
+                                                                        05500000
+*---------------------------------------------------------------------- 05510000
+* RETURN TO CALLER                                                      05520000
+*---------------------------------------------------------------------- 05530000
+                                                                        05540000
+RETURNOK DS    0H                                                       05550000
+                                                                        05560000
+         SR    R2,R2              NO ERROR TEXT LENGTH                  05570000
+         SR    R3,R3              NO ERROR TEXT ADDRESS                 05580000
+                                                                        05590000
+RETURNMG DS    0H                                                       05600000
+                                                                        05610000
+         $MSG  400,FIELDS=(KMDNAME,                                    +05620000
+               KMDSTAT,                                                +05630000
+               ((R3),(R2)))                                             05640000
+                                                                        05650000
+RETURN   DS    0H                                                       05660000
+                                                                        05670000
+         BAS   R14,VTAMUNLK       RELEASE SERIALIZATION IF APPROPRIATE  05680000
+         MVC   CMRQCOMP(4),RETR15 SET COMMAND PROCESSOR COMPLETION CODE 05690000
+         LM    R15,R1,RETREGS     LOAD RETURN VALUES                    05700000
+                                                                        05710000
+         #EXIT R1=YES             RETURN W/R15,R0,R1                    05720000
+                                                                        05730000
+*---------------------------------------------------------------------- 05740000
+*   SUBROUTINE: ISSUE MSG ICMD404                                       05750000
+*                                                                       05760000
+*   ENTRY:      KMD.... VALUES ARE SET                                  05770000
+*               R0 = RETURN CODE TEXT LENGTH                            05780000
+*               R1 = RETURN CODE TEXT ADDRESS                           05790000
+*                                                                       05800000
+*   EXIT:       ALL REGISTERS ARE RESTORED                              05810000
+*---------------------------------------------------------------------- 05820000
+                                                                        05830000
+MSG404   DS    0H                                                       05840000
+                                                                        05850000
+         STM   R14,R12,SUB1SAVE     SAVE CALLER'S REGISTERS             05860000
+                                                                        05870000
+         LR    R2,R0                TEXT LENGTH                         05880000
+         LR    R3,R1                TEXT ADDRESS                        05890000
+                                                                        05900000
+         $MSG  404,FIELDS=(KMDNAME,                                    +05910000
+               KMDPART,                                                +05920000
+               KMDMODE,                                                +05930000
+               ((R3),(R2)))                                             05940000
+                                                                        05950000
+         LM    R14,R12,SUB1SAVE     RESTORE CALLER'S REGISTERS          05960000
+         BR    R14                  RETURN                              05970000
+                                                                        05980000
+*---------------------------------------------------------------------- 05990000
+*   SUBROUTINE: PROVIDE TEXT FOR LU6.2 SERVICE RETURN CODE              06000000
+*                                                                       06010000
+*   ENTRY:      L62RETCD HAS THE RETURN CODE                            06020000
+*                                                                       06030000
+*   EXIT:       R1 = TEXT ADDRESS                                       06040000
+*               R0 = TEXT LENGTH                                        06050000
+*               ALL OTHER REGISTERS ARE RESTORED                        06060000
+*---------------------------------------------------------------------- 06070000
+                                                                        06080000
+L62TEXT  DS    0H                                                       06090000
+                                                                        06100000
+         STM   R14,R12,SUB1SAVE     SAVE CALLER'S REGISTERS             06110000
+                                                                        06120000
+         LA    R4,L62RS             REASON CODE LOOKUP TABLE            06130000
+         LA    R2,L'L62RSENT        LENGTH OF TABLE ENTRY               06140000
+         LA    R3,L62RSEND          ADDRESS OF LAST VALID ENTRY         06150000
+                                                                        06160000
+L62TEXTL DS    0H                                                       06170000
+                                                                        06180000
+         CLC   L62RETCD,0(R4)       IS THIS THE REASON?                 06190000
+         BE    L62TEXTF             BRANCH IF YES                       06200000
+         BXLE  R4,R2,L62TEXTL       CHECK FOR CORRECT ENTRY             06210000
+                                                                        06220000
+L62TEXTF DS    0H                                                       06230000
+                                                                        06240000
+         LM    R0,R1,4(R4)          R0=TEXT LENGTH, R1=TEXT ADDRESS     06250000
+         LM    R14,R15,SUB1SAVE     RESTORE CALLER'S REGISTERS          06260000
+         LM    R2,R12,SUB1SAVE+16   RESTORE CALLER'S REGISTERS          06270000
+         BR    R14                  RETURN                              06280000
+                                                                        06290000
+*---------------------------------------------------------------------- 06300000
+*   SUBROUTINE: ISSUE CHANGE SESSION LIMITS FOR A SINGLE MODE           06310000
+*                                                                       06320000
+*   ENTRY:      KMD.... VALUES ARE SET                                  06330000
+*                                                                       06340000
+*   EXIT:       ALL REGISTERS ARE RESTORED                              06350000
+*---------------------------------------------------------------------- 06360000
+                                                                        06370000
+L62CSL   DS    0H                                                       06380000
+                                                                        06390000
+         STM   R14,R12,SUB0SAVE     SAVE CALLER'S REGISTERS             06400000
+                                                                        06410000
+         L62CSL  *IVTACB62,                                            +06420000
+               KMDPART,                                                +06430000
+               KMDMODE,                                                +06440000
+               KMD#TOT,                                                +06450000
+               KMD#WIN,                                                +06460000
+               KMD#LOSE,                                               +06470000
+               =C'SOURCE',                                             +06480000
+               L62RETCD,                                               +06490000
+               MF=(E,L62MFL)                                            06500000
+                                                                        06510000
+         BAS   R14,L62TEXT          GET RETURN CODE TEXT                06520000
+         BAS   R14,MSG404           ISSUE AWARENESS MESSAGE             06530000
+         LM    R14,R12,SUB0SAVE     RESTORE CALLER'S REGISTERS          06540000
+         BR    R14                  RETURN                              06550000
+                                                                        06560000
+*---------------------------------------------------------------------- 06570000
+*   SUBROUTINE: ISSUE RESET SESSION LIMITS FOR A SINGLE MODE            06580000
+*                                                                       06590000
+*   ENTRY:      KMD.... VALUES ARE SET                                  06600000
+*                                                                       06610000
+*   EXIT:       ALL REGISTERS ARE RESTORED                              06620000
+*---------------------------------------------------------------------- 06630000
+                                                                        06640000
+L62RSL1  DS    0H                                                       06650000
+                                                                        06660000
+         STM   R14,R12,SUB0SAVE     SAVE CALLER'S REGISTERS             06670000
+                                                                        06680000
+         L62RSL  *IVTACB62,                                            +06690000
+               KMDPART,                                                +06700000
+               KMDMODE,                                                +06710000
+               =C'SOURCE',                                             +06720000
+               =C'NO',                                                 +06730000
+               =C'NO',                                                 +06740000
+               =C'SINGLE',                                             +06750000
+               L62RETCD,                                               +06760000
+               MF=(E,L62MFL)                                            06770000
+                                                                        06780000
+         BAS   R14,L62TEXT          GET RETURN CODE TEXT                06790000
+         BAS   R14,MSG404           ISSUE AWARENESS MESSAGE             06800000
+         LM    R14,R12,SUB0SAVE     RESTORE CALLER'S REGISTERS          06810000
+         BR    R14                  RETURN                              06820000
+                                                                        06830000
+*---------------------------------------------------------------------- 06840000
+*   SUBROUTINE: ISSUE RESET SESSION LIMITS FOR A ALL MODES              06850000
+*                                                                       06860000
+*   ENTRY:      KMD.... VALUES ARE SET                                  06870000
+*                                                                       06880000
+*   EXIT:       ALL REGISTERS ARE RESTORED                              06890000
+*---------------------------------------------------------------------- 06900000
+                                                                        06910000
+L62RSLA  DS    0H                                                       06920000
+                                                                        06930000
+         STM   R14,R12,SUB0SAVE     SAVE CALLER'S REGISTERS             06940000
+                                                                        06950000
+         L62RSL  *IVTACB62,                                            +06960000
+               KMDPART,                                                +06970000
+               KMDMODE,                                                +06980000
+               =C'SOURCE',                                             +06990000
+               =C'NO',                                                 +07000000
+               =C'NO',                                                 +07010000
+               =C'ALL',                                                +07020000
+               L62RETCD,                                               +07030000
+               MF=(E,L62MFL)                                            07040000
+                                                                        07050000
+         BAS   R14,L62TEXT          GET RETURN CODE TEXT                07060000
+         BAS   R14,MSG404           ISSUE AWARENESS MESSAGE             07070000
+         LM    R14,R12,SUB0SAVE     RESTORE CALLER'S REGISTERS          07080000
+         BR    R14                  RETURN                              07090000
+                                                                        07100000
+*---------------------------------------------------------------------- 07110000
+*   SUBROUTINE: LOCATE THE MODE BLOCK                                   07120000
+*                                                                       07130000
+*   ENTRY:      KMD.... VALUES ARE SET                                  07140000
+*               RIVUSER = IVUSER/PLB ADDRESS                            07150000
+*                                                                       07160000
+*   EXIT:       RMDE = MDE ADDRESS                                      07170000
+*               ALL REGISTERS ARE RESTORED                              07180000
+*---------------------------------------------------------------------- 07190000
+                                                                        07200000
+L62DSMD  DS    0H                                                       07210000
+                                                                        07220000
+         STM   R0,R15,SUB0SAVE      SAVE CALLER'S REGISTERS             07230000
+                                                                        07240000
+         L62DSMD (RIVUSER),                                            +07250000
+               KMDMODE,                                                +07260000
+               =F'8',                                                  +07270000
+               L62RETMD,                                               +07280000
+               L62RETCD,                                               +07290000
+               MF=(E,MFE_LIST)    SEE IF THERE IS A PLB ALREADY         07300000
+                                                                        07310000
+         ICM   R1,15,L62RETCD       GOOD RC?                            07320000
+         BNZ   ERRL62               BRANCH IF NOT                       07330000
+         L     RMDE,L62RETMD        GET THE MDE ADDRESS                 07340000
+         ST    RMDE,SUB0SAVE+(4*RMDE)                                   07350000
+         LM    R0,R15,SUB0SAVE      RESTORE CALLER'S REGISTERS          07360000
+         BR    R14                  RETURN                              07370000
+                                                                        07380000
+*---------------------------------------------------------------------- 07390000
+*   SUBROUTINE: LOCATE THE PARTNER LU BLOCK                             07400000
+*                                                                       07410000
+*   ENTRY:      KMD.... VALUES ARE SET                                  07420000
+*                                                                       07430000
+*   EXIT:       RIVUSER = IVUSER/PLB ADDRESS                            07440000
+*               ALL REGISTERS ARE RESTORED                              07450000
+*---------------------------------------------------------------------- 07460000
+                                                                        07470000
+L62DSPL  DS    0H                                                       07480000
+                                                                        07490000
+         STM   R0,R15,SUB0SAVE      SAVE CALLER'S REGISTERS             07500000
+                                                                        07510000
+         L62DSPL *IVTACB62,                                            +07520000
+               KMDPART,                                                +07530000
+               =F'8',                                                  +07540000
+               L62RETPB,                                               +07550000
+               L62RETCD,                                               +07560000
+               MF=(E,MFE_LIST)    SEE IF THERE IS A PLB ALREADY         07570000
+                                                                        07580000
+         ICM   R1,15,L62RETCD       GOOD RC?                            07590000
+         BNZ   ERRL62               BRANCH IF NOT                       07600000
+         L     RIVUSER,L62RETPB     GET THE IVUSER/PLB ADDRESS          07610000
+         ST    RIVUSER,SUB0SAVE+(4*RIVUSER)                             07620000
+         LM    R0,R15,SUB0SAVE      RESTORE CALLER'S REGISTERS          07630000
+         BR    R14                  RETURN                              07640000
+                                                                        07650000
+*---------------------------------------------------------------------- 07660000
+*   SUBROUTINE: DISPLAY A THE PARTNERS INFORMATION                      07670000
+*                                                                       07680000
+*   ENTRY:      RIVUSER = ADDRESS OF THE IVUSER/PLB                     07690000
+*                                                                       07700000
+*   EXIT:       ALL REGISTERS ARE RESTORED                              07710000
+*---------------------------------------------------------------------- 07720000
+                                                                        07730000
+DISPPART DS    0H                                                       07740000
+                                                                        07750000
+         STM   R14,R12,SUB0SAVE     SAVE CALLER'S REGISTERS             07760000
+                                                                        07770000
+         $MSG  401,FIELDS=(LOCALFQ,                                    +07780000
+               LOCALNM,                                                +07790000
+               IVUFQLN,                                                +07800000
+               IVULOCAL,                                               +07810000
+               IVUTKUSR,                                               +07820000
+               (IVUFLAGS,4))                                            07830000
+                                                                        07840000
+         LM    R14,R12,SUB0SAVE     RESTORE CALLER'S REGISTERS          07850000
+         BR    R14                  RETURN                              07860000
+                                                                        07870000
+*---------------------------------------------------------------------- 07880000
+*   SUBROUTINE: DISPLAY A SINGLE MODE FOR A PARTNER LU                  07890000
+*                                                                       07900000
+*   ENTRY:      RMDE = ADDRESS OF THE MDE                               07910000
+*                                                                       07920000
+*   EXIT:       ALL REGISTERS ARE RESTORED                              07930000
+*---------------------------------------------------------------------- 07940000
+                                                                        07950000
+DISPMODE DS    0H                                                       07960000
+                                                                        07970000
+         STM   R14,R12,SUB0SAVE     SAVE CALLER'S REGISTERS             07980000
+                                                                        07990000
+         $MSG  402,FIELDS=(MDENAME,                                    +08000000
+               MDEFLAGS,                                               +08010000
+               MDEAALIM,                                               +08020000
+               MDESESSL,                                               +08030000
+               MDEMINCW,                                               +08040000
+               MDEMINCL)                                                08050000
+                                                                        08060000
+         $MSG  403,FIELDS=(MDEASC,                                     +08070000
+               MDEACWC,                                                +08080000
+               MDEACLC,                                                +08090000
+               MDEPSC,                                                 +08100000
+               MDEPCWC,                                                +08110000
+               MDEPCLC,                                                +08120000
+               MDETERMC,                                               +08130000
+               MDEPTCW,                                                +08140000
+               MDEPTCL)                                                 08150000
+                                                                        08160000
+         LM    R14,R12,SUB0SAVE     RESTORE CALLER'S REGISTERS          08170000
+         BR    R14                  RETURN                              08180000
+                                                                        08190000
+*---------------------------------------------------------------------- 08200000
+*   SUBROUTINE: OBTAIN VTAM GLOBAL LOCK                                 08210000
+*---------------------------------------------------------------------- 08220000
+                                                                        08230000
+VTAMLOCK DS    0H                                                       08240000
+                                                                        08250000
+         TM    FLAG,FLAGLOCK        IS LOCK HELD?                       08260000
+         BOR   R14                  BRANCH IF YES, DON'T DO IT AGAIN    08270000
+         STM   R14,R2,SUB0SAVE      SAVE CALLER'S REGISTERS             08280000
+                                                                        08290000
+         $SER  OBTAIN,                                                 +08300000
+               VTAM                                                     08310000
+                                                                        08320000
+         C     R15,=F'4'            WAS LOCK ALREADY HELD?              08330000
+         BNE   VTAMLOEX             BRANCH IF NOT                       08340000
+         OI    FLAG,FLAGLCKD        REMEMBER LOCK HELD ON ENTRY         08350000
+                                                                        08360000
+VTAMLOEX DS    0H                                                       08370000
+                                                                        08380000
+         OI    FLAG,FLAGLOCK        REMEMBER LOCK IS HELD               08390000
+         LM    R14,R2,SUB0SAVE      RESTORE CALLER'S REGISTERS          08400000
+         BR    R14                  RETURN                              08410000
+                                                                        08420000
+*---------------------------------------------------------------------- 08430000
+*   SUBROUTINE: RELEASE VTAM GLOBAL LOCK                                08440000
+*---------------------------------------------------------------------- 08450000
+                                                                        08460000
+VTAMUNLK DS    0H                                                       08470000
+                                                                        08480000
+         TM    FLAG,FLAGLOCK        IS LOCK HELD?                       08490000
+         BNOR  R14                  BRANCH IF NOT                       08500000
+         TM    FLAG,FLAGLCKD        WAS LOCK HELD ON ENTRY?             08510000
+         BOR   R14                  DON'T RELEASE IF IT WAS             08520000
+         STM   R14,R2,SUB0SAVE      SAVE CALLER'S REGISTERS             08530000
+                                                                        08540000
+         $SER  RELEASE,                                                +08550000
+               VTAM                                                     08560000
+                                                                        08570000
+         NI    FLAG,255-FLAGLOCK    SHOW LOCK NOT HELD                  08580000
+         LM    R14,R2,SUB0SAVE      RESTORE CALLER'S REGISTERS          08590000
+         BR    R14                  RETURN                              08600000
+                                                                        08610000
+*---------------------------------------------------------------------- 08620000
+*  CONSTANTS AND LITERALS                                               08630000
+*---------------------------------------------------------------------- 08640000
+                                                                        08650000
+         LTORG ,                                                        08660000
+                                                                        08670000
+*---------------------------------------------------------------------- 08680000
+*  L62 MACRO RETURN CODE TRANSLATIONS                                   08690000
+*---------------------------------------------------------------------- 08700000
+                                                                        08710000
+L62RS    DS    0A                                                       08720000
+         DC    A(0),A(L'L62RET00),A(L62RET00)                           08730000
+L62RSENT EQU   L62RS,*-L62RS                                            08740000
+         DC    A(1),A(L'L62RET01),A(L62RET01)                           08750000
+         DC    A(2),A(L'L62RET02),A(L62RET02)                           08760000
+         DC    A(3),A(L'L62RET03),A(L62RET03)                           08770000
+         DC    A(4),A(L'L62RET04),A(L62RET04)                           08780000
+         DC    A(5),A(L'L62RET05),A(L62RET05)                           08790000
+         DC    A(6),A(L'L62RET06),A(L62RET06)                           08800000
+         DC    A(7),A(L'L62RET07),A(L62RET07)                           08810000
+         DC    A(8),A(L'L62RET08),A(L62RET08)                           08820000
+         DC    A(9),A(L'L62RET09),A(L62RET09)                           08830000
+         DC    A(10),A(L'L62RET10),A(L62RET10)                          08840000
+         DC    A(11),A(L'L62RET11),A(L62RET11)                          08850000
+         DC    A(17),A(L'L62RET17),A(L62RET17)                          08860000
+         DC    A(18),A(L'L62RET18),A(L62RET18)                          08870000
+         DC    A(19),A(L'L62RET19),A(L62RET19)                          08880000
+         DC    A(20),A(L'L62RET20),A(L62RET20)                          08890000
+         DC    A(21),A(L'L62RET21),A(L62RET21)                          08900000
+         DC    A(22),A(L'L62RET22),A(L62RET22)                          08910000
+         DC    A(23),A(L'L62RET23),A(L62RET23)                          08920000
+         DC    A(24),A(L'L62RET24),A(L62RET24)                          08930000
+         DC    A(25),A(L'L62RET25),A(L62RET25)                          08940000
+         DC    A(26),A(L'L62RET26),A(L62RET26)                          08950000
+         DC    A(27),A(L'L62RET27),A(L62RET27)                          08960000
+         DC    A(28),A(L'L62RET28),A(L62RET28)                          08970000
+         DC    A(30),A(L'L62RET30),A(L62RET30)                          08980000
+         DC    A(31),A(L'L62RET31),A(L62RET31)                          08990000
+         DC    A(32),A(L'L62RET32),A(L62RET32)                          09000000
+         DC    A(33),A(L'L62RET33),A(L62RET33)                          09010000
+         DC    A(34),A(L'L62RET34),A(L62RET34)                          09020000
+         DC    A(37),A(L'L62RET37),A(L62RET37)                          09030000
+         DC    A(100),A(L'L62RT100),A(L62RT100)                         09040000
+         DC    A(130),A(L'L62RT130),A(L62RT130)                         09050000
+         DC    A(131),A(L'L62RT131),A(L62RT131)                         09060000
+         DC    A(132),A(L'L62RT132),A(L62RT132)                         09070000
+         DC    A(133),A(L'L62RT133),A(L62RT133)                         09080000
+         DC    A(134),A(L'L62RT134),A(L62RT134)                         09090000
+         DC    A(135),A(L'L62RT135),A(L62RT135)                         09100000
+         DC    A(200),A(L'L62RT200),A(L62RT200)                         09110000
+         DC    A(201),A(L'L62RT201),A(L62RT201)                         09120000
+         DC    A(202),A(L'L62RT202),A(L62RT202)                         09130000
+         DC    A(255),A(L'L62RT255),A(L62RT255)                         09140000
+         DC    A(900),A(L'L62RT900),A(L62RT900)                         09150000
+         DC    A(901),A(L'L62RT901),A(L62RT901)                         09160000
+         DC    A(902),A(L'L62RT902),A(L62RT902)                         09170000
+L62RSEND EQU   *-L'L62RSENT                                             09180000
+         DC    A(0),A(L'L62RETXX),A(L62RETXX)                           09190000
+                                                                        09200000
+L62RET00 DC    C'LU62_OK'                                               09210000
+L62RET01 DC    C'LU62_ALLOCATE_FAILURE_NO_RETRY'                        09220000
+L62RET02 DC    C'LU62_ALLOCATE_FAILURE_RETRY'                           09230000
+L62RET03 DC    C'LU62_CONVERSATION_TYPE_MISMATCH'                       09240000
+L62RET04 DC    C'LU62_PIP_NOT_ALLOWED'                                  09250000
+L62RET05 DC    C'LU62_PIP_NOT_SPECIFIED_CORRECTLY'                      09260000
+L62RET06 DC    C'LU62_SECURITY_NOT_VALID'                               09270000
+L62RET07 DC    C'LU62_SYNC_LVL_NOT_SUPPORTED_LU'                        09280000
+L62RET08 DC    C'LU62_SYNC_LVL_NOT_SUPPORTED_PGM'                       09290000
+L62RET09 DC    C'LU62_TPN_NOT_RECOGNIZED'                               09300000
+L62RET10 DC    C'LU62_TP_NOT_AVAILABLE_NO_RETRY'                        09310000
+L62RET11 DC    C'LU62_TP_NOT_AVAILABLE_RETRY'                           09320000
+L62RET17 DC    C'LU62_DEALLOCATED_ABEND'                                09330000
+L62RET18 DC    C'LU62_DEALLOCATED_NORMAL'                               09340000
+L62RET19 DC    C'LU62_PARAMETER_ERROR'                                  09350000
+L62RET20 DC    C'LU62_PRODUCT_SPECIFIC_ERROR'                           09360000
+L62RET21 DC    C'LU62_PROGRAM_ERROR_NO_TRUNC'                           09370000
+L62RET22 DC    C'LU62_PROGRAM_ERROR_PURGING'                            09380000
+L62RET23 DC    C'LU62_PROGRAM_ERROR_TRUNC'                              09390000
+L62RET24 DC    C'LU62_PROGRAM_PARAMETER_CHECK'                          09400000
+L62RET25 DC    C'LU62_PROGRAM_STATE_CHECK'                              09410000
+L62RET26 DC    C'LU62_RESOURCE_FAILURE_NO_RETRY'                        09420000
+L62RET27 DC    C'LU62_RESOURCE_FAILURE_RETRY'                           09430000
+L62RET28 DC    C'LU62_UNSUCCESSFUL'                                     09440000
+L62RET30 DC    C'LU62_DEALLOCATED_ABEND_SVC'                            09450000
+L62RET31 DC    C'LU62_DEALLOCATED_ABEND_TIMER'                          09460000
+L62RET32 DC    C'LU62_SVC_ERROR_NO_TRUNC'                               09470000
+L62RET33 DC    C'LU62_SVC_ERROR_PURGING'                                09480000
+L62RET34 DC    C'LU62_SVC_ERROR_TRUNC'                                  09490000
+L62RET37 DC    C'LU62_OPERATION_NOT_ACCEPTED'                           09500000
+L62RT100 DC    C'LU62_TAKE_BACKOUT'                                     09510000
+L62RT130 DC    C'LU62_DEALLOCATED_ABEND_BO'                             09520000
+L62RT131 DC    C'LU62_DEALLOCATED_ABEND_SVC_BO'                         09530000
+L62RT132 DC    C'LU62_DEALLOCATED_ABEND_TIMER_BO'                       09540000
+L62RT133 DC    C'LU62_RESOURCE_FAIL_NO_RETYR_BO'                        09550000
+L62RT134 DC    C'LU62_RESOURCE_FAILURE_RETYR_BO'                        09560000
+L62RT135 DC    C'LU62_DEALLOCATED_NORMAL_BO'                            09570000
+L62RT200 DC    C'LU62_RESOURCE_NOT_FOUND'                               09580000
+L62RT201 DC    C'LU62_ACTIVATION_FAILURE_RETRY'                         09590000
+L62RT202 DC    C'LU62_ACTIVATION_FAILURE_NO_RETRY'                      09600000
+L62RT255 DC    C'LU62_INT_TKB_EXISTS'                                   09610000
+L62RT900 DC    C'SPECIFIED TOTAL IS NOT VALID'                          09620000
+L62RT901 DC    C'REQUEST CANNOT BE ISSUED FOR MODE SNASVCMG'            09630000
+L62RT902 DC    C'PARTNER CONNECTION IS NOT PARALLEL SESSION CAPABLE'    09640000
+L62RETXX DC    C'Unknown reason code from L62 service'                  09650000
+                                                                        09660000
+         PRINT NOGEN                                                    09670000
+         CMDREQ  ,                COMMAND REQUEST BLOCK                 09680000
+         CCSUMRY ,                COMMAND OPERAND PREPARSE SUMMARY      09690000
+         KEYCODES COMMANDSET=TPLIMITS                                   09700000
+         CMDCODES ,                                                     09710000
+         IHAPSA ,                 MVS PREFIXED SAVE AREA                09720000
+         ICHRUTKN ,               MVS UTOKEN                            09730000
+         ISTDBIND ,               VTAM BIND IMAGE                       09740000
+         TRACODES ,               INTEGRATOR TRACE CODE EQUATES         09750000
+         ICVT  ,                  INTEGRATOR CVT                        09760000
+         IVTAMCVT ,               INTEGRATOR VTAM CVT                   09770000
+         ITASK ,                  INTEGRATOR TASK BLOCK                 09780000
+         IPCB  ,                  INTEGRATOR PROC BLOCK                 09790000
+         IVUSER ,                 INTEGRATOR IVUSER BLOCK               09800000
+         ISESS ,                  INTEGRATOR ISESS BLOCK                09810000
+         IPOOL ,                  INTEGRATOR IPOOL BLOCK                09820000
+         IACB  ,                  INTEGRATOR IACB  BLOCK                09830000
+         TMSG  ,                  INTEGRATOR INTERTASK MSG FORMAT       09840000
+         PTRH  ,                  INTEGRATOR PROJECT TRANSFER           09850000
+         $PRJREQ DSECT=YES        INTEGRATOR PROJECT REQUEST            09860000
+         EVCODES ,                INTEGRATOR EVENT CODES                09870000
+         ABCODES ,                INTEGRATOR $ABEND CODES               09880000
+         MSGCODES ,               INTEGRATOR INTERTASK MSGING CODES     09890000
+         @EPB ,                   INTEGRATOR EVENT PROCESS BLOCK        09900000
+         $VTAM DSECT=YES          INTEGRATOR $VTAM SERVICES             09910000
+         END   ,                                                        09920000

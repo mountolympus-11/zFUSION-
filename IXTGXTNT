@@ -1,0 +1,388 @@
+IXTGXTNT TITLE '- ACQUIRE XTG-MANAGED STORAGE EXTENT'                   00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE: IXTGXTNT - Acquire XTG-managed storage extent                00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This routine is invoked to acquire a storage extent used           00080000
+*    to satisfy $GETSTOR requests directed against a given XTG          00090000
+*    storage subpool and partition.  If successful, a new               00100000
+*    storage extent is posted in SL2ENTRY.SL2PXTNT. A warning           00110000
+*    is returned otherwise.                                             00120000
+*                                                                       00130000
+*    Upon entry, the partition entry (SL2ENTRY) may contain             00140000
+*    zero or a pointer to a previously assigned storage extent          00150000
+*    that no longer contains sufficient storage to satisfy a            00160000
+*    request for a storage cell of the size defined in the              00170000
+*    partition entry.  In either case this routine first                00180000
+*    attempts to satisfy the extent request by returning a              00190000
+*    (more) recently acquired extent consistent with the                00200000
+*    cell size limit contained in STXLIMIT.                             00210000
+*                                                                       00220000
+*    If an extent is not available, a new one is allocated,             00230000
+*    formatted, and queued.  Extents are acquired via the MVS           00240000
+*    STORAGE macro in fixed length sizes defined by the                 00250000
+*    STGINCREMENT() parameter or default.  If any extent                00260000
+*    request determines that no contiguous storage block of             00270000
+*    that size remains, no further extent allocation attempts           00280000
+*    are made.                                                          00290000
+*                                                                       00300000
+*                                                                       00310000
+* NOTES:                                                                00320000
+*                                                                       00330000
+*    If the SL1ENTRY describes a subpool less than or equal to          00340000
+*    CELL_SIZE_LIM (STORCNST), the extent acquired is reserved          00350000
+*    for cells of that size or smaller.  Thus, the extent list          00360000
+*    contains two types of extents: one for "small" blocks and          00370000
+*    the other for larger blocks.                                       00380000
+*                                                                       00390000
+*    Certain (VTAM) IRBs SYNCH to STDENV code causing code that         00400000
+*    would normally run in SUP state to actually receive                00410000
+*    control PROB state.  The serialization logic in this               00420000
+*    routine will restore SUP state if this situation is                00430000
+*    encountered.                                                       00440000
+*                                                                       00450000
+*                                                                       00460000
+*                                                                       00470000
+* ATTRIBUTES:                                                           00480000
+*                                                                       00490000
+*    STDENV or SRB CALLERS                                              00500000
+*    BAKR LINKAGE                                                       00510000
+*    AMODE(31), RMODE(ANY)                                              00520000
+*                                                                       00530000
+*                                                                       00540000
+* SERIALIZATION:                                                        00550000
+*                                                                       00560000
+*    ENQ serialization of STANCHOR and STXTENT queue                    00570000
+*                                                                       00580000
+*                                                                       00590000
+* ON ENTRY:                                                             00600000
+*                                                                       00610000
+*    R0  Address of the subpool   - SL1ENTRY                            00620000
+*    R1  Address of the partition - SL2ENTRY                            00630000
+*                                                                       00640000
+*                                                                       00650000
+* ON EXIT:                                                              00660000
+*                                                                       00670000
+*    R15 Contains one of the following return codes                     00680000
+*                                                                       00690000
+*        RC00 - A storage extent has been made available to             00700000
+*               the given partition.                                    00710000
+*                                                                       00720000
+*        RC04 - A storage extent could not be assigned to the           00730000
+*               partition because storage is (nearly) exhausted.        00740000
+*                                                                       00750000
+*        RC08 - A storage extent could not be acquired because          00760000
+*               of the execution environment. Specifically, one         00770000
+*               of the following situations was detected:               00780000
+*                                                                       00790000
+*               - The MVS LOCAL lock was held disallowing the           00800000
+*                 SVCs that are needed to complete the request          00810000
+*                                                                       00820000
+**<DOC-OFF>****************************************************         00830000
+                                                                        00840000
+         EJECT                                                          00850000
+***************************************************************         00860000
+*                                                                       00870000
+* MAINTEANCE:                                                           00880000
+*                                                                       00890000
+*    11/07/94 R. Turgeon                                                00900000
+*             Initial version                                           00910000
+*                                                                       00920000
+***************************************************************         00930000
+                                                                        00940000
+         EJECT                                                          00950000
+         STORLVLS ,               STORAGE MGMT CONTROL AND STATS AREAS  00960000
+                                                                        00970000
+         EJECT                                                          00980000
+         STORCNST ,               STORAGE MGMT CONstants                00990000
+                                                                        01000000
+         EJECT                                                          01010000
+         EQUS  ,                                                        01020000
+                                                                        01030000
+         EJECT                                                          01040000
+IXTGXTNT #ENTER SAVE=NO,LINKAGE=BAKR,PREG=(R7,R6)                       01050000
+                                                                        01060000
+         USING PSA,R0                                                   01070000
+                                                                        01080000
+         EJECT                                                          01090000
+***************************************************************         01100000
+*                                                                       01110000
+*   Determine new extent availability based on requesters               01120000
+*   environment and the results of previous requests.                   01130000
+*                                                                       01140000
+***************************************************************         01150000
+         USING SL1ENTRY,R6        SUBPOOL ENTRY                         01160000
+         USING SL2ENTRY,R7        PARTITION ENTRY                       01170000
+                                                                        01180000
+         L     R5,ICTXTANC        STGMGMT ANCHOR AREA                   01190000
+         USING STANCHOR,R5                                              01200000
+                                                                        01210000
+         TM    STAFLAGS,STAFNSTG  END-OF-STORAGE PREVIOUSLY ENCOUNTERED 01220000
+         BO    WRNMODE            AVOID OVERCOMMITMENT OF STORAGE       01230000
+                                                                        01240000
+**<DOC-ON>*****************************************************         01250000
+*                                                                       01260000
+*   If storage extents have been acquired since the last                01270000
+*   assignment of storage to this partition, locate the next            01280000
+*   more recent block consistent with CELL_SIZE_LIM.                    01290000
+*                                                                       01300000
+*   If storage has never been assigned to the partition but             01310000
+*   extents have been acquired, assign the oldest partition             01320000
+*   consistent with CELL_SIZE_LIM.                                      01330000
+*                                                                       01340000
+*   If neither applies, a new storage exent is required.                01350000
+*                                                                       01360000
+**<DOC-OFF>****************************************************         01370000
+                                                                        01380000
+XTSCAN   DS    0H                                                       01390000
+         L     R9,STAXTLST        CAPTURE MOST RECENTLY ACQUIRED EXTENT 01400000
+                                                                        01410000
+         LH    R0,=AL2(CELL_SIZE_LIM)                                   01420000
+         CH    R0,SL1MAX          EXTENT NEEDED FOR SMALL CELLS?        01430000
+         BNL   *+6                SKIP IF SO                            01440000
+         SR    R0,R0              INDICATE LARGE CELLS                  01450000
+                                                                        01460000
+*--------------------------------------------------------------         01470000
+*   SEARCH FOR MORE RECENT ELIGIBLE EXTENT                              01480000
+*--------------------------------------------------------------         01490000
+         USING STXTENT,R8         CURRENT EXTENT                        01500000
+         ICM   R8,15,SL2PXTNT     EXTENT PREVIOUSLY ASSIGNED?           01510000
+         BNZ   XTADV              WALK BACKWARDS FROM THAT POINT        01520000
+         ICM   R8,15,STAXTEND     OLDEST EXTENT                         01530000
+         BZ    ALLOCBLK           NONE YET ALLOCATED                    01540000
+                                                                        01550000
+XTPREV   DS    0H                                                       01560000
+         C     R0,STXLIMIT        EXTENT AVAIL FOR CELLS OF REQ SIZE?   01570000
+         BE    RETBLK             RETURN IT IF SO                       01580000
+                                                                        01590000
+XTADV    DS    0H                                                       01600000
+         ICM   R8,15,STXPREV      ANOTHER MORE RECENTLY ACQUIRED?       01610000
+         BNZ   XTPREV             TEST FOR ELIGIBILITY                  01620000
+                                                                        01630000
+         EJECT ,                                                        01640000
+**<DOC-ON>*****************************************************         01650000
+*                                                                       01660000
+*   A new storage block is required.  Allocation occurs on              01670000
+*   every request up until end-of-storage is returned.  It is           01680000
+*   not retried for any subsequent request.  The storage block          01690000
+*   is formatted (STXTENT) and placed on the extent stack               01700000
+*   anchored in STANCHOR.STAXTLST.                                      01710000
+*                                                                       01720000
+*   Note that storage is allocated under the scope of an                01730000
+*   exclusive ENQ (non-authorized) or MVS LOCAL lock                    01740000
+*   (authorized) to ensure that discovery of the storage                01750000
+*   shortage by multiple requesters does not result in a run            01760000
+*   on requests for new extents.                                        01770000
+*                                                                       01780000
+*   R9 contains the address of the top of the STAXTLST upon             01790000
+*   entry to the serialized segment of code below.                      01800000
+*                                                                       01810000
+**<DOC-OFF>****************************************************         01820000
+                                                                        01830000
+ALLOCBLK DS    0H                 FIRST EXTENT FOR THIS PARTITION       01840000
+         SR    R8,R8              ASSUME EXTENT NOT AVAILABLE           01850000
+                                                                        01860000
+         ICM   R0,15,X'21C'       SRB MODE?                             01870000
+         BZ    MVSLOCK            SUP STATE ASSURRED                    01880000
+                                                                        01890000
+         LTR   R10,R10            ITASK MODE EXPECTED?                  01900000
+         BZ    WRNENV             SHOULD NOT OCCUR                      01910000
+         TM    TSKFLGS-ITASK(R10),TSK$LOCK                              01920000
+         BO    WRNENV             LOCAL LOCK PRECLUDES STG EXTEND       01930000
+                                                                        01940000
+         TM    ICTSTAT2,ICT2$APF+ICT2$SUP  SUPERVISOR STATE INTENDED?   01950000
+         BNO   ENQLOCK                                                  01960000
+                                                                        01970000
+         TESTAUTH FCTN=0,STATE=YES,RBLEVEL=1                            01980000
+                                                                        01990000
+         LTR   R15,R15            SUP STATE?                            02000000
+         BZ    MVSLOCK            SERIALIZE VIA LOCK IF SO              02010000
+                                                                        02020000
+         MODESET MODE=SUP         RESTORE INTENDED EXECUTION ENVIRON    02030000
+                                                                        02040000
+         B     MVSLOCK            RESUME AUTHORIZED PATH                02050000
+                                                                        02060000
+*--------------------------------------------------------------         02070000
+*   UNAUTHORIZED - SERIALIZE VIA ENQ                                    02080000
+*--------------------------------------------------------------         02090000
+ENQLOCK  DS    0H                                                       02100000
+         ENQ   ($PTIQNAM,$PTIRNAM,E,,STEP)   REENTRANT FORM             02110000
+                                                                        02120000
+         B     LOCKED                                                   02130000
+                                                                        02140000
+*--------------------------------------------------------------         02150000
+*   AUTHORIZED - SERIALIZE VIA MVS LOCAL LOCK                           02160000
+*--------------------------------------------------------------         02170000
+MVSLOCK  DS    0H                                                       02180000
+         MODESET EXTKEY=ZERO,     KEY=0 REQUIRED FOR SETLOCK           X02190000
+               SAVEKEY=(2)                                              02200000
+                                                                        02210000
+         SETLOCK OBTAIN,          OBTAIN HOME A/S LOCAL LOCK           X02220000
+               TYPE=LOCAL,                                             X02230000
+               MODE=UNCOND,                                            X02240000
+               REGS=USE                                                 02250000
+                                                                        02260000
+         LR    R4,R15             PRESERVE LOCK OBTAIN / OWNED FLAG     02270000
+                                                                        02280000
+         MODESET KEYADDR=(2)      RESTORE TO CALLER'S KEY               02290000
+                                                                        02300000
+***************************************************************         02310000
+*                                                                       02320000
+*   DETERMINE WHETHER CONCURRENTLY ALLOCATED BLOCK IS AVAILABLE         02330000
+*                                                                       02340000
+***************************************************************         02350000
+LOCKED   DS    0H                                                       02360000
+         C     R9,STAXTLST        SOMEONE GOT IN BEFORE US?             02370000
+         BE    ALLOCONT           CONTINUE WITH ALLOCATION IF NOT       02380000
+         L     R8,=F'-1'          ELSE INDICATE RETRY                   02390000
+         B     ALLOCPT            SUPPRESS ALLOC OF NEW EXTENT          02400000
+                                                                        02410000
+*--------------------------------------------------------------         02420000
+*   ACQUIRE NEW STORAGE EXTENT                                          02430000
+*--------------------------------------------------------------         02440000
+ALLOCONT DS    0H                                                       02450000
+         LH    R1,SL2MAX          PARTITION SIZE                        02460000
+         L     R2,ICTXTEXP        FETCH STANDARD EXPANSION SIZE         02470000
+         LR    R0,R2              MODIFIABLE COPY OF EXPANSION SIZE     02480000
+         SH    R0,=AL2(STXTLN)    BACK OUT EXPANSION BLOCK MGMT AREA    02490000
+         CR    R0,R1              AVAIL SPACE EXCEEDS PARTITION SIZE?   02500000
+         BNL   *+8                ONWARD IF SO                          02510000
+         LA    R2,0(R1,R1)        POOR PERFORMING CHOICE, NO DOUBT      02520000
+                                                                        02530000
+         LA    R2,4095(,R2)       ROUND TO PAGE                         02540000
+         SRL   R2,12                                                    02550000
+         SLL   R2,12                                                    02560000
+                                                                        02570000
+         ICM   R0,15,PSATOLD      TASK MODE?                            02580000
+         BNZ   ALLOX              STANDARD SUBPOOL HANDLING IF SO       02590000
+         L     R3,ICTTSKMN        ASSIGN STORAGE TO MAIN TASK           02600000
+         L     R3,TSKTCB@-ITASK(,R3)   TRAVERSE ITASK TO TCB            02610000
+                                                                        02620000
+         STORAGE OBTAIN,LENGTH=(R2),COND=YES,LOC=ANY,BNDRY=PAGE,       X02630000
+               TCBADDR=(R3)                                             02640000
+                                                                        02650000
+         B     ALLOFIN                                                  02660000
+                                                                        02670000
+ALLOX    DS    0H                                                       02680000
+         STORAGE OBTAIN,LENGTH=(R2),COND=YES,LOC=ANY,BNDRY=PAGE         02690000
+                                                                        02700000
+ALLOFIN  DS    0H                                                       02710000
+         LTR   R15,R15            STORAGE AVAILABLE?                    02720000
+         BZ    ALLOXTNT           FORMAT AS CELL POOL EXTENT IF SO      02730000
+         OI    STAFLAGS,STAFNSTG  INDICATE WE HIT THE STORAGE WALL      02740000
+         B     ALLOCPT            DONE                                  02750000
+                                                                        02760000
+*--------------------------------------------------------------         02770000
+*   CONSTRUCT EXTENT ENTRY AND QUEUE                                    02780000
+*--------------------------------------------------------------         02790000
+ALLOXTNT DS    0H                                                       02800000
+         LR    R8,R1              BLOCK IN EXTENT FORMAT                02810000
+         XC    STXTENT(STXTLN),STXTENT                                  02820000
+         ST    R8,STXORG                                                02830000
+         ST    R2,STXLEN                                                02840000
+         SH    R2,=AL2(STXTLN)                                          02850000
+         ST    R2,STXAREM                                               02860000
+         LA    R1,STXTLN(,R8)                                           02870000
+         ST    R1,STXAPTR                                               02880000
+                                                                        02890000
+         LH    R0,=AL2(CELL_SIZE_LIM)                                   02900000
+         CH    R0,SL1MAX          EXTENT NEEDED FOR SMALL CELLS?        02910000
+         BNL   *+6                SKIP IF SO                            02920000
+         SR    R0,R0              INDICATE LARGE CELLS                  02930000
+         ST    R0,STXLIMIT        MAX CELL SIZE OR ZERO                 02940000
+                                                                        02950000
+         ST    R9,STXNEXT         ADD NEW EXTENT TO TOP OF STACK        02960000
+         LTR   R9,R9              PREDECESSOR EXTENT?                   02970000
+         BZ    *+8                SKIP IF NOT                           02980000
+         ST    R8,STXPREV-STXTENT(,R9)                                  02990000
+         ST    R8,STAXTLST                                              03000000
+                                                                        03010000
+         ICM   R0,15,STAXTEND     FIRST EXTENT BLOCK?                   03020000
+         BNZ   *+8                SKIP IF NOT                           03030000
+         ST    R8,STAXTEND        SAVE PTR TO OLDEST EXTENT             03040000
+                                                                        03050000
+         L     R15,STAXTCNT       NUMBER OF EXTENTS ALLOCATED           03060000
+         LA    R15,1(,R15)        ACCOUNT FOR NEW MEMBER                03070000
+         ST    R15,STAXTCNT       UPDATE ACCORDINGLY                    03080000
+                                                                        03090000
+***************************************************************         03100000
+*                                                                       03110000
+*   END SERIALIZED SEGMENT, R8 CONTAINS EXTENT ADDR OR ZERO             03120000
+*                                                                       03130000
+***************************************************************         03140000
+ALLOCPT  DS    0H                                                       03150000
+         TM    ICTSTAT2,ICT2$SUP  RUNNING SUP STATE?                    03160000
+         BO    MVSUNLK            DESERIALIZE VIA LOCK                  03170000
+                                                                        03180000
+*--------------------------------------------------------------         03190000
+*   UNAUTHORIZED - DESERIALIZE VIA DEQ                                  03200000
+*--------------------------------------------------------------         03210000
+         DEQ   ($PTIQNAM,$PTIRNAM,,STEP)   REENTRANT FORM               03220000
+                                                                        03230000
+         B     UNLOCKED                                                 03240000
+                                                                        03250000
+*--------------------------------------------------------------         03260000
+*   AUTHORIZED - DESERIALIZE VIA MVS LOCAL LOCK                         03270000
+*--------------------------------------------------------------         03280000
+MVSUNLK  DS    0H                                                       03290000
+         LTR   R4,R4              LOCAL LOCK ALREADY OWNED?             03300000
+         BNZ   UNLOCKED           NOT OURS TO RELEASE OTHERWISE         03310000
+                                                                        03320000
+         MODESET EXTKEY=ZERO,     KEY=0 REQUIRED FOR SETLOCK           X03330000
+               SAVEKEY=(2)                                              03340000
+                                                                        03350000
+         SETLOCK RELEASE,         RELEASE HOME A/S LOCAL LOCK          X03360000
+               TYPE=LOCAL,                                             X03370000
+               REGS=USE                                                 03380000
+                                                                        03390000
+         MODESET KEYADDR=(2)      RESTORE TO CALLER'S KEY               03400000
+                                                                        03410000
+*--------------------------------------------------------------         03420000
+*   IF EXTENT LIST CHANGED BEFORE SERIALIZED - REDRIVE THE REQ          03430000
+*--------------------------------------------------------------         03440000
+UNLOCKED DS    0H                                                       03450000
+         C     R8,=F'-1'          RETRY INDICATOR SET?                  03460000
+         BE    XTSCAN             REDRIVE THE REQUEST IF SO             03470000
+                                                                        03480000
+         EJECT                                                          03490000
+***************************************************************         03500000
+*                                                                       03510000
+*   RETURN COMPLETION STATUS TO CALLER                                  03520000
+*                                                                       03530000
+***************************************************************         03540000
+RETBLK   DS    0H                 R8 <== EXTENT ADDRESS OR ZERO         03550000
+         LA    R15,RC00           PRESUME SUCCESS                       03560000
+         ST    R8,SL2PXTNT        ASSIGN CURRENT PARTITION              03570000
+         LTR   R8,R8              IF ONE IS AVAILABLE                   03580000
+         BNZ   RETURN             DONE IF SO                            03590000
+                                                                        03600000
+WRNMODE  DS    0H                 CELL EXTENT STORAGE IS EXHAUSTED      03610000
+         LA    R15,RC04                                                 03620000
+         B     RETURN                                                   03630000
+                                                                        03640000
+WRNENV   DS    0H                 ENVIRONMENT PRECLUDES COMPLETION      03650000
+         LA    R15,RC08                                                 03660000
+         B     RETURN                                                   03670000
+                                                                        03680000
+RETURN   DS    0H                 RETURN TO CALLER                      03690000
+         #EXIT ,                  RESTORE CALLERS ENV AND RETURN        03700000
+                                                                        03710000
+         EJECT                                                          03720000
+***************************************************************         03730000
+*                                                                       03740000
+*   LOCAL READ ONLY STORAGE                                             03750000
+*                                                                       03760000
+***************************************************************         03770000
+$PTIQNAM DC    CL8'PTIINT'        SERIALIZATION QNAME                   03780000
+$PTIRNAM DC    CL8'STGALLOC'      SERIALIZATION RNAME                   03790000
+                                                                        03800000
+         LTORG ,                                                        03810000
+                                                                        03820000
+         PRINT NOGEN                                                    03830000
+         ICVT  ,                                                        03840000
+         ITASK ,                                                        03850000
+                                                                        03860000
+         IHAPSA ,                                                       03870000
+         END   ,                                                        03880000

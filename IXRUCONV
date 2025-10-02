@@ -1,0 +1,350 @@
+IXRUCONV TITLE '- CONVERSATIONAL TRANSACTION MANAGER'                   00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE: IXRUCONV - CONVERSATIONAL TRANSACTION MANAGER                00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This routine operates as an extension to the RU scheduler          00080000
+*    providing an interface to a 'conversation partner' process         00090000
+*    on behalf of a CONVERSATIONAL RU.  Each RU segment is              00100000
+*    passed to the conversation partner via $TSEND.                     00110000
+*                                                                       00120000
+*    Conversational transaction controls are maintained in the          00130000
+*    @XECONV extension to the standard @XH transaction header           00140000
+*    in all inbound (X) conversational RUs.  The @XECONV header         00150000
+*    is reflected back to the coop as a prefix to the                   00160000
+*    response (Y) block.                                                00170000
+*                                                                       00180000
+*                                                                       00190000
+* ON ENTRY:                                                             00200000
+*                                                                       00210000
+*    R1 CONTAINS THE ADDRESS OF AN RU IN CONVERSATIONAL                 00220000
+*       TRANSACTION FORMAT                                              00230000
+*                                                                       00240000
+*    R0 CONTAINS THE ADDRESS OF THE $RU ENTRY DESCRIBING THE            00250000
+*       INBOUND REQUEST UNIT                                            00260000
+*                                                                       00270000
+*                                                                       00280000
+* ON EXIT:                                                              00290000
+*                                                                       00300000
+*    R15 CONTAINS ZERO                                                  00310000
+*                                                                       00320000
+*    R0  CONTAINS A RESPONSE REQUSET CODE AS FOLLOWS                    00330000
+*                                                                       00340000
+*        RSN00 - ISSUE RESPONSE TO COOP IF PENDING                      00350000
+*        RSN04 - SUPPRESS RESPONSE TO COOP (STREAMED REQUESTS)          00360000
+*                                                                       00370000
+**<DOC-OFF>****************************************************         00380000
+                                                                        00390000
+         EJECT                                                          00400000
+         @XH   TYPE=DSECT         TRANSACTION HEADER                    00410000
+                                                                        00420000
+         EJECT                                                          00430000
+         @XECONV TYPE=DSECT       XACT HDR, CONVERSATIONAL EXTENSION    00440000
+                                                                        00450000
+         EJECT                                                          00460000
+         $RU   TYPE=DSECT         RU ENTRY DESCRIPTION                  00470000
+                                                                        00480000
+         EJECT                                                          00490000
+         $PROC DSECT=YES          $PROC SERVICES                        00500000
+                                                                        00510000
+         EJECT                                                          00520000
+         $TASK DSECT=YES          $TASK SERVICES                        00530000
+                                                                        00540000
+         EJECT                                                          00550000
+         $TSEND DSECT=YES         INTERTASK MESSAGE REQUEST             00560000
+                                                                        00570000
+         EJECT                                                          00580000
+         $WULOC DSECT=YES         WORKUNIT LOCATOR REQUEST              00590000
+                                                                        00600000
+         EJECT                                                          00610000
+         TMSG  ,                  INTERTASK MSG FORMAT                  00620000
+                                                                        00630000
+         EJECT                                                          00640000
+         $RESMGR DSECT=YES        $RESMGR SERVICES                      00650000
+                                                                        00660000
+         EJECT                                                          00670000
+         IWUENTUD ,               $WULOC LOCATOR DATA FORMAT            00680000
+                                                                        00690000
+         EJECT                                                          00700000
+         EVCODES  PRINT=NOGEN                                           00710000
+*                                                                       00720000
+         MSGCODES PRINT=NOGEN                                           00730000
+*                                                                       00740000
+         ABCODES  PRINT=NOGEN                                           00750000
+*                                                                       00760000
+         EQUS  ,                                                        00770000
+                                                                        00780000
+         $MSGDFT PREFIX=ICTPID,COMPID='XRU',TABLE=*#MSGS,              +00790000
+               PRINT=NOGEN,CONID=*ICTCONID,CONNAME=ICTCONNM,           +00800000
+               MF=(E,MSGLIST)                                           00810000
+                                                                        00820000
+         EJECT                                                          00830000
+         #WORK ,                                                        00840000
+                                                                        00850000
+$RTN     DS    A                  ENTRY ADDR OF PROCESS RTN             00860000
+$XECONV  DS    A                  PTR TO @XECONV IN RESPONSE BLOCK      00870000
+*                                 ... IF TXPMANAGE WAS SPECFIED         00880000
+                                                                        00890000
+PROCNAME DS    CL8                PCB NAME CONSTRUCTION AREA            00900000
+                                                                        00910000
+SERVICE  DS    CL32               SERVICE NAME                          00920000
+SERVREGS DS    0F                 SERVICE ROUTINE REGS                  00930000
+SERVRC   DS    F                     RETURN CODE                        00940000
+SERVRSN  DS    F                     REASON CODE                        00950000
+SERVINFO DS    F                     INFO CODE                          00960000
+                                                                        00970000
+$WUD     DS    XL(WUDLN)          $WULOC LOCATOR INFO RETURN AREA       00980000
+                                                                        00990000
+$PROCMFL $PROC MF=(L,*)           $PROC PLIST CONSTRUCTION AREA         01000000
+$TASKMFL $TASK MF=(L,*)           $TASK PLIST CONSTRUCTION AREA         01010000
+                                                                        01020000
+MSGLIST  $MSG  FIELDS=(,,,,),MF=(L,*)   $MSG PLIST CONSTRUCTION AREA    01030000
+                                                                        01040000
+         #ENDWORK ,                                                     01050000
+                                                                        01060000
+         EJECT                                                          01070000
+IXRUCONV #ENTER PREG=(R8,R7)                                            01080000
+                                                                        01090000
+         USING ITASK,R10          STDENV                                01100000
+                                                                        01110000
+         L     R9,TSKPCBC         PROCESS MODE                          01120000
+         USING IPCB,R9                                                  01130000
+         L     R6,PCBUSER         USER DESCRIPTOR                       01140000
+         USING IUSER,R6                                                 01150000
+                                                                        01160000
+         EJECT                                                          01170000
+***************************************************************         01180000
+*                                                                       01190000
+*   General initialization - identify conversation partner EPA          01200000
+*                                                                       01210000
+***************************************************************         01220000
+         USING RUENTRY,R7         $RU FORMAT                            01230000
+                                                                        01240000
+         USING @XH,R8             STANDARD TRANSACTION HEADER           01250000
+XE       USING @XCV,@XHALGN       CONVERSATIONAL XACT HDR EXTENSION     01260000
+                                                                        01270000
+         L     R1,RUERTN          ROUTINE OFFSET SUPPLIED (VERIFIED)    01280000
+         LA    R1,ICTMODTB(R1)    ADDRESS OF ROUTINE ENTRY POINT        01290000
+         L     R1,0(,R1)          DEREF *PTR                            01300000
+         ST    R1,$RTN            SAVE PROCESS ROUTINE ENTRY ADDR       01310000
+                                                                        01320000
+         OC    XE.@XCVPTKN,XE.@XCVPTKN   CONV PARTNER ESTABLISHED?      01330000
+         BNZ   CONVCONT           CONTINUE DIALOG IF SO                 01340000
+                                                                        01350000
+         EJECT                                                          01360000
+***************************************************************         01370000
+*                                                                       01380000
+*   Create conversation partner process on first segment of RU.         01390000
+*                                                                       01400000
+*   When the first segment of a new RU is received, its                 01410000
+*   conversational extension to the header (@XECONV) will not           01420000
+*   yet contain the token of the partner process.  The process          01430000
+*   is constructed here and posted in @XECONV.  That field              01440000
+*   must be carried for the remainder of the conversation.              01450000
+*                                                                       01460000
+***************************************************************         01470000
+         L     R1,TSKCXID         INSTANCE ID                           01480000
+         LA    R2,1(,R1)          NEW INSTANCE                          01490000
+         ST    R2,TSKCXID         POST UPDATED INSTANCE ID              01500000
+         CVD   R2,DWORD           CONVERT TO DECIMAL                    01510000
+         MVC   PROCNAME,=XL8'F021202020202020'                          01520000
+         ED    PROCNAME,DWORD+4                                         01530000
+                                                                        01540000
+         LA    R3,RUEPFXNM        PCB PREFIX GIVEN IN $RU               01550000
+         LH    R2,RUEPFXL         FETCH PCB PREFIX LENGTH               01560000
+         LTR   R2,R2              PCB PREFIX DEFINED AT RU LEVEL?       01570000
+         BZ    NOPCBNM            SKIP IF NOT                           01580000
+         BCTR  R2,0               PREPARE FOR COPY                      01590000
+         EX    R2,*+4             OVERLAY NUMERIC SUFFIX                01600000
+         MVC   PROCNAME(*-*),0(R3)                                      01610000
+                                                                        01620000
+NOPCBNM  DS    0H                                                       01630000
+                                                                        01640000
+*---------------------------------------------------------------        01650000
+*   CONSTRUCT NEW PROCESS                                               01660000
+*---------------------------------------------------------------        01670000
+         $PROC CREATE,            CREATE NEW PROCESS                   X01680000
+               EP=*$RTN,          ENTRY POINT PREV IDENTIFIED          X01690000
+               PARM=RUENTRY,      $RU BLOCK AS INIT PARM               X01700000
+               NAME=PROCNAME,     DERIVED PROCESS NAME                 X01710000
+               MF=(E,$PROCMFL)    WORKAREA                              01720000
+                                                                        01730000
+         BZ    *+8                ASSERT SUCCESSFUL COMPLETION          01740000
+         EX    R0,*               DENIED                                01750000
+                                                                        01760000
+         LR    R3,R1              PRESERVE NEW PCB ADDR                 01770000
+NEW      USING IPCB,R3            ESTABLISH ADDRESSABILITY              01780000
+         MVC   XE.@XCVPTKN,NEW.PCBENTKN                                 01790000
+                                                                        01800000
+*---------------------------------------------------------------        01810000
+*   IF WORKPAGE WAS SPECIFIED, XFER PCBPAGE OWNERSHIP TO NEW PCB        01820000
+*---------------------------------------------------------------        01830000
+         ICM   R2,15,PCBPAGE      WORKAREA ESTABLISHED FOR RU PCB?      01840000
+         BZ    EWKPAGE            SKIP IF NOT                           01850000
+         ST    R2,NEW.PCBPAGE     ELSE ASSOCIATE IT WITH THE NEW PCB    01860000
+         XC    PCBPAGE,PCBPAGE    TRANSFER OF AREA OWNERSHIP            01870000
+                                                                        01880000
+         $RESMGR ADD,                                                  X01890000
+               ROUTINE=*#RMXPAGE,                                      X01900000
+               OWNER=(R3),                                             X01910000
+               TOKEN=NEW.PCBRMPAG,                                     X01920000
+               MF=(E,MFE_LIST)                                          01930000
+                                                                        01940000
+EWKPAGE  DS    0H                                                       01950000
+         DROP  NEW                CONVERSATION PARTNER EPB              01960000
+                                                                        01970000
+         EJECT                                                          01980000
+****************************************************************        01990000
+*                                                                       02000000
+*   Conversation partner established.  Transmit the conversation        02010000
+*   segment RU to that process.                                         02020000
+*                                                                       02030000
+*   First, an image of the inbound conversation extension to the        02040000
+*   transaction header is copied into the TXP buffer if TXPMANAGE       02050000
+*   is specified.  Otherwise, the conversation partner is               02060000
+*   responsible for all communication with the coop, including          02070000
+*   enforcement of all conversational request protocol as               02080000
+*   defined in @XECONV.                                                 02090000
+*                                                                       02100000
+*   The PCB token returned on the $PROC CREATE is converted, via        02110000
+*   $WULOC, to a PCB address that can be used in $TSEND to              02120000
+*   expediently deliver pointers to the inbound RU.                     02130000
+*                                                                       02140000
+****************************************************************        02150000
+CONVCONT DS    0H                                                       02160000
+         TM    RUEOPTNS,RUEOTXP   TXP BUFFER MANAGEMENT REQUESTED?      02170000
+         BNO   NOTXP1                                                   02180000
+                                                                        02190000
+         $XPBUFR ISRT,DATALEN=@XCVXELN,DATA=XE.@XCV                     02200000
+                                                                        02210000
+         BNZ   ABE_TXP                                                  02220000
+         ST    R1,$XECONV         RETAIN PTR TO CONVERSATIONAL HDR      02230000
+                                                                        02240000
+NOTXP1   DS    0H                                                       02250000
+                                                                        02260000
+*---------------------------------------------------------------        02270000
+*   CONVERT CONVERSATION PARTNER PCB TOKEN TO ADDRESS                   02280000
+*---------------------------------------------------------------        02290000
+         MVC   SERVICE,=CL32'CONV PARTNER LOCATE'                       02300000
+                                                                        02310000
+         $WULOC LOCATE,           LOCATE CONVERSATION PARTNER          X02320000
+               TOKEN=XE.@XCVPTKN, USING TOKEN                          X02330000
+               USERDATA=$WUD,     LOCATOR INFOR RETURNED AS USERDATA   X02340000
+               MF=(E,MFE_LIST)                                          02350000
+                                                                        02360000
+         BNZ   COMM_ERR           PARTNER NOT FOUND OR OTHER ERROR      02370000
+                                                                        02380000
+*---------------------------------------------------------------        02390000
+*   SEND REQUEST RU TO CONVERSATION PARTNER                             02400000
+*---------------------------------------------------------------        02410000
+WU       USING IWUENTUD,$WUD      $WULOC LOCATOR INFO FORMAT            02420000
+         MVC   SERVICE,=CL32'CONV PARTNER TSEND'                        02430000
+                                                                        02440000
+         $TSEND *,                LOCAL REQUEST                        X02450000
+               PCB=*WU.WUDIPCB,   PCB ADDRESS                          X02460000
+               TYPE=ITM_XRU_CONV, CONVERSATION SEGMENT REQS ONLY       X02470000
+               PARMS=(@XH,*$XECONV,XE.@XCVPTKN,RUENTRY),               X02480000
+               REPLY=YES,         RSVP                                 X02490000
+               MF=(E,MFE_LIST)                                          02500000
+                                                                        02510000
+         BNZ   COMM_ERR           INTERPROCESS COMMUNICATION ERROR      02520000
+         LR    R2,R1              PRESERVE XEPB ADDRESS                 02530000
+         MVC   SERVICE,=CL32'CONV PARTNER PREMATURE TERM'               02540000
+                                                                        02550000
+         $TASK  WAIT,             AWAIT RU COMPLETION                  X02560000
+               EPB=(R2),          RETURN COMPLETION CODE IN R0         X02570000
+               MF=(E,$TASKMFL)                                          02580000
+                                                                        02590000
+         C     R15,=A($$TERM)     PREMATURE TASK TERM                   02600000
+         BE    COMM_ERR                                                 02610000
+         C     R15,=A($$CNCL)     TASK CANCELLATION                     02620000
+         BE    COMM_ERR                                                 02630000
+         B     RESP_ACQ                                                 02640000
+         DROP  WU                 $WULOC LOCATOR INFO                   02650000
+                                                                        02660000
+         EJECT                                                          02670000
+****************************************************************        02680000
+*                                                                       02690000
+*   Either we were unable to reach the conversation partner, or         02700000
+*   it was invoked and failed (ABENDed, etc), or it created             02710000
+*   (and possibly responded) to the coop requestor.                     02720000
+*                                                                       02730000
+*   If TXP buffer management responsibilities have been assigned        02740000
+*   to the scheduler, a response request is raised if:                  02750000
+*                                                                       02760000
+*      1) The conversation partner has indicated that it is             02770000
+*         terminating (any of @XCVSTAT.@XCVSFIN), or                    02780000
+*                                                                       02790000
+*      2) This routine was unable to reach the session partner          02800000
+*         (COMM_ERR), or                                                02810000
+*                                                                       02820000
+*      3) The definite response flag is set in the response             02830000
+*         conversation extension hdr (@XCVOPTS.@XCVOCNF)                02840000
+*                                                                       02850000
+****************************************************************        02860000
+Y        USING @XCV,R4            @XECONV IN RESPONSE BUFFER            02870000
+                                                                        02880000
+*---------------------------------------------------------------        02890000
+*   UNABLE TO COMMUNICATE WITH SESSION PARTNER                          02900000
+*---------------------------------------------------------------        02910000
+COMM_ERR DS    0H                                                       02920000
+         STM   R15,R1,SERVREGS    PRESERVE FAILING SERVICE CODES        02930000
+                                                                        02940000
+         $MSG  011,FIELDS=(SERVICE,SERVRC,SERVRSN,SERVINFO)             02950000
+                                                                        02960000
+         ICM   R4,15,$XECONV      MANAGING TXP BUFFER?                  02970000
+         BZ    *+8                SKIP IF NOT                           02980000
+         OI    Y.@XCVSTAT,@XCVSRND   INDICATE NO RESPONSE BLOCK AVAIL   02990000
+                                                                        03000000
+*---------------------------------------------------------------        03010000
+*   RESPOND TO COOP                                                     03020000
+*---------------------------------------------------------------        03030000
+RESP_ACQ DS    0H                                                       03040000
+         LA    R0,RSN04           SUPPRESS RESPONSE TO COOP             03050000
+                                                                        03060000
+         ICM   R4,15,$XECONV         TXP BUFFER MANAGEMENT REQ & ESTAB? 03070000
+         BZ    RETURN                ABSOLVED OF ALL RESPONSIBILITY     03080000
+         TM    Y.@XCVSTAT,@XCVSFIN   END OF CONVERSATION?               03090000
+         BNZ   RESPXMIT              COOP ALWAYS NOTIFIED IF SO         03100000
+         TM    Y.@XCVOPTS,@XCVOCNF   DEFINITE RESPONSE REQUESTED?       03110000
+         BNO   RETURN                SKIP IF NOT                        03120000
+                                                                        03130000
+RESPXMIT DS    0H                                                       03140000
+         LA    R0,RSN00           ISSUE RESPONSE TO COOP                03150000
+         DROP  Y                  RESPONSE CONVERSATION EXTENSION HDR   03160000
+                                                                        03170000
+*--------------------------------------------------------------         03180000
+*   RETURN TO REQUEST SCHEDULER                                         03190000
+*--------------------------------------------------------------         03200000
+RETURN   DS    0H                                                       03210000
+         LA    R15,RC00           NORMAL COMPLETION                     03220000
+         #EXIT ,                                                        03230000
+                                                                        03240000
+         EJECT                                                          03250000
+***************************************************************         03260000
+*                                                                       03270000
+* CATASTROPIC ERRORS                                                    03280000
+*                                                                       03290000
+***************************************************************         03300000
+                                                                        03310000
+ABE_TXP  DS    0H                                                       03320000
+         $ABEND ABE_TXPSERV,DUMP=YES,                                  X03330000
+               TITLE='TXP BUFFER SERVICE FAILURE'                       03340000
+                                                                        03350000
+         EJECT                                                          03360000
+***************************************************************         03370000
+*                                                                       03380000
+*   LOCAL READ ONLY DATA AREAS, ETC.                                    03390000
+*                                                                       03400000
+***************************************************************         03410000
+         LTORG ,                                                        03420000
+                                                                        03430000
+         EJECT                                                          03440000
+         PRINT NOGEN                                                    03450000
+         ICVT  ,                                                        03460000
+         ITASK ,                                                        03470000
+         IPCB  ,                                                        03480000
+         IUSER ,                                                        03490000
+         END   ,                                                        03500000

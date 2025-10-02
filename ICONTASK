@@ -1,0 +1,2084 @@
+ICONTASK TITLE 'ICONTASK - OPERATOR / CONSOLE COMMUNICATIONS TASK'      00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE: ICONTASK - Operator / Console communications task            00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    The primary function of the communications task is to              00080000
+*    accept MCS console commands from system operators and              00090000
+*    simulated console commands from other system tasks, and            00100000
+*    to schedule the execution of the associated command                00110000
+*    processing routines.  Other ancillary events including             00120000
+*    STOP and CANCEL are also monitored.                                00130000
+*                                                                       00140000
+*                                                                       00150000
+*    Command Definition                                                 00160000
+*    ------------------                                                 00170000
+*    The ICONCMDS module contains a description of all valid            00180000
+*    commands organized by command verb.  The command verb is           00190000
+*    the first token encountered in an MVS MODIFY (F) command           00200000
+*    or in the text of a simulated console command provided             00210000
+*    by another task. Each command is defined using the CMDVERB         00220000
+*    macro.                                                             00230000
+*                                                                       00240000
+*    Command verbs may have both a long and a short form,               00250000
+*    (STOP,P) for example. No other abbreviations are accepted.         00260000
+*                                                                       00270000
+*    A verb may be associated with a local command processing           00280000
+*    routine (CMDPROC=) which is run as a process under this            00290000
+*    task. Otherwise, the command may be associated with a              00300000
+*    named ITASK (CMDTASK=). In this case, the command is sent          00310000
+*    to the designated ITASK for asynchronous execution. If             00320000
+*    the command may run under control of one of several                00330000
+*    itasks, the operator must provided the destination itask           00340000
+*    name, as shown below:                                              00350000
+*                                                                       00360000
+*          F  PROCNAME,Command(<dest>), ...                             00370000
+*                                                                       00380000
+*                                                                       00390000
+*    Parsing                                                            00400000
+*    -------                                                            00410000
+*    The command processor is always presented with a left-             00420000
+*    justified, padded copy of the verb name and the text of            00430000
+*    any additional operands, just as entered by the operator.          00440000
+*                                                                       00450000
+*    If an operand syntax definition is identified via the              00460000
+*    PARSE= operand in the CMDVERB macro, the command operands          00470000
+*    are validated and a structure referred to as the Command           00480000
+*    Content Summary (CCSUMRY) is constructed to identify the           00490000
+*    operands coded and any associated value strings. If the            00500000
+*    parse fails, a system-standard error message is issued by          00510000
+*    this routine and the command processor is not invoked.             00520000
+*                                                                       00530000
+*                                                                       00540000
+*    Linkage                                                            00550000
+*    -------                                                            00560000
+*    Command processors (CMDPROCs and CMDTASKs) are presented           00570000
+*    with a Command Request block (CMDREQ), which contains              00580000
+*    the command verb and an operand string designation, if             00590000
+*    any.  Additionally, if PARSE= was coded in the command             00600000
+*    definition, CMDREQ.CMRQSMRY designates the location of the         00610000
+*    Command Content Summary (CCSUMRY), and CMDREQ.CMRQSMR#             00620000
+*    contains the number of operand keyword contained in that           00630000
+*    structure.  For CMDPROCs, the designations are pointers.           00640000
+*    For CMDTASKs, the designations are offsets from the                00650000
+*    beginning of the CMDREQ structure.                                 00660000
+*                                                                       00670000
+*                                                                       00680000
+*    Command Completion                                                 00690000
+*    ------------------                                                 00700000
+*    Standard command function completion codes are defined             00710000
+*    in CMDCODES.                                                       00720000
+*                                                                       00730000
+*    CMDPROCs return a completion code via R15.  Upon return            00740000
+*    this routine issues the standard completion or failure             00750000
+*    message associated with this code.  CCODE_NORESP (RC00)            00760000
+*    causes suppression of a completion message.                        00770000
+*                                                                       00780000
+*    CMDTASKs are not obligated to notify this routine of               00790000
+*    their results.  However, an ITM_COMMAND_RESP can be sent           00800000
+*    to this task together with the original CMDREQ block to            00810000
+*    issue a standardized response to the requestor after posting       00820000
+*    the appropriate CMDCODE in CMDREQ.CMRQCOMP. The extension          00830000
+*    areas (CCSUMRY and operand string) need not be sent.               00840000
+*                                                                       00850000
+*                                                                       00860000
+*    Command Input Source                                               00870000
+*    --------------------                                               00880000
+*    Commands can be acquired from real MCS consoles (including         00890000
+*    SDSF and other MCS console access facilities) and from             00900000
+*    ITM_CONS_SIM messages created by other workunits.  This            00910000
+*    facility is intended to allow operator-oriented product            00920000
+*    configuration commands to be submitted periodically or, in         00930000
+*    particular, at system startup.  Simulated console commands         00940000
+*    are treated exactly as their MCS counterparts except that          00950000
+*    response messages are directed only to the journal and not         00960000
+*    to a console.                                                      00970000
+*                                                                       00980000
+*    When the command source is an MCS console, the resulting           00990000
+*    message output is sent directly to the requester.  Some            01000000
+*    commands (ISSUE, for example) submit other command strings         01010000
+*    via ITM_CONS_SIM.  To ensure appropriate routing of                01020000
+*    command output, the $COMMAND macro used to submit the              01030000
+*    command should specify the information originally provided         01040000
+*    to the CMDPROC/CMDTASK via the Command Request Block               01050000
+*    (CMDREQ).  This is referred to as a proxy request.                 01060000
+*                                                                       01070000
+*                                                                       01080000
+*    Non-terminating Command Processes                                  01090000
+*    ---------------------------------                                  01100000
+*    Command processes (CMDPROCs) are run under their own               01110000
+*    process created by this ITASK for the duration of their            01120000
+*    execution.  This ensures that the appropriate cleanup is           01130000
+*    performed at command end and insulates the command                 01140000
+*    scheduler (this ITASK) from abends occuring in the                 01150000
+*    CMDPROC. Execution of the CMDPROC is usually synchronous;          01160000
+*    the scheduler waits for the CMDPROC to terminate before            01170000
+*    processing the next request.  However, a command can be            01180000
+*    marked "non-terminating" (ref CMDVERB).  Non-terminating           01190000
+*    commands are required to post a "command acceptance" EPB           01200000
+*    with a success are failure CMDCODE.  If successful, the            01210000
+*    process is not monitored and contends for service                  01220000
+*    independently of the the scheduler process.                        01230000
+*                                                                       01240000
+*                                                                       01250000
+* INBOUND INTERTASK MESSAGES:                                           01260000
+*                                                                       01270000
+*    ITM_CONS_SIM       - Simulated console input                       01280000
+*    ITM_COMMAND_STOP   - Terminate ITASK                               01290000
+*    ITM_COMMAND_RESP   - Standardized command response                 01300000
+*                                                                       01310000
+**<DOC-OFF>****************************************************         01320000
+                                                                        01330000
+         EJECT                                                          01340000
+***************************************************************         01350000
+*                                                                       01360000
+* MAINTENANCE:                                                          01370000
+*                                                                       01380000
+*    04/27/93 R. Turgeon                                                01390000
+*             Initial version                                           01400000
+*                                                                       01410000
+*    10/10/94 R. Turgeon                                                01420000
+*             Significant enhancements supporting non-terminating       01430000
+*             commands (ISSUE), output collection and delivery,         01440000
+*             and formalization of command requester / command          01450000
+*             execution via $COMMAND, $COMACK, and $COMSEND.            01460000
+*                                                                       01470000
+*    04/06/95 R. Turgeon                                                01480000
+*             Implement command scoping in support of HelpDesk          01490000
+*                                                                       01500000
+*    05/11/95 R. Colmone              PAR #187851                       01510000
+*             Terminate auto command submission process                 01520000
+*             if output is undeliverable to original requester.         01530000
+*                                                                       01540000
+*    10/23/95 R. Turgeon                                                01550000
+*             Ensure JOBLOG destination is set for command              01560000
+*             journalling and response when product is running          01570000
+*             under TSO.                                                01580000
+*                                                                       01590000
+***************************************************************         01600000
+                                                                        01610000
+         EJECT                                                          01620000
+         #WORK ,             BEGIN WORKAREA                             01630000
+                                                                        01640000
+STATUS   DS    X             STATUS FLAGS                               01650000
+STNSTOP  EQU   X'80'            STOP ORDER RECEIVED FROM MAIN TASK      01660000
+STNOMCS  EQU   X'40'            MCS CONSOLE COMMUNICATIONS NOT AVAIL    01670000
+                                                                        01680000
+CLASCMD  DS    C             TYPE OF COMMAND                            01690000
+CLASCMDF EQU   C'F'             MODIFY                                  01700000
+CLASCMDS EQU   C'S'             START                                   01710000
+CLASCMDP EQU   C'P'             STOP                                    01720000
+CLASCMD@ EQU   C'?'             UNKNOWN                                 01730000
+CLASCMD0 EQU   0                NO COMMAND AVAILABLE                    01740000
+                                                                        01750000
+BYTE     DS    X             GENERAL WORKAREA                           01760000
+                                                                        01770000
+RSVD1    DS    X             RESERVED                                   01780000
+$CMDNAME DS    CL8           COMMAND VERB                               01790000
+$PCBNAME DS    CL8           PROCESS NAME DERIVED FROM COMMAND NAME     01800000
+$CMDDEST DS    CL8           COMMAND DEST EXPLICITLY PROVIDED BY OPR    01810000
+                                                                        01820000
+INOPSLEN DS    F             LENGTH OF COMMAND OPERAND STRING           01830000
+INOPSORG DS    A             ORIGIN OF COMMAND OPERAND STRING           01840000
+                                                                        01850000
+SEQNO    DS    F             GENERIC UNIQUIFIER                         01860000
+@AMNRECQ DS    A             AUTOMATED COMMAND MONITOR ID QUEUE         01870000
+                                                                        01880000
+*--------------------------------------------------------------         01890000
+*   COMMAND / COMMAND REQUESTER SOURCE INDEPENDENT COMMON INFO          01900000
+*--------------------------------------------------------------         01910000
+                                                                        01920000
+SICI     DS    0F            SOURCE INDEPENDENT COMMON INFO             01930000
+RESPDEST DS    X             ADDITIONAL DESTINATIONS (REF $MSGCNST)     01940000
+SCOPEREQ DS    X             TRUE: SCOPE THE CMD TO REQUESTING WORKUNIT 01950000
+RETMSGS  DS    X             TRUE: RETURN MSGS TO REQUESTING WORKUNIT   01960000
+RSVD2    DS    X             RESERVED                                   01970000
+                                                                        01980000
+@CITREQ  DS    A             CITREQ IF $COMMAND CALL AND ZERO OTHERWISE 01990000
+REQAMN#  DS    F             AUTO COMMAND SUBMITTER IDNUM        187851 02000000
+REQAMNM  DS    CL8           AUTO COMMAND SUBMITTER IDENTIFIER          02010000
+REQITASK DS    CL8           REQUESTERS ITASK NAME                      02020000
+REQIPROC DS    CL8           REQUESTERS PROCESS NAME                    02030000
+REQIUSER DS    CL8           REQUESTERS USERID                          02040000
+REQTOKEN DS    XL8           WORKUNIT TOKEN OF REQUESTER OR ZERO        02050000
+REQOPTNS DS    X             COMMAND PROCESSING OPTIONS (CITOPTNS)      02060000
+REQRSVD1 DS    XL3           RESERVED                                   02070000
+                                                                        02080000
+CONSID   DS    F             COMMAND SOURCE CONSOLE ID                  02090000
+CONSNAME DS    CL8           COMMAND SOURCE CONSOLE NAME                02100000
+CONSCART DS    XL8           COMMAND RESPONSE TOKEN                     02110000
+AUTOSUB  DS    C'<12345678> Z'   AUTOMATED CMD SUBMISSION ID            02120000
+                                                                        02130000
+MQUESTGQ DS    A             ADDR OF $IMSGQ STGMGR POOL                 02140000
+MQUEMSGQ DS    A             ADDR OF $IMSGQ MESSAGE QUEUE ANCHOR WORD   02150000
+                                                                        02160000
+$MQCA    DS    A             ADDR OF $MSG QUEUE CONTROL AREA            02170000
+$MQCARES DS    F             MQCA RESOURCE MGR ROUTINE TOKEN            02180000
+$SRMRID@ DS    A             ADDR OF MQCA RESOURCE IDENTIFIER OR ZERO   02190000
+NTRMEPB  DS    F             NON-TERMINATING XEPB TOKEN                 02200000
+                                                                        02210000
+INCMDLEN DS    F             COMMAND TEXT LENGTH                        02220000
+INCMD    DS    CL128         COMMAND TEXT                               02230000
+INCMDDLM DS    XL4'00'       DLM CHARS                                  02240000
+                                                                        02250000
+$SRMHNDL DS    XL(SRMRIDLN)  $SRM RESOURCE IDENTIFIER                   02260000
+                                                                        02270000
+UTOKENL  DS    F             LENGTH OF UTOKEN OR ZERO IF N/A            02280000
+UTOKEN   DS    XL256         MAX STORAGE DEMAND FOR UTOKEN              02290000
+         ORG   UTOKEN                                                   02300000
+         DS    XL(L'TOKCURLN)                                           02310000
+         ORG   ,                                                        02320000
+                                                                        02330000
+SICILN   EQU   *-SICI        SOURCE INDEPENDENT COMMON INFO LENGTH      02340000
+                                                                        02350000
+*--------------------------------------------------------------         02360000
+                                                                        02370000
+VERBNTRY DS    A             ADDR OF CMDVERB ENTRY                      02380000
+@COMPTR  DS    A             EXTRACT FIELDS=COMM PTR RETURN             02390000
+MSGIN    DS    A             INBOUND MESSAGE BUFFER                     02400000
+MSGINLN  DS    F             INBOUND MESSAGE BUFFER LENGTH              02410000
+                                                                        02420000
+NDX_KEY  DS    F             KEYWORD OPERAND ERROR - KEYTAB NDX         02430000
+SCANERR  DS    A             KEYWORD OPERAND ERROR - FAILING TOKEN      02440000
+SCANMSG  DS    A             KEYWORD OPERAND ERROR - MESSAGE TEXT       02450000
+CPRTNRET DS    F             COMMAND PROCESSOR RETURN CODE              02460000
+                                                                        02470000
+CONEPB   @EPB  TYPE=BLOCK    OPERATOR INPUT                             02480000
+                                                                        02490000
+ECMDPROC @EPB  TYPE=BLOCK    LOCAL CMDPROC TERMINATION EPB              02500000
+                                                                        02510000
+$SRMMFL  $SRM  MF=L          $SRM    PLIST CONSTRUCTION AREA            02520000
+$TASKMFL $TASK MF=L          $TASK   PLIST CONSTRUCTION AREA            02530000
+$PROCMFL $PROC MF=L          $PROC   PLIST CONSTRUCTION AREA            02540000
+                                                                        02550000
+*--------------------------------------------------------------         02560000
+*   DYNAMICALLY ACQUIRED STORAGE AREAS                                  02570000
+*--------------------------------------------------------------         02580000
+                                                                        02590000
+@OPLIST  DS    0A,0F         OPERAND LIST (OPLIST) AREA                 02600000
+@OPLADDR DS    A                OPLIST ADDR                             02610000
+@OPLLEN  DS    F                OPLIST LENGTH                           02620000
+                                                                        02630000
+@CCS     DS    0A            COMMAND CONTENT SUMMARY                    02640000
+@CCSADDR DS    A                CCSUMRY ADDR                            02650000
+@CCSLEN  DS    F                CCSUMRY LENGTH                          02660000
+@CCSOPS  DS    F                NUMBER OF OPERAND ENTRIES               02670000
+@CCSLN   EQU   *-@CCS           LENGTH OF CONTENT SUMMARY               02680000
+                                                                        02690000
+@CMDMSG  DS    0A,0F         PORTABLE CMDREQ BLOCK AND APPENDAGES       02700000
+@CMDMSGA DS    A                STRUCTURE ORIGIN                        02710000
+@CMDMSGL DS    F                STRUCTURE LENGTH                        02720000
+                                                                        02730000
+*--------------------------------------------------------------         02740000
+*   GENERAL PURPOSE WORKAREAS                                           02750000
+*--------------------------------------------------------------         02760000
+                                                                        02770000
+PROCREGS DS    16F           MESSAGE PROCESSING                         02780000
+REGSAVE  DS    16F           LOCAL SUBROUTINE REGISTER SAVEAREA         02790000
+REGSAVE2 DS    16F           LOCAL SUBROUTINE REGISTER SAVEAREA         02800000
+WK256    DS    XL256         PLIST CONSTRUCTION, ETC.                   02810000
+                                                                        02820000
+         EJECT                                                          02830000
+         CMDREQ DSECT=NO     COMMAND EXECUTION REQUEST BLOCK            02840000
+                                                                        02850000
+         DS     XL(SRMRIDLN) ALLOWS APPEND OF MSG RESOURCE TOKEN        02860000
+                                                                        02870000
+         #ENDWORK ,          END WORKAREA                               02880000
+                                                                        02890000
+         EJECT                                                          02900000
+         CITREQ DSECT=YES    INTERTASK COMMAND EXECUTION REQUEST BLOCK  02910000
+                                                                        02920000
+         EJECT                                                          02930000
+         MQCA   DSECT=YES    $MSG QUEUE CONTROL AREA                    02940000
+                                                                        02950000
+         EJECT                                                          02960000
+         $SRM   DSECT=YES    SHARED RESOURCE MANAGER INTERFACES         02970000
+                                                                        02980000
+         EJECT                                                          02990000
+         $COMSEND DSECT=YES  INTERTASK CMD REQUEST/RESPONSE             03000000
+                                                                        03010000
+         EJECT                                                          03020000
+         $COMACK  DSECT=YES  INTERTASK CMD REQUEST/RESPONSE ACKNOWLEDGE 03030000
+                                                                        03040000
+         EJECT                                                          03050000
+         $PMON  DSECT=YES    AUTO CMD SUBMISSION TERMINATE SERVICE      03060000
+                                                                        03070000
+         EJECT                                                          03080000
+         TMSG  ,             INTERTASK MSG FORMAT                       03090000
+                                                                        03100000
+         EJECT                                                          03110000
+         $TASK DSECT=YES     $TASK SERVICES                             03120000
+                                                                        03130000
+         EJECT                                                          03140000
+         $PROC DSECT=YES     $PROC SERVICES                             03150000
+                                                                        03160000
+         EJECT                                                          03170000
+         CMDVERB DSECT=YES   COMMAND VERB TABLE                         03180000
+                                                                        03190000
+         EJECT                                                          03200000
+         KEYTAB DSECT=YES    COMMAND KEYWORD TABLE FORMATS              03210000
+                                                                        03220000
+         EJECT                                                          03230000
+         OPLIST ,            COMMAND KEYWORD & VALUES INSTANCES         03240000
+                                                                        03250000
+         EJECT                                                          03260000
+         CCSUMRY ,           COMMAND CONTENT SUMMARY                    03270000
+                                                                        03280000
+         EJECT                                                          03290000
+         EVCODES ,           EVENT CODES                                03300000
+                                                                        03310000
+         ABCODES ,           $ABEND CODES                               03320000
+                                                                        03330000
+         MSGCODES ,          INTERTASK MESSAGING CODES                  03340000
+                                                                        03350000
+         CMDCODES ,          STANDARD COMMAND PROCESSOR RESPONSES       03360000
+                                                                        03370000
+         EQUS  ,                                                        03380000
+                                                                        03390000
+         $MSGDFT PREFIX=ICTPID,COMPID='CMD',TABLE=*#MSGS,              X03400000
+               CONID=*CONSID,CONNAME=CONSNAME,CART=CONSCART,           X03410000
+               MSGQA=*MQUEMSGQ,STGQH=*MQUESTGQ,                        X03420000
+               MF=(E,WK256),                                           X03430000
+               PRINT=NOGEN                                              03440000
+                                                                        03450000
+         EJECT ,                                                        03460000
+ICONTASK #ENTER BASE=(R12,R9),AMODE=31,RMODE=24                         03470000
+                                                                        03480000
+         USING ITASK,R10                                                03490000
+                                                                        03500000
+*--------------------------------------------------------------         03510000
+*    LOC AND PROCESS STARTUP CIB, IF ANY, AND INIT OPR INTFCE           03520000
+*--------------------------------------------------------------         03530000
+                                                                        03540000
+         LA    R8,@COMPTR         ADDR OF RETURN AREA PTR               03550000
+                                                                        03560000
+         EXTRACT (R8),            LOCATE COMMUNICATIONS FIELDS         X03570000
+               FIELDS=COMM,                                            X03580000
+               MF=(E,MFE_LIST)                                          03590000
+                                                                        03600000
+         L     R8,@COMPTR         COMMUNICATIONS AREA                   03610000
+         USING COMLIST,R8         ADDRESSABILITY (IEZCOM)               03620000
+                                                                        03630000
+         QEDIT ORIGIN=COMCIBPT,CIBCTR=16   ESTABLISH QUEUE SIZE         03640000
+                                                                        03650000
+**<DOC-ON>*****************************************************         03660000
+*                                                                       03670000
+*   Initialize the message input EPB and the MCS console                03680000
+*   communications EPB using the system provided ECB as a               03690000
+*   STDENV "remote ECB".  In TSO (debug) and multistep                  03700000
+*   environments, it is possible that the console ECB will have         03710000
+*   already been waited on.  If this is true and the product is         03720000
+*   APF authorized, the ECB can simply be cleared and reused.           03730000
+*   Otherwise, MCS console communications is disabled.                  03740000
+*                                                                       03750000
+**<DOC-OFF>****************************************************         03760000
+                                                                        03770000
+         L     R4,COMECBPT        ACQUIRE ADDR OF COMM ECB              03780000
+         TM    0(R4),X'80'        WAIT BIT REMAINS ON FROM PRIOR USE?   03790000
+         BNO   CONINIT            NORMAL FUNCTIONS IF NOT               03800000
+                                                                        03810000
+         TM    ICTSTAT2,ICT2$APF  ARE WE APF AUTHORIZED?                03820000
+         BO    CLEARECB           NEED TO REPAIR OUR ENVIRON IF SO      03830000
+                                                                        03840000
+         $MSG  099                NO MCS CAPABILITY                     03850000
+                                                                        03860000
+         OI    STATUS,STNOMCS     RETAIN INDICATION OF LIMITATION       03870000
+         B     CONINIT            CONSOLE COMMUNICATIONS INIT COMPLETE  03880000
+                                                                        03890000
+*--------------------------------------------------------------         03900000
+*   CLEAR COMMUNICATIONS ECB                                            03910000
+*--------------------------------------------------------------         03920000
+                                                                        03930000
+CLEARECB DS    0H                 R4 CONTAINS THE ECB ADDRESS           03940000
+         MODESET EXTKEY=ZERO,     SWITCH TO KEY ZERO                   X03950000
+               SAVEKEY=(2)                                              03960000
+                                                                        03970000
+         XC    0(4,R4),0(R4)      CLEAR THE ECB                         03980000
+                                                                        03990000
+         MODESET KEYADDR=(2)      RESTORE KEY                           04000000
+                                                                        04010000
+*--------------------------------------------------------------         04020000
+*   INITIALIZE THE MESSAGE EPB                                          04030000
+*--------------------------------------------------------------         04040000
+                                                                        04050000
+CONINIT  DS    0H                                                       04060000
+         $TASK SETEPB,            DECLARE TASK MESSAGING EPB           X04070000
+               EPB=TSKMEPB,       INTER-TASK MESSAGING EPB             X04080000
+               ECODE=EC$MSG,      STD MSG DELIVERY CODE                X04090000
+               MF=(E,$TASKMFL)                                          04100000
+                                                                        04110000
+         B     RCONSIN            ASSUME START CIB AVAILABLE            04120000
+                                                                        04130000
+         EJECT ,                                                        04140000
+***************************************************************         04150000
+*                                                                       04160000
+*   COMMUNICATIONS EVENT / MESSAGE LOOP                                 04170000
+*                                                                       04180000
+***************************************************************         04190000
+                                                                        04200000
+CONCYCLE DS    0H                                                       04210000
+         TM    STATUS,STNSTOP     STOP REQUEST RECEIVED                 04220000
+         BO    FINRET             TERMINATE IF SO                       04230000
+                                                                        04240000
+         $TASK WAIT,              WAIT FOR EVENT                       X04250000
+               CANCEL=FINRET,     IMMEDIATE TERMINATION REQUESTED      X04260000
+               MF=(E,$TASKMFL)                                          04270000
+                                                                        04280000
+         C     R15,=A(EC$CNSIN)   MCS CONSOLE INPUT                     04290000
+         BE    RCONSIN                                                  04300000
+                                                                        04310000
+         C     R15,=A(EC$MSG)     MESSAGE                               04320000
+         BE    IMSGSIN                                                  04330000
+         B     CONCYCLE                                                 04340000
+                                                                        04350000
+*--------------------------------------------------------------         04360000
+*   TERMINATION REQUESTED                                               04370000
+*--------------------------------------------------------------         04380000
+                                                                        04390000
+FINRET   DS    0H                                                       04400000
+         LA    R15,RC00           NORMAL, AS FAR AS WE KNOW             04410000
+         #EXIT ,                  TERMINATE                             04420000
+                                                                        04430000
+         EJECT ,                                                        04440000
+***************************************************************         04450000
+*                                                                       04460000
+*   ACCEPT AND PROCESS MCS CONSOLE INPUT                                04470000
+*                                                                       04480000
+***************************************************************         04490000
+                                                                        04500000
+RCONSIN  DS    0H                                                       04510000
+         XC    UTOKENL,UTOKENL    RESET UTOKEN AVAILABILITY             04520000
+         ICM   R1,15,COMCIBPT     R1 <== ADDR OF CMD CIB                04530000
+         BZ    RCONSEND           SKIP IF NO CIB                        04540000
+                                                                        04550000
+         BAS   R14,EDITCIB        EXTRACT INFO DESCRIBING REQUEST/OR    04560000
+                                                                        04570000
+         L     R3,COMCIBPT        REFRESH CIB PTR FOR DELETE            04580000
+         QEDIT ORIGIN=COMCIBPT,BLOCK=(R3)                               04590000
+                                                                        04600000
+         OI    RESPDEST,$CONSOLE  RESPONSES DELIVERED TO CONSOLE        04610000
+                                                                        04620000
+         BAS   R14,PROCESS        PROCESS THE COMMAND                   04630000
+                                                                        04640000
+*--------------------------------------------------------------         04650000
+*   PROCESS ALL PENDING CIBS, THEN BACK TO EVENT/MESSAGE LOOP           04660000
+*--------------------------------------------------------------         04670000
+                                                                        04680000
+RCONSEND DS    0H                                                       04690000
+         ICM   R1,15,COMCIBPT     MORE CIB'S PENDING?                   04700000
+         BNZ   RCONSIN            PROCESS IF SO                         04710000
+                                                                        04720000
+         TM    STATUS,STNOMCS     MCS INTERFACE AVAILABLE?              04730000
+         BO    CONCYCLE           BYPASS EPB / ECB INIT IF NOT          04740000
+                                                                        04750000
+         $TASK SETEPB,            DECLARE CONSOLE INPUT EPB            X04760000
+               EPB=CONEPB,        FOR USE WITH CONSOLE INPUT           X04770000
+               ECB=*COMECBPT,     SYSTEM PROVIDES THE ECB              X04780000
+               ECODE=EC$CNSIN,    CONSOLE INPUT EVENT CODE             X04790000
+               MF=(E,$TASKMFL)                                          04800000
+                                                                        04810000
+         B     CONCYCLE           REPEAT                                04820000
+                                                                        04830000
+         EJECT ,                                                        04840000
+***************************************************************         04850000
+*                                                                       04860000
+*   Intertask messages can be used to submit commands or issue          04870000
+*   standard completion messages after a command has been               04880000
+*   processed by a partner ITASK.                                       04890000
+*                                                                       04900000
+***************************************************************         04910000
+IMSGSIN  DS    0H                                                       04920000
+         $TASK SETEPB,            DECLARE TASK MESSAGING EPB           X04930000
+               EPB=TSKMEPB,       INTER-TASK MESSAGING EPB             X04940000
+               ECODE=EC$MSG,      STD MSG DELIVERY CODE                X04950000
+               MF=(E,$TASKMFL)                                          04960000
+                                                                        04970000
+*--------------------------------------------------------------         04980000
+*   PROCESS ALL QUEUED MESSAGES                                         04990000
+*--------------------------------------------------------------         05000000
+                                                                        05010000
+IMSGNEXT DS    0H                                                       05020000
+         $TRECV (*MSGIN,*MSGINLN),MF=(E,MFE_LIST)                       05030000
+                                                                        05040000
+         B     *+4(R15)           ANALYZE COMPLETION CODE               05050000
+         B     IMSGRECV              00 - MESSAGE ARRIVED               05060000
+         B     CONCYCLE              04 - NO MESSAGES PENDING           05070000
+         B     IMSGSIZE              08 - MESSAGE AREA TOO SMALL        05080000
+         B     ERR_STG               12 - STORAGE FAILURE               05090000
+                                                                        05100000
+*--------------------------------------------------------------         05110000
+*   COMMAND PACKET SIZE EXCEEDS AVAILABLE BUFFER, REALLOCATE            05120000
+*--------------------------------------------------------------         05130000
+                                                                        05140000
+IMSGSIZE DS    0H                                                       05150000
+         LR    R3,R1              PRESERVE STG SIZE REQUIRED            05160000
+         ICM   R2,15,MSGIN        MESSAGE BUFFER PREV ALLOCATED?        05170000
+         BZ    CMDREALO                                                 05180000
+                                                                        05190000
+         STGRETN ADDR=(R2),LEN=*MSGINLN,QH=TSKSTG                       05200000
+                                                                        05210000
+CMDREALO DS    0H                                                       05220000
+         AR    R3,R3              ASSURE LASTING VALUE                  05230000
+                                                                        05240000
+         STGGET (R3),QH=TSKSTG                                          05250000
+                                                                        05260000
+         ST    R1,MSGIN           MESSAGE AREA ADDRESS                  05270000
+         ST    R3,MSGINLN         MESSAGE AREA LENGTH                   05280000
+         BNZ   ERR_STG                                                  05290000
+         B     IMSGNEXT                                                 05300000
+                                                                        05310000
+*--------------------------------------------------------------         05320000
+*   PROCESS INTERTASK REQUEST                                           05330000
+*--------------------------------------------------------------         05340000
+                                                                        05350000
+IMSGRECV DS    0H                                                       05360000
+         LA    R0,SICI            CLEAR SOURCE INDEPENDENT COMMON INFO  05370000
+         LA    R1,SICILN                                                05380000
+         SR    R15,R15                                                  05390000
+         MVCL  R0,R14                                                   05400000
+                                                                        05410000
+         L     R4,MSGIN           INTER-TASK MESSAGE BUFFER             05420000
+         USING TMSGSTD,R4         MAPPED                                05430000
+                                                                        05440000
+         CLC   TMSGTYPE,=A(ITM_CONS_SIM)                                05450000
+         BE    SCONSIN            SIMULATED CONSOLE INPUT               05460000
+                                                                        05470000
+         CLC   TMSGTYPE,=A(ITM_COMMAND_RESP)                            05480000
+         BE    RESPMSG            STANDARD COMMAND RESPONSE             05490000
+                                                                        05500000
+         CLC   TMSGTYPE,=A(ITM_COMMAND_STOP)                            05510000
+         BNE   IMSGDFT            SKIP IF NOT A STOP REQUEST            05520000
+         OI    STATUS,STNSTOP     INDICATE STOP REQUEST                 05530000
+         B     IMSGNEXT           NEXT MESSAGE                          05540000
+                                                                        05550000
+IMSGDFT  DS    0H                                                       05560000
+         $TMSGDFT (R4)            DEFAULT MESSAGE PROCESSING            05570000
+                                                                        05580000
+         B     IMSGNEXT           NEXT MESSAGE                          05590000
+                                                                        05600000
+         EJECT                                                          05610000
+**<DOC-ON>*****************************************************         05620000
+*                                                                       05630000
+*   COMMAND RESPONSE RECEIVED                                           05640000
+*                                                                       05650000
+*   A CMDTASK has sent a command response message back to the           05660000
+*   command scheduler.  This is usually done to add a standard          05670000
+*   completion message to the output generated by the remote            05680000
+*   command ITASK.                                                      05690000
+*                                                                       05700000
+*   $COMACK is issued to acquire the CMDREQ and MSGRSRCID               05710000
+*   components from the packet.  If a MSGRSRCID is returned,            05720000
+*   it indicates that command output message collection was             05730000
+*   active during the execution of the command, and that the            05740000
+*   result must be delivered to the command requester after             05750000
+*   the command scheduler is finished with it.                          05760000
+*                                                                       05770000
+**<DOC-OFF>****************************************************         05780000
+                                                                        05790000
+RESPMSG  DS    0H                                                       05800000
+         $COMACK TMSGSTD          ACKNOWLEDGE INTERTASK CMD REQ/RESP    05810000
+                                                                        05820000
+         BZ    RESPIN             INTERTASK / $SRM / LINKAGE ERROR      05830000
+         LA    R1,TMSGORG         R1 <== RESPONDING CMDTASK             05840000
+         BAS   R14,ACKFAIL        DOC INABILITY TO PROCESS RESPONSE     05850000
+         B     RESPCPT            DONE                                  05860000
+                                                                        05870000
+RESPIN   DS    0H                 ACCEPT MSG COLLECTOR RESOURCE ID      05880000
+         LTR   R0,R0              MSGRSRCID IDENTIFIED?                 05890000
+         BZ    RESPCMRQ           SKIP IF NOT                           05900000
+         MVI   RETMSGS,TRUE       MESSAGE RETURN REQUESTED              05910000
+         ST    R0,$SRMRID@        $MSG COLLECTOR RSRCID ADDR OR 0       05920000
+                                                                        05930000
+RESPCMRQ DS    0H                 ACCEPT COMPLETED COMMAND REQUEST BLK  05940000
+         LR    R5,R1              RESPONSE CMDREQ / MSGRSRCID PACKET    05950000
+C        USING CMDREQ,R5                                                05960000
+         MVC   $CMDNAME,C.CMRQVERB     COMMAND VERB                     05970000
+         MVC   $CMDDEST,C.CMRQDEST     DESTINATION NAME IF ANY          05980000
+         MVC   CONSID,C.CMRQCNID       EXTRACT CONSOLE ID               05990000
+         MVC   CONSNAME,C.CMRQCNAM     EXTRACT CONSOLE NAME             06000000
+         MVC   CONSCART,C.CMRQCART     MCS ASSIGNED CMD RESPONSE TOKEN  06010000
+         MVC   REQAMN#,C.CMRQAMN#      AUTO CMD SUBMITTER IDNUM  187851 06020000
+         MVC   REQAMNM,C.CMRQAMNM      AUTO CMD SUBMITTER IDENTIFIER    06030000
+         MVC   REQITASK,C.CMRQITSK     REQUESTING ITASK                 06040000
+         MVC   REQIPROC,C.CMRQPROC     REQUESTING PROCESS               06050000
+         MVC   REQIUSER,C.CMRQUSER     REQUESTING USERID                06060000
+         MVC   REQTOKEN,C.CMRQETKN     REQUESTING WORKUNIT IDENTIFIER   06070000
+         MVC   REQOPTNS,C.CMRQOPTN     COMMAND PROCESSING OPTIONS       06080000
+         MVC   MQUEMSGQ,C.CMRQMQA      $MSG QUEUE ANCHOR ADDRESS        06090000
+         MVC   MQUESTGQ,C.CMRQSTGQ     $MSG QUEUE STGMGR POOL           06100000
+         MVC   RESPDEST,C.CMRQDMSK+3   EXTRACT $MSG DESTINATIONS        06110000
+         NI    RESPDEST,$IMSGQ+$CONSOLE                                 06120000
+                                                                        06130000
+*--------------------------------------------------------------         06140000
+*   ISSUE STANDARD COMPLETION MESSAGE                                   06150000
+*--------------------------------------------------------------         06160000
+                                                                        06170000
+         L     R0,C.CMRQCOMP      R0 <== COMPLETION CODE                06180000
+         LA    R1,C.CMRQVERB      R1 <== COMMAND VERB                   06190000
+         BAL   R14,ANALPRTN       ISSUE STD COMPLETION MSG              06200000
+                                                                        06210000
+*--------------------------------------------------------------         06220000
+*   ROUTE CMD OUTPUT TO ORIGINAL REQUESTER                              06230000
+*--------------------------------------------------------------         06240000
+                                                                        06250000
+         ICM   R2,15,$SRMRID@     ADDR OF IDENTIFIER OF HELD RSRC OR 0  06260000
+         BZ    RESPCPT            NO RESOURCE ACCESS MADE               06270000
+                                                                        06280000
+         $COMSEND RESPONSE,       RESPOND TO SCHEDULER/REQUESTER       X06290000
+               CMDREQ=C.CMDREQ,           MOVING OUR RESPONSE ALONG    X06300000
+               REQLEN=CMRQLN+SRMRIDLN,    RETURN CMDREQ AND RSRCID     X06310000
+               MSGRSRCID=C.CMDREQ+CMRQLN  $MSG COLLECTOR RSRCID OR 0    06320000
+                                                                        06330000
+         BZ    RESPROUT           SUCCESSFUL DELIVERY                   06340000
+         TM    CMRQAMNM,BF        AUTO CMD IS SUBMITTER?                06350000
+         BZ    RESPROUT           SKIP IF NOT                           06360000
+                                                                        06370000
+         $MSG  386,DESTADD=RESPDEST, AUTOCMD END IF NOT DELIVERABLE    X06380000
+               FIELDS=(CMRQAMNM)                                        06390000
+                                                                        06400000
+         $PMON MONITORID=CMRQAMNM,  Terminate auto cmd submission      X06410000
+               MONIDNUM=*CMRQAMN#,                                     X06420000
+               CMDREQ=CMDREQ,                                          X06430000
+               MF=(E,MFE_LIST)                                          06440000
+                                                                        06450000
+*--------------------------------------------------------------         06460000
+*   RELEASE SHARED COMMAND OUTPUT $MSG COLLECTOR                        06470000
+*--------------------------------------------------------------         06480000
+                                                                        06490000
+RESPROUT DS    0H                                                       06500000
+         $SRM  RELEASE,                                                X06510000
+               RSRCID=(R2),                                            X06520000
+               MF=(E,$SRMMFL)                                           06530000
+                                                                        06540000
+*--------------------------------------------------------------         06550000
+*   RESPONSE PROCESSING COMPLETE                                        06560000
+*--------------------------------------------------------------         06570000
+                                                                        06580000
+RESPCPT  DS    0H                                                       06590000
+         B     IMSGNEXT           DONE                                  06600000
+         DROP  C                  PACKET-RESIDENT CMDREQ                06610000
+                                                                        06620000
+         EJECT                                                          06630000
+***************************************************************         06640000
+*                                                                       06650000
+*   INTERNALLY ISSUED COMMAND                                           06660000
+*                                                                       06670000
+*   The command and the requesters identity are extracted from          06680000
+*   the intertask command request block, or CIT, provided as            06690000
+*   vardata in the inbound message.  The source independent             06700000
+*   common info data areas are updated with CIT information.            06710000
+*                                                                       06720000
+***************************************************************         06730000
+                                                                        06740000
+SCONSIN  DS    0H                                                       06750000
+         ICM   R2,15,TMSGINFL     R0 <== BUFFER LENGTH                  06760000
+         BNP   SCONSFIN           IGNORE OTHERWISE                      06770000
+         LA    R5,TMSGINFO        ORIGIN OF MESSAGE PROPER              06780000
+         USING CITREQ,R5          INTERTASK COMMAND REQUEST BLOCK       06790000
+         CLC   CITCBID,=CL8'CITREQ'                                     06800000
+         BNE   SCONSFIN           IGNORE UNKNOWN REQUEST                06810000
+         ST    R5,@CITREQ         RETAIN CITREQ PTR FOR SERVICES        06820000
+                                                                        06830000
+*--------------------------------------------------------------         06840000
+*   EXTRACT REQUESTER IDENTITY AND CMD EXECUTION OPTIONS                06850000
+*--------------------------------------------------------------         06860000
+                                                                        06870000
+         MVI   CLASCMD,CLASCMDF   ALL MESSAGED COMMANDS ARE MODIFIES    06880000
+         MVC   REQAMN#,CITAMN#    AUTO COMMAND SUBMITTER IDNUM   187851 06890000
+         MVC   REQAMNM,CITAMNM    AUTO COMMAND SUBMITTER IDENTIFIER     06900000
+         MVC   REQITASK,CITITASK  REQUESTERS ITASK NAME                 06910000
+         MVC   REQIPROC,CITIPROC  REQUESTERS PROCESS NAME               06920000
+         MVC   REQIUSER,CITUSER   REQUESTERS USERID                     06930000
+         MVC   REQTOKEN,CITENTKN  TOKEN UNIQUELY IDENTIFYING WORKUNIT   06940000
+         MVC   REQOPTNS,CITOPTNS  COMMAND PROCESSING OPTIONS            06950000
+         MVC   CONSNAME,CITCONNM  MCS CONSOLE NAME                      06960000
+         MVC   CONSID,CITCONID    MCS CONSOLE ID                        06970000
+         MVC   CONSCART,CITCART   MCS COMMAND RESPONSE TOKEN            06980000
+         MVC   RESPDEST,CITDESTA  ADDITIONAL MESSAGE DESTINATIONS       06990000
+                                                                        07000000
+         TM    CITOPTNS,CITO_SCOPE                                      07010000
+         BNO   *+8                                                      07020000
+         MVI   SCOPEREQ,TRUE      COMMAND SCOPING/LIMITTING REQUIRED    07030000
+                                                                        07040000
+         TM    CITOPTNS,CITO_MSGRET                                     07050000
+         BNO   *+8                                                      07060000
+         MVI   RETMSGS,TRUE       RETURN CMD MESSAGES TO REQUESTER      07070000
+                                                                        07080000
+*--------------------------------------------------------------         07090000
+*   ACQUIRE VARIABLE LENGTH COMMAND STRING                              07100000
+*--------------------------------------------------------------         07110000
+                                                                        07120000
+         SR    R2,R2              PREPARE FOR INSERT                    07130000
+         ICM   R2,3,CITCMDL       LENGTH OF COMMAND TEXT                07140000
+         BNP   IMSGNEXT           IGNORE IF SILLY                       07150000
+         LA    R0,L'INCMD         MAX LENGTH OF INPUT COMMAND           07160000
+         CR    R2,R0              MAX EXCEEDED?                         07170000
+         BNH   *+6                SKIP IF NOT                           07180000
+         LR    R2,R0              TRUNCATE                              07190000
+         ST    R2,INCMDLEN        LENGTH OF COMMAND STRING              07200000
+                                                                        07210000
+         LH    R3,CITCMD          OFFSET  TO COMMAND TEXT               07220000
+         LA    R15,CITREQ(R3)     ADDRESS OF COMMAND TEXT               07230000
+         BCTR  R2,0               PREPARE FOR EX                        07240000
+         EX    R2,*+4             COPY CMD TEXT                         07250000
+         MVC   INCMD(*-*),0(R15)  EX OBJECT                             07260000
+                                                                        07270000
+*--------------------------------------------------------------         07280000
+*   ACQUIRE UTOKEN                                                      07290000
+*--------------------------------------------------------------         07300000
+                                                                        07310000
+         SR    R2,R2              PREPARE FOR INSERT                    07320000
+         ICM   R2,3,CITUTOKL      LENGTH OF UTOKEN                      07330000
+         ST    R2,UTOKENL         RETAIN UTOKEN LENGTH                  07340000
+         BNP   SCONTKN            SKIP IF OMITTED                       07350000
+                                                                        07360000
+         LH    R3,CITUTOK         OFFSET  TO UTOKEN                     07370000
+         LA    R15,CITREQ(R3)     ADDRESS OF UTOKEN                     07380000
+         BCTR  R2,0               PREPARE FOR EX                        07390000
+         EX    R2,*+4             COPY UTOKEN                           07400000
+         MVC   UTOKEN(*-*),0(R15) EX OBJECT                             07410000
+                                                                        07420000
+SCONTKN  DS    0H                                                       07430000
+                                                                        07440000
+*--------------------------------------------------------------         07450000
+*   BUILD MQCA IF $MSG OUTPUT WILL BE COLLECTED FOR REQUESTER           07460000
+*--------------------------------------------------------------         07470000
+                                                                        07480000
+         CLI   RETMSGS,TRUE       MESSAGE RETURN REQUESTED?             07490000
+         BNE   NOMSGRET           SKIP IF NOT                           07500000
+                                                                        07510000
+         MQCA  GET,ANCHOR=$MQCA,  ACQUIRE AN MQCA                      X07520000
+               RESTOKEN=$MQCARES, MQCA RESOURCE MANAGER                X07530000
+               RESOWNER=*TSKPCBC                                        07540000
+                                                                        07550000
+         BNZ   NOMSGRET           SERVICE FAILURE                       07560000
+                                                                        07570000
+         USING MQCA,R1            POST MQCA AREAS IN SICI               07580000
+         OI    RESPDEST,$IMSGQ    REQUEST MESSAGE QUEUEING              07590000
+         LA    R0,MQCMSGQA        MESSAGE QUEUE ANCHOR WORD ADDR        07600000
+         ST    R0,MQUEMSGQ                                              07610000
+         LA    R0,MQCSTGQH        MESSAGE QUEUE STGMGR                  07620000
+         ST    R0,MQUESTGQ                                              07630000
+         DROP  R1                 MQCA                                  07640000
+                                                                        07650000
+*--------------------------------------------------------------         07660000
+*   DECLARE THE MQCA AS SHARED RESOURCE, RSRCID IN MODEL CMDREQ         07670000
+*--------------------------------------------------------------         07680000
+                                                                        07690000
+         LA    R2,CMDREQ+CMRQLN   SRM RESOURCE TOKEN RETURN AREA        07700000
+                                                                        07710000
+         $SRM  CREATE,            CREATE MSG RSRCID IN CMD BUFFER      X07720000
+               RSRCID=(R2),                                            X07730000
+               DESTRUCTOR=*#MQCADES,                                   X07740000
+               DESPARM=*$MQCA,                                         X07750000
+               RESOWNER=*TSKPCBC,                                      X07760000
+               RESMGRTKN=$MQCARES,                                     X07770000
+               MF=(E,$SRMMFL)                                           07780000
+                                                                        07790000
+         BNZ   NOMSGRET           ABORT THE COMMAND IF SERVICE ERROR    07800000
+                                                                        07810000
+         ST    R2,$SRMRID@        ADDR OF IDENTIFIER OF HELD RESOURCE   07820000
+         XC    $MQCA,$MQCA        MQCA OWNERSHIP TRANSFERRED TO $SRM    07830000
+                                                                        07840000
+*--------------------------------------------------------------         07850000
+*   PROCESS THE COMMAND                                                 07860000
+*--------------------------------------------------------------         07870000
+                                                                        07880000
+NOMSGRET DS    0H                                                       07890000
+         BAS   R14,PROCESS        PROCESS THE COMMAND                   07900000
+                                                                        07910000
+*--------------------------------------------------------------         07920000
+*   PROCESS THE COMMAND                                                 07930000
+*--------------------------------------------------------------         07940000
+                                                                        07950000
+SCONSFIN DS    0H                                                       07960000
+         B     IMSGNEXT           REPEAT                                07970000
+         DROP  R4,R5              TMSGSTD, CITREQ                       07980000
+                                                                        07990000
+         EJECT ,                                                        08000000
+**<DOC_ON>*****************************************************         08010000
+*                                                                       08020000
+* ROUTINE:  PROCESS - Parse command and schedule execution              08030000
+*                                                                       08040000
+* DESCRIPTION:                                                          08050000
+*                                                                       08060000
+*    This routine accepts a console or internally submitted             08070000
+*    command and applies the following procedure to validate            08080000
+*    and execute it.                                                    08090000
+*                                                                       08100000
+*                                                                       08110000
+*    1) Convert the command text to upper case. All subsequent          08120000
+*       validation is case sensitive.  (FUTURE: omit text within        08130000
+*       quotes).                                                        08140000
+*                                                                       08150000
+*    2) If we are processing the product START command, extract         08160000
+*       the console identifiers and save in the ICVT. This              08170000
+*       console is the default destination for all subsequent           08180000
+*       $CONSOLE messages.                                              08190000
+*                                                                       08200000
+*    3) Convert MCS STOP commands to the more convenient MODIFY         08210000
+*       format.                                                         08220000
+*                                                                       08230000
+*    4) Log the arrival of the command request.                         08240000
+*                                                                       08250000
+*    5) Extract the verb name and destination ITASK name.               08260000
+*       Validate the verb and ensure that the associated ITASK          08270000
+*       destination, if any, conforms to the command                    08280000
+*       definition.                                                     08290000
+*                                                                       08300000
+*    6) Parse and validate the command operands if an operand           08310000
+*       syntax definition exists.  If no errors are encountered         08320000
+*       build the Command Content Summary (CCSUMRY).                    08330000
+*                                                                       08340000
+*    7) Invoke the local command processing routine (CMDPROC)           08350000
+*       or send the command to the designated ITASK (CMDTASK).          08360000
+*                                                                       08370000
+*    8) Upon completion of a local CMDPROC, route the buffered          08380000
+*       results to the original requester.                              08390000
+*                                                                       08400000
+*    9) Release working storage acquired for the execution of           08410000
+*       this command.                                                   08420000
+*                                                                       08430000
+*                                                                       08440000
+* ON ENTRY:                                                             08450000
+*                                                                       08460000
+*    INCMD    - null terminated input command string                    08470000
+*    INCMDLEN - length of input command ( strlen(INCMD) )               08480000
+*                                                                       08490000
+**<DOC-OFF>****************************************************         08500000
+                                                                        08510000
+PROCESS  DS    0H                                                       08520000
+         STM   R0,R15,PROCREGS                                          08530000
+                                                                        08540000
+         L     R15,INCMDLEN       LENGTH OF COMMAND TEXT                08550000
+         BCTR  R15,0              LENGTH CODE                           08560000
+         LTR   R15,R15            ANYTHING TO XLATE?                    08570000
+         BM    PROCUC             SKIP IF NOT                           08580000
+                                                                        08590000
+         MVI   WK256,C' '         CONVERT TO UPPER CASE                 08600000
+         MVC   WK256+1(L'WK256-1),WK256                                 08610000
+         OC    INCMD(*-*),WK256                                         08620000
+         EX    R15,*-6                                                  08630000
+                                                                        08640000
+PROCUC   DS    0H                                                       08650000
+                                                                        08660000
+*--------------------------------------------------------------         08670000
+*   SPECIAL PROCESSING FOR MCS START AND STOP COMMANDS                  08680000
+*--------------------------------------------------------------         08690000
+                                                                        08700000
+         CLI   CLASCMD,CLASCMDS   STARTUP?                              08710000
+         BNE   PROCNS             SKIP IF NOT                           08720000
+         OI    ICTSTAT3,ICT3$STC  NOTE STC                              08730000
+         MVC   ICTCONID,CONSID    CONSOLE NUMBER                        08740000
+         MVC   ICTCONNM,CONSNAME  CONSOLE NAME                          08750000
+         XC    INCMDLEN,INCMDLEN  DISCARD PARM FIELD                    08760000
+PROCNS   DS    0H                                                       08770000
+                                                                        08780000
+         CLI   CLASCMD,CLASCMDP   STOP COMMAND?                         08790000
+         BNE   PROCNP             SKIP IF NOT                           08800000
+         LA    R0,L'FSTOP         LENGTH OF STOP VERB                   08810000
+         ST    R0,INCMDLEN        POST AS 'F PROC,STOP'                 08820000
+         MVC   INCMD(L'FSTOP),FSTOP                                     08830000
+                                                                        08840000
+         QEDIT ORIGIN=COMCIBPT,CIBCTR=16   REESTABLISH QUEUE SIZE       08850000
+                                                                        08860000
+PROCNP   DS    0H                                                       08870000
+                                                                        08880000
+*--------------------------------------------------------------         08890000
+*   LOG THE COMMAND OPERANDS, IF NO OPS LOG THE CMD ITSELF              08900000
+*--------------------------------------------------------------         08910000
+                                                                        08920000
+         LA    R1,INCMD           COMMAND ORIGIN                        08930000
+         L     R0,INCMDLEN        COMMAND LENGTH                        08940000
+                                                                        08950000
+         LR    R14,R1                                                   08960000
+         LR    R15,R0                                                   08970000
+         SR    R3,R3              PREPARE FOR COMPARE                   08980000
+         ICM   R3,8,=C' '         AGAINST ARBITRARY BLANKS STRING       08990000
+         CLCL  R14,R2             ALL BLANKS?                           09000000
+         BNE   PROCLOG            JOURNAL AND GO IF NOT                 09010000
+                                                                        09020000
+         LM    R0,R1,CMD_F        PRESUME MODIFY                        09030000
+         CLI   CLASCMD,CLASCMDF                                         09040000
+         BE    PROCLOG                                                  09050000
+         LM    R0,R1,CMD_S        PRESUME START                         09060000
+         CLI   CLASCMD,CLASCMDS                                         09070000
+         BE    PROCLOG                                                  09080000
+         LM    R0,R1,CMD_P        PRESUME STOP                          09090000
+         CLI   CLASCMD,CLASCMDP                                         09100000
+         BE    PROCLOG                                                  09110000
+         LM    R0,R1,CMD_@        ERROR                                 09120000
+                                                                        09130000
+PROCLOG  DS    0H                 R1 - CMD ORIGIN, R0 - LENGTH          09140000
+         BAS   R14,LOGCMD         MAINTAIN JOURNAL TRAIL                09150000
+                                                                        09160000
+         EJECT                                                          09170000
+**<DOC-ON>*****************************************************         09180000
+*                                                                       09190000
+*   Construct command request block (CMDREQ)                            09200000
+*                                                                       09210000
+*   The CMDREQ block is the principle input to both CMDPROCs            09220000
+*   and CMDTASKs.  It identifies the command requester, output          09230000
+*   ($MSG) destination information, and optionally a message            09240000
+*   collector area that can be used to deliver the command              09250000
+*   output to the original requester.  It is built early so             09260000
+*   that it is available as a summary block in the event of             09270000
+*   errors, etc.  Other fields needed to complete command               09280000
+*   scheduling are added as the become available.  Error                09290000
+*   handlers may not assume that the CMDREQ is complete.                09300000
+*                                                                       09310000
+**<DOC-OFF>****************************************************         09320000
+                                                                        09330000
+         XC    CMDREQ(CMRQLN),CMDREQ                                    09340000
+         MVC   CMRQCBID,=CL8'CMDREQ'                                    09350000
+         MVC   CMRQCNID,CONSID    REQUESTING CONSOLE ID                 09360000
+         MVC   CMRQCNAM,CONSNAME  REQUESTING CONSOLE NAME               09370000
+         MVC   CMRQCART,CONSCART  MCS ASSIGNED CMD RESPONSE TOKEN       09380000
+         MVC   CMRQAMN#,REQAMN#   AUTO COMMAND SUBMITTER IDNUM   187851 09390000
+         MVC   CMRQAMNM,REQAMNM   AUTO COMMAND SUBMITTER IDENTIFIER     09400000
+         MVC   CMRQITSK,REQITASK  REQUESTING ITASK                      09410000
+         MVC   CMRQPROC,REQIPROC  REQUESTING PROCESS                    09420000
+         MVC   CMRQUSER,REQIUSER  REQUESTING USERID                     09430000
+         MVC   CMRQETKN,REQTOKEN  REQUESTING WORKUNIT IDENTIFIER        09440000
+         MVC   CMRQOPTN,REQOPTNS  COMMAND PROCESSING OPTIONS            09450000
+         MVC   CMRQMQA,MQUEMSGQ   $MSG QUEUE ANCHOR ADDRESS             09460000
+         MVC   CMRQSTGQ,MQUESTGQ  $MSG QUEUE STGMGR POOL                09470000
+         MVC   CMRQDMSK+3(1),RESPDEST  DECLARE ADDTN'L DESTS FOR REPLY  09480000
+                                                                        09490000
+         LA    R0,@AMNRECQ        AUTOMATED COMMAND MONITORS            09500000
+         ST    R0,CMRQAMNQ        AVAILABLE TO CMDPROC'S                09510000
+                                                                        09520000
+*--------------------------------------------------------------         09530000
+*   EXTRACT COMMAND VERB AND DESTINATION, VALIDATE                      09540000
+*--------------------------------------------------------------         09550000
+                                                                        09560000
+         LA    R1,INCMD           R1 <== COMMAND ORIGIN                 09570000
+         ICM   R0,15,INCMDLEN     R0 <== COMMAND LENGTH                 09580000
+         BZ    PROCNORM           NO WORK                               09590000
+                                                                        09600000
+         BAS   R14,VRBDSTX        EXTRACT VERB AND DESTINTATION         09610000
+         B     *+4(R15)           ANALYZE COMPLETION CODE               09620000
+         B     PROCVERB              RC00 - VERB AND DEST AVAIL         09630000
+         B     PERR_VSY              RC04 - INVALID VERB SYNTAX         09640000
+         B     PERR_DSY              RC08 - INVALID DEST SYNTAX         09650000
+                                                                        09660000
+PROCVERB DS    0H                                                       09670000
+         L     R15,INCMDLEN       LENGTH OF COMMAND STRING              09680000
+         SR    R15,R0             MINUS LENGTH OF VERB, ETC.            09690000
+         ST    R15,INOPSLEN       LEAVES LENGTH OF OPERAND STRING       09700000
+         LA    R15,INCMD          COMMAND STRING ORIGIN                 09710000
+         AR    R15,R0             VERB, ETC. ALREADY PROCESSED          09720000
+         ST    R15,INOPSORG       ORIGIN OF COMMAND OPERANDS            09730000
+                                                                        09740000
+         MVC   CMRQVERB,$CMDNAME  SYNTACTIC COMMAND VERB                09750000
+         MVC   CMRQDEST,$CMDDEST  SYNTACTIC DESTINATION NAME IF ANY     09760000
+         MVC   CMRQOPLN,INOPSLEN  LENGTH OF OPERAND STRING SO FAR       09770000
+                                                                        09780000
+*--------------------------------------------------------------         09790000
+*   LOCATE COMMAND (VERB) DEFINITION AND TASK ROUTING INFO              09800000
+*--------------------------------------------------------------         09810000
+                                                                        09820000
+         LA    R0,$CMDNAME        R0 <== VERB                           09830000
+         L     R1,#CONCMDS        R1 <== COMMAND VERB TABLE             09840000
+         BAS   R14,LOCVERBE       LOCATE CMD TABLE ENTRY FOR VERB       09850000
+         BNZ   PERR_VSY           VERB NOT FOUND                        09860000
+                                                                        09870000
+         LR    R5,R1              COMMAND VERB TABLE ENTRY              09880000
+         USING CMDVERB,R5         ENTRY FORMAT                          09890000
+         ST    R5,VERBNTRY        SAVE ENTRY ADDR FOR LATER USE         09900000
+         MVC   $CMDNAME,CMDLNAME  CARRY LONG FORM OF VERB NAME          09910000
+         TM    $CMDDEST,BF        DESTINATION SPECIFIED BY OPR?         09920000
+         BZ    PROCDEST           ELSEWHERE IF NOT                      09930000
+         CLI   CMDTASKP,C'*'      CMD ADMITS EXPLICIT DEST?             09940000
+         BNE   PERR_DST           ERROR IF NOT                          09950000
+         B     PROCDFIN           ELSE OK                               09960000
+                                                                        09970000
+PROCDEST DS    0H                 ASSIGN IMPLICIT DESTINATION           09980000
+         MVC   $CMDDEST,CMDTASKP  PRIMARY ITASK                         09990000
+         CLI   $CMDDEST,C'*'      EXPLICIT DEST SOLICITED?              10000000
+         BNE   PROCDFIN           ACCEPT DEFAULT                        10010000
+         MVC   $CMDDEST,CMDTASKS  SECONDARY ITASK, IF ANY               10020000
+                                                                        10030000
+PROCDFIN DS    0H                                                       10040000
+         MVC   CMRQVERB,$CMDNAME  FORMAL COMMAND VERB                   10050000
+         MVC   CMRQDEST,$CMDDEST  FORMAL DESTINATION NAME IF ANY        10060000
+                                                                        10070000
+*--------------------------------------------------------------         10080000
+*   IF COMMAND IS AUTHORIZED, ENSURE THE REQUESTER IS UNSCOPED          10090000
+*--------------------------------------------------------------         10100000
+                                                                        10110000
+         TM    CMDFLAGS,CMDFAUTH  COMMAND FOR AUTHORIZED CALLERS ONLY?  10120000
+         BNO   AUTHVERB           SKIP IF NOT                           10130000
+         CLI   SCOPEREQ,FALSE     SCOPE CONSTRAINED REQUESTER?          10140000
+         BNE   PERR_VCM           ERROR IF SO                           10150000
+                                                                        10160000
+AUTHVERB DS    0H                                                       10170000
+                                                                        10180000
+         EJECT                                                          10190000
+**<DOC-ON>*****************************************************         10200000
+*                                                                       10210000
+*   Prepare for parse if operands have been formally defined.           10220000
+*                                                                       10230000
+*   CMDSCAN is invoked to construct an OPLIST.  Each entry in           10240000
+*   that block corresponds to the KEYTAB entry sharing the              10250000
+*   entry number.  KEYTAB entries define the keyword, its               10260000
+*   options and value formats.  OPLIST entries, built in                10270000
+*   dynamically acquired storage, denote which operands are             10280000
+*   used and their associated values.                                   10290000
+*                                                                       10300000
+*   If the requester is not authorized (i.e. scoped), ICONSCOP          10310000
+*   is invoked to determine / ensure that the command can               10320000
+*   impact only the requesters workunit.  This is sometimes             10330000
+*   accomplished by adding additional command keyword values            10340000
+*   to the end of the original command text.  These new tokens          10350000
+*   are referred to as command line "extensions" below.                 10360000
+*                                                                       10370000
+**<DOC-OFF>****************************************************         10380000
+                                                                        10390000
+         ICM   R6,15,CMDKEYS      KEYWORD TABLE, ETC. DEFINED?          10400000
+         BZ    PROCPROC           SKIP IF NOT                           10410000
+         USING KEYHDR,R6          KEYWORD TABLE HEADER                  10420000
+                                                                        10430000
+         ICM   R2,15,KEYHCNT      NUMBER OF KEYWORD ENTRIES             10440000
+         BZ    PROCPROC           UNUSUAL, BUT NOT FATAL                10450000
+         MH    R2,=AL2(OPLISTLN)  SIZE OF OPLIST BACKING KEYTAB         10460000
+                                                                        10470000
+         STGGET (R2),QH=TSKSTG    ACQUIRE CLEARED STORAGE               10480000
+         BNZ   ERR_STG            STORAGE MGMT FAILURE                  10490000
+                                                                        10500000
+         STM   R1,R2,@OPLIST      OPLIST BLOCK ORIGIN & LENGTH          10510000
+         LR    R3,R1              OPLIST BLOCK ORIGIN                   10520000
+         L     R4,KEYHORG         OPERAND KEYWORD TABLE ORIGIN          10530000
+                                                                        10540000
+*--------------------------------------------------------------         10550000
+*   PARSE ALL COMMAND LINE OPERANDS, MSG AND TERMINATE IF ERROR         10560000
+*--------------------------------------------------------------         10570000
+                                                                        10580000
+         MVC   FWORD,INOPSORG     MODIFIABLE COPY OF OPERAND STR ORG    10590000
+                                                                        10600000
+PRPARSE  DS    0H                                                       10610000
+         $CLINK FUNC=*#CMDSCAN,   COMMAND LINE PARSE SERVICE           X10620000
+               (STRUCT*,(R4)),    KEYWORD TABLE                        X10630000
+               (STRUCT*,(R3)),    OPERAND LIST                         X10640000
+               (CHAR**,FWORD),    OPERAND PORTION OF CMD LINE          X10650000
+               (INT*,NDX_KEY),    KEYWORD TABLE ENTRY INDEX ERR RETURN X10660000
+               (CHAR**,SCANMSG),  EBCIDICZ ERROR MSG TEXT              X10670000
+               (CHAR**,SCANERR)   ERROR LOCATION WITHIN OPERAND STRING  10680000
+                                                                        10690000
+         LTR   R15,R15            TEST PARSE COMPLETION                 10700000
+         BZ    PRPARSE            KEYWORD PROCESSED, OTHERS MAY REMAIN  10710000
+         BP    PERR_PAR           PARSE ERROR                           10720000
+                                                                        10730000
+*--------------------------------------------------------------         10740000
+*    VALIDATE OPERAND USAGE IF REQUESTER IS SCOPED                      10750000
+*--------------------------------------------------------------         10760000
+                                                                        10770000
+         CLI   SCOPEREQ,FALSE     SCOPE CONSTRAINED REQUESTER?          10780000
+         BE    OP_AUTH            NO FUTHER VALIDATION IF NO            10790000
+                                                                        10800000
+         L     R2,INCMDLEN        LENGTH OF COMMAND STRING & dlm        10810000
+         LA    R2,INCMD+1(R2)     FIRST AVAILABLE BYTE OF EXTEND AREA   10820000
+         LA    R4,INCMD+L'INCMD   END OF COMMAND BUFFER                 10830000
+         SR    R4,R2              LENGTH AVAILABLE FOR EXTENSIONS       10840000
+                                                                        10850000
+         @CALL ICONSCOP,(KEYHDR,(R3),*@CITREQ,(R2),(R4)),              X10860000
+               MF=(E,MFE_LIST)                                          10870000
+                                                                        10880000
+         LTR   R15,R15            ANY PROBLEMS?                         10890000
+         BNZ   PERR_VOP           TREAT AS A VIOLATION                  10900000
+                                                                        10910000
+         LTR   R1,R0              LENGTH OF COMMAND LINE EXTENSIONS     10920000
+         BZ    OP_AUTH            NO EXTENSIONS MADE                    10930000
+         LA    R1,1(,R1)          ACCOUNT FOR LEADING NULL TERMINATOR   10940000
+         A     R1,CMRQOPLN        TOTAL LENGTH OF OPERAND STRING        10950000
+         ST    R1,CMRQOPLN        UPDATE SUMMARY BLOCK ACCORDINGLY      10960000
+                                                                        10970000
+OP_AUTH  DS    0H                                                       10980000
+                                                                        10990000
+*--------------------------------------------------------------         11000000
+*   BUILD CMD CONTENT SUMMARY FROM KEYTAB AND OPLIST ARRAYS             11010000
+*--------------------------------------------------------------         11020000
+                                                                        11030000
+         XC    @CCS(@CCSLN),@CCS  RESET CONTENT SUMMARY DATA            11040000
+         L     R1,@OPLADDR        R1 <== ADDR OF OPERAND LIST           11050000
+         L     R0,KEYHCNT         R0 <== # ELIGIBLE OPERANDS            11060000
+         BAS   R14,TALLYOPS       COUNT ACTUAL OPERANDS AND VALUES      11070000
+         LTR   R1,R1              ANY OPERANDS PRESENT?                 11080000
+         BZ    PROCPROC           NO FURTHER EXAMINATION IF NOT         11090000
+                                                                        11100000
+         ST    R1,@CCSOPS         SAVE OPERAND COUNT                    11110000
+         ST    R1,CMRQSMR#        NUMBER OF CMD SMRY ENTRIES            11120000
+         MH    R0,=AL2(CCSVSLN)   CONTENT SMRY STG RQMT - VALUES        11130000
+         MH    R1,=AL2(CCSPFXL)   CONTENT SMRY STG RQMT - OPERANDS      11140000
+         AR    R1,R0              TOTAL STG RQMT FOR CONTENT SMRY       11150000
+         LR    R2,R1              PREPARE FOR STG REQUEST               11160000
+                                                                        11170000
+         STGGET (R2),QH=TSKSTG    ACQUIRE STORAGE FOR CONTENT SUMMARY   11180000
+         BNZ   ERR_STG            STORAGE MGMT FAILURE                  11190000
+         STM   R1,R2,@CCS         COMMAND CONTENT SUMMARY               11200000
+                                                                        11210000
+         @CALL ICONCSMY,(*KEYHORG,*@OPLADDR,*@CCSADDR,*INOPSORG),      X11220000
+               CTYPE=STD,                                              X11230000
+               MF=(E,MFE_LIST)                                          11240000
+                                                                        11250000
+         EJECT                                                          11260000
+**<DOC-ON>*****************************************************         11270000
+*                                                                       11280000
+*   Invoke local command processing routine (CMDPROC)                   11290000
+*                                                                       11300000
+*   Local CMDPROCs run as processes under the communications            11310000
+*   ITASK.  This provides standard process recovery facilities          11320000
+*   for the CMDPROC and a path to CMDPROC parrallelism in the           11330000
+*   future.  Usually, the CMDPROC runs as a subroutine of the           11340000
+*   communications task. A $TASK WAIT blocks further processing         11350000
+*   until the CMDPROC terminates.  However, if the command verb         11360000
+*   is defined as 'nonterminating' the $TASK WAIT is issued             11370000
+*   only to ensure that the request has been accepted.                  11380000
+*                                                                       11390000
+**<DOC-OFF>****************************************************         11400000
+                                                                        11410000
+PROCPROC DS    0H                                                       11420000
+         ICM   R15,15,CMDPRTN     LOCAL PROCESSING ROUTINE DEFINED?     11430000
+         BZ    PROCTASK           SKIP IF NOT                           11440000
+                                                                        11450000
+         MVC   CMRQOPST,INOPSORG  ORIGIN OF OPERAND STRING              11460000
+         MVC   CMRQSMRY,@CCSADDR  ORIGIN OF COMMAND CONTENT SUMMARY     11470000
+         ICM   R1,15,UTOKENL      UTOKEN ?                              11480000
+         BZ    *+8                SKIP IF NOT                           11490000
+         LA    R1,UTOKEN          ORIGIN OF UTOKEN CLONE                11500000
+         ST    R1,CMRQUTOK        UTOKEN CLONE ADDRESS OR ZERO          11510000
+                                                                        11520000
+         TM    CMDFLAGS,CMDFNTRM  STANDARD (TERMINATING) CMDPROC?       11530000
+         BO    NONTERM            MORE ELABORATE LINKAGE IF NONTERM     11540000
+                                                                        11550000
+*--------------------------------------------------------------         11560000
+*   ESTABLISH AN EPB FOR COMMAND ACCEPTANCE / COMPLETION                11570000
+*--------------------------------------------------------------         11580000
+                                                                        11590000
+         $TASK SETEPB,            DECLARE CMDPROC TERMINATION EPB      X11600000
+               EPB=ECMDPROC,      FOR USE WITH CONSOLE INPUT           X11610000
+               ECODE=EC$TERM_PROC,   PROCESS TERMINATION               X11620000
+               SCOPE=LOCAL,       LOCAL TASK EVENT                     X11630000
+               MF=(E,$TASKMFL)                                          11640000
+                                                                        11650000
+*--------------------------------------------------------------         11660000
+*   CREATE THE CMDPROC - COMMAND COMPLETES AT TERMINATION               11670000
+*--------------------------------------------------------------         11680000
+                                                                        11690000
+         $PROC CREATE,            CMDPROC RUNS AS DISTINCT PROCESS     X11700000
+               EP=*CMDPRTN,       ENTRY POINT FROM CMD TABLE           X11710000
+               PARM=CMDREQ,       CMDPROC PARAMETERS                   X11720000
+               NAME=$CMDNAME,     VERB NAME BECOMES PROCESS NAME       X11730000
+               TERMEPB=ECMDPROC,  SIGNAL COMPLETION                    X11740000
+               MF=(E,$PROCMFL)    WORKAREA                              11750000
+                                                                        11760000
+*--------------------------------------------------------------         11770000
+*   AWAIT COMPLETION OF TERMINATING COMMAND PROCS                       11780000
+*--------------------------------------------------------------         11790000
+                                                                        11800000
+         $TASK WAIT,              AWAIT CMDPROC COMPLETION             X11810000
+               EPB=ECMDPROC,      RETURN COMPLETION CODE IN R0         X11820000
+               MF=(E,$TASKMFL)                                          11830000
+                                                                        11840000
+         LA    R1,$CMDNAME        ASSOCIATED COMMAND, R0 CONTAINS RC    11850000
+         BAS   R14,ANALPRTN       ANALYZE AND RESPOND                   11860000
+         B     PROCRESP           DONE                                  11870000
+                                                                        11880000
+         EJECT                                                          11890000
+**<DOC-ON>*****************************************************         11900000
+*                                                                       11910000
+*   Non-terminating command                                             11920000
+*                                                                       11930000
+*   An EPB is initialized that allows the CMDPROC to signal             11940000
+*   acceptance or rejection of the CMDREQ. A $PROC CREATE is            11950000
+*   done once a unique CMDPROC name is constructed from the             11960000
+*   command verb prefix and a uniquifier.                               11970000
+*                                                                       11980000
+**<DOC-OFF>****************************************************         11990000
+                                                                        12000000
+NONTERM  DS    0H                                                       12010000
+         $TASK SETEPB,            DECLARE CMDPROC TERMINATION EPB      X12020000
+               ECODE=EC$SYNC,     PROCESS SYNCHRONIZATION              X12030000
+               SCOPE=LOCAL,       LOCAL TASK EVENT                     X12040000
+               MF=(E,$TASKMFL)                                          12050000
+                                                                        12060000
+         ST    R1,NTRMEPB         SAVE EPB TOKEN                        12070000
+         ST    R1,CMRQAEPB        COMMAND ACCEPTANCE/REJECTION EPB      12080000
+                                                                        12090000
+*--------------------------------------------------------------         12100000
+*   CREATE THE CMDPROC WITH EITHER A TERM OR ACCEPTANCE EPB             12110000
+*--------------------------------------------------------------         12120000
+                                                                        12130000
+         L     R2,SEQNO           UNIQUIFIER                            12140000
+         LA    R2,1(,R2)          ACCOUNT FOR NEW USAGE                 12150000
+         ST    R2,SEQNO           SAVE ROLLING COUNTER                  12160000
+         CVD   R2,DWORD           PREPARE FOR FORMATTING                12170000
+         MVC   $PCBNAME,=X'F021202020202020'                            12180000
+         ED    $PCBNAME,DWORD+4                                         12190000
+         MVC   $PCBNAME(3),$CMDNAME                                     12200000
+                                                                        12210000
+         $PROC CREATE,            CMDPROC RUNS AS DISTINCT PROCESS     X12220000
+               EP=*CMDPRTN,       ENTRY POINT FROM CMD TABLE           X12230000
+               PARM=CMDREQ,       CMDPROC PARAMETERS                   X12240000
+               NAME=$PCBNAME,     VERB NAME BECOMES PROCESS NAME       X12250000
+               MF=(E,$PROCMFL)    WORKAREA                              12260000
+                                                                        12270000
+         LR    R2,R1              PCB ADDRESS                           12280000
+                                                                        12290000
+*--------------------------------------------------------------         12300000
+*   UPDATE XEPB WITH RESPONSIBLE (NON TERMINATING) PROCESS              12310000
+*--------------------------------------------------------------         12320000
+                                                                        12330000
+         $TASK PCSEPB,            SET PROCESS ASSOCIATED WITH          X12340000
+               EPB=*NTRMEPB,                                           X12350000
+               PCB=(R2),          NONTERMINATING PCB                   X12360000
+               MF=(E,$TASKMFL)    PLIST CONSTRUCTION AREA               12370000
+                                                                        12380000
+*--------------------------------------------------------------         12390000
+*   AWAIT REQUEST ACCEPTANCE OF CMDPROC                                 12400000
+*--------------------------------------------------------------         12410000
+                                                                        12420000
+         $TASK WAIT,              AWAIT CMDPROC COMPLETION             X12430000
+               EPB=*NTRMEPB,      RETURN COMPLETION CODE IN R0         X12440000
+               MF=(E,$TASKMFL)                                          12450000
+                                                                        12460000
+*--------------------------------------------------------------         12470000
+*   COMPOSE COMPLETION MESSAGE AND RETURN                               12480000
+*--------------------------------------------------------------         12490000
+         LA    R1,$CMDNAME        R1 <== FAILING COMMAND NAME           12500000
+         BAS   R14,ANALPRTN       ANALYZE AND RESPOND                   12510000
+         B     PROCRESP           DONE                                  12520000
+                                                                        12530000
+         EJECT ,                                                        12540000
+**<DOC-ON>*****************************************************         12550000
+*                                                                       12560000
+*   Invoke command processor in remote ITASK (CMDTASK)                  12570000
+*                                                                       12580000
+*   In order to send a command request to a CMDTASK, a                  12590000
+*   relocatable message buffer must first be constructed from           12600000
+*   the CMDREQ, content summary (CCSUMRY), and operand string.          12610000
+*   The request is then sent to the specified destination via           12620000
+*   $TSEND.  No reply is solicited. The CMDTASK is free to              12630000
+*   $COMSEND its RESPONSE to issue a standard completion                12640000
+*   message but is not obligated to do so.                              12650000
+*                                                                       12660000
+**<DOC-OFF>****************************************************         12670000
+                                                                        12680000
+PROCTASK DS    0H                                                       12690000
+         TM    $CMDDEST,BF        COMMAND PROCESSOR IN FOREIGN TASK?    12700000
+         BZ    PROCNORM           DONE IF NOT                           12710000
+                                                                        12720000
+         LA    R2,CMRQLN          LENGTH OF COMMAND REQUEST BLOCK       12730000
+         A     R2,@CCSLEN         PLUS LENGTH OF PREPARSE SUMMARY       12740000
+         A     R2,CMRQOPLN        PLUS LENGTH OF CMD STRING             12750000
+         A     R2,UTOKENL         PLUS LENGTH OF UTOKEN                 12760000
+                                                                        12770000
+         CLI   RETMSGS,FALSE      CMDPROC/CMDTASK MESSAGE COLLECTION?   12780000
+         BE    *+8                SKIP IF NOT                           12790000
+         LA    R2,SRMRIDLN(,R2)   ELSE ACCOUNT FOR MSG COLLECTOR RSRCID 12800000
+                                                                        12810000
+         STGGET (R2),QH=TSKSTG    ACQUIRE CONTIG STG FOR MESSAGE BLOCK  12820000
+         BNZ   ERR_STG            STORAGE FAILURE                       12830000
+         STM   R1,R2,@CMDMSG      INTERTASK COMMAND MESSAGE BLOCK       12840000
+                                                                        12850000
+         LR    R3,R1              PREPARE FOR LOAD                      12860000
+PORT     USING CMDREQ,R3          PORTABLE COMMAND REQUEST BLOCK        12870000
+         MVC   PORT.CMDREQ(CMRQLN),CMDREQ                               12880000
+                                                                        12890000
+*--------------------------------------------------------------         12900000
+*   CREATE PORTABLE COMMAND REQUEST BLOCK APPENDAGES                    12910000
+*--------------------------------------------------------------         12920000
+                                                                        12930000
+         LA    R2,PORT.CMDREQ+CMRQLN   STANDARD CMDREQ EXTENSION AREA   12940000
+         CLI   RETMSGS,FALSE      CMDPROC/CMDTASK MESSAGE COLLECTION?   12950000
+         BE    PROCNRID           SKIP IF NOT                           12960000
+         MVC   PORT.CMDREQ+CMRQLN(SRMRIDLN),CMDREQ+CMRQLN               12970000
+         LA    R2,SRMRIDLN(,R2)   RESERVE SPACE FOR RSRCID              12980000
+                                                                        12990000
+PROCNRID DS    0H                                                       13000000
+         L     R15,@CCSADDR       COMMAND SUMMARY ORIGIN                13010000
+         ICM   R1,15,@CCSLEN      COMMAND SUMMARY LENGTH                13020000
+         BZ    PTSKNOCS           NO COMMAND SUMMARY                    13030000
+         BCTR  R1,0               PREPARE FOR COPY                      13040000
+         EX    R1,*+4             APPEND COMMAND SUMMARY TO XMIT UNIT   13050000
+         MVC   0(*-*,R2),0(R15)   EX OBJECT                             13060000
+         LR    R0,R2              COMMAND SUMMARY ORIGIN                13070000
+         SR    R0,R3              CONVERT TO OFFSET                     13080000
+         ST    R0,PORT.CMRQSMRY   PROVIDED TO REMOTE CMDPROC            13090000
+         LA    R2,1(R1,R2)        ADVANCE PTR TO FREE SEGMENT           13100000
+                                                                        13110000
+PTSKNOCS DS    0H                                                       13120000
+         L     R15,INOPSORG       OPERAND STRING ORIGIN                 13130000
+         ICM   R1,15,CMRQOPLN     LENGTH OF OPERAND STRING              13140000
+         BZ    PTSKNOOP           NOT PROVIDED                          13150000
+         BCTR  R1,0               PREPARE FOR COPY                      13160000
+         EX    R1,*+4             APPEND OPERAND STRING TO XMIT UNIT    13170000
+         MVC   0(*-*,R2),0(R15)   EX OBJECT                             13180000
+         LR    R0,R2              COMMAND SUMMARY ORIGIN                13190000
+         SR    R0,R3              CONVERT TO OFFSET                     13200000
+         ST    R0,PORT.CMRQOPST   PROVIDED TO REMOTE CMDPROC            13210000
+         LA    R2,1(R1,R2)        ADVANCE PTR TO FREE SEGMENT           13220000
+                                                                        13230000
+PTSKNOOP DS    0H                                                       13240000
+         LA    R15,UTOKEN         UTOKEN CLONE ORIGIN                   13250000
+         ICM   R1,15,UTOKENL      UTOKEN ?                              13260000
+         BZ    PTSKNOUT           NO UTOKEN                             13270000
+         BCTR  R1,0               PREPARE FOR COPY                      13280000
+         EX    R1,*+4             APPEND UTOKEN TO XMIT UNIT            13290000
+         MVC   0(*-*,R2),0(R15)   EX OBJECT                             13300000
+         LR    R0,R2              ORIGIN                                13310000
+         SR    R0,R3              CONVERT TO OFFSET                     13320000
+         ST    R0,PORT.CMRQUTOK   PROVIDED TO REMOTE CMDPROC            13330000
+                                                                        13340000
+PTSKNOUT DS    0H                                                       13350000
+                                                                        13360000
+*--------------------------------------------------------------         13370000
+*   SEND COMMAND TO THE ITASK SERVING AS THE CMDPROC                    13380000
+*--------------------------------------------------------------         13390000
+                                                                        13400000
+         ICM   R2,15,$SRMRID@     MESSAGE COLLECTION RESOURCE ACQUIRED? 13410000
+         BZ    *+8                SKIP IF NOT                           13420000
+         LA    R2,PORT.CMDREQ+CMRQLN                                    13430000
+                                                                        13440000
+         $COMSEND REQUEST,        DELIVER COMMAND TO CMDTASK           X13450000
+               CMDREQ=PORT.CMDREQ,                                     X13460000
+               REQLEN=*@CMDMSGL,                                       X13470000
+               MSGRSRCID=(R2)                                           13480000
+                                                                        13490000
+         B     *+4(R15)           ANALYZE COMPLETION CODE               13500000
+         B     PROCNORM              RC00 - COMPLETE, SUPPRESS RESPONSE 13510000
+         B     PTSKEDST              RC04 - UNKNOWN DESTINATION         13520000
+         B     PTSKENAK              RC08 - NAK RECEIVED FROM CMDTASK   13530000
+         B     PTSKESND              RC12 - $TSEND SERVICE FAILURE      13540000
+                                                                        13550000
+*--------------------------------------------------------------         13560000
+*   $COMSEND REQUEST ERROR HANDLERS                                     13570000
+*--------------------------------------------------------------         13580000
+                                                                        13590000
+PTSKEDST DS    0H                 INVALID / INACTIVE DESTINATION        13600000
+         $MNO  R1,023             MESSAGE ID                            13610000
+         BAS   R14,PROC_MSG       ISSUE MESSAGE                         13620000
+         B     PERRTERM                                                 13630000
+                                                                        13640000
+PTSKENAK DS    0H                 NAK RECEIVED FROM CMDTASK             13650000
+         ST    R0,DWORD+0         REASON (POST) CODE                    13660000
+         $MNO  R1,024             MESSAGE ID                            13670000
+         BAS   R14,PROC_MSG       ISSUE MESSAGE                         13680000
+         B     PERRTERM                                                 13690000
+                                                                        13700000
+PTSKESND DS    0H                 $TSEND FAILED ADDRESSING CMDTASK      13710000
+         ST    R0,DWORD+0         $TSEND RETURN CODE                    13720000
+         ST    R1,DWORD+4         DIAGNOSTIC CODE                       13730000
+         $MNO  R1,025             MESSAGE ID                            13740000
+         BAS   R14,PROC_MSG       ISSUE MESSAGE                         13750000
+         B     PERRTERM                                                 13760000
+         DROP  PORT                                                     13770000
+                                                                        13780000
+         EJECT                                                          13790000
+***************************************************************         13800000
+*                                                                       13810000
+*   PROCESS ROUTINE ERROR HANDLERS - NOTIFICATION AND CLEANUP           13820000
+*                                                                       13830000
+***************************************************************         13840000
+PERR_VOP DS    0H                 IMPROPER ACCESS AUTHORITY FOR CMD OP  13850000
+         $MNO  R2,018                                                   13860000
+         B     PERR_MSG                                                 13870000
+                                                                        13880000
+PERR_VCM DS    0H                 IMPROPER ACCESS AUTHORITY FOR COMMAND 13890000
+         $MNO  R2,019                                                   13900000
+         B     PERR_MSG                                                 13910000
+                                                                        13920000
+PERR_VSY DS    0H                 MISSING OR INVALID COMMAND VERB       13930000
+         $MNO  R2,020                                                   13940000
+         B     PERR_MSG                                                 13950000
+                                                                        13960000
+PERR_DSY DS    0H                 INVALID COMMAND ROUTING DESTINATION   13970000
+         $MNO  R2,021                                                   13980000
+         B     PERR_MSG                                                 13990000
+                                                                        14000000
+PERR_DST DS    0H                 IMPROPER USE OR OMISSION OF CMD DEST  14010000
+         $MNO  R2,022                                                   14020000
+         B     PERR_MSG                                                 14030000
+                                                                        14040000
+PERR_MSG DS    0H                 ISSUE SELECTED ERROR MESSAGE          14050000
+         $MSG  (R2),DESTADD=RESPDEST                                    14060000
+         B     PERRTERM                                                 14070000
+                                                                        14080000
+PERR_PAR DS    0H                 COMMAND PARSING ERROR                 14090000
+         $MSG  010,DESTADD=RESPDEST,                                   X14100000
+               FIELDS=($CMDNAME,(*SCANMSG,0))                           14110000
+                                                                        14120000
+*--------------------------------------------------------------         14130000
+*   IF CMD ISSUED BY AUTO CMD SUBMITTER, TERMINATE THAT PROCESS         14140000
+*--------------------------------------------------------------         14150000
+                                                                        14160000
+PERRTERM DS    0H                                                       14170000
+         TM    CMRQAMNM,BF        AUTO CMD IS SUBMITTER?                14180000
+         BZ    PERR_NMN           SKIP IF NOT                           14190000
+                                                                        14200000
+         $MSG  385,DESTADD=RESPDEST,  AUTO CMD TERM IF CMD IN ERROR    X14210000
+               FIELDS=(CMRQAMNM)                                        14220000
+                                                                        14230000
+         $PMON MONITORID=CMRQAMNM,  Terminate auto cmd submission      X14240000
+               MONIDNUM=*CMRQAMN#,                                     X14250000
+               CMDREQ=CMDREQ,                                          X14260000
+               MF=(E,MFE_LIST)                                          14270000
+                                                                        14280000
+PERR_NMN DS    0H                                                       14290000
+                                                                        14300000
+         EJECT                                                          14310000
+**<DOC-ON>*****************************************************         14320000
+*                                                                       14330000
+*   CMDPROC / CMDTASK cleanup                                           14340000
+*                                                                       14350000
+*   When a CMDPROC completes, continuation at PROCRESP causes           14360000
+*   the return of all accumulated RESPONSE messages to the              14370000
+*   requester.  The use of the standard CMDREQ construction             14380000
+*   area is assumed.                                                    14390000
+*                                                                       14400000
+*   Continuation at PROCNORM suppresses the return of generated         14410000
+*   messages.                                                           14420000
+*                                                                       14430000
+**<DOC-OFF>****************************************************         14440000
+                                                                        14450000
+PROCRESP DS    0H                 DELIVER COMMAND RESPONSE              14460000
+         CLI   RETMSGS,FALSE      COMMAND MESSAGE COLLECTION ACTIVE?    14470000
+         BE    PROCRF             SKIP IF NOT                           14480000
+                                                                        14490000
+         $COMSEND RESPONSE,       RESPOND TO SCHEDULER/REQUESTER       X14500000
+               CMDREQ=CMDREQ,             MOVING OUR RESPONSE ALONG    X14510000
+               REQLEN=CMRQLN+SRMRIDLN,    RETURN CMDREQ AND RSRCID     X14520000
+               MSGRSRCID=CMDREQ+CMRQLN    $MSG COLLECTOR RSRCID OR 0    14530000
+                                                                        14540000
+         BZ    PROCRF             SUCCESSFUL DELIVERY                   14550000
+         TM    CMRQAMNM,BF        AUTO CMD IS SUBMITTER?                14560000
+         BZ    PROCRF             SKIP IF NOT                           14570000
+                                                                        14580000
+         $MSG  386,DESTADD=RESPDEST, AUTOCMD END IF NOT DELIVERABLE    X14590000
+               FIELDS=(CMRQAMNM)                                        14600000
+                                                                        14610000
+         $PMON MONITORID=CMRQAMNM,  TERMINATE AUTO CMD SUBMISSION      X14620000
+               MONIDNUM=*CMRQAMN#,                                     X14630000
+               CMDREQ=CMDREQ,                                          X14640000
+               MF=(E,MFE_LIST)                                          14650000
+                                                                        14660000
+PROCRF   DS    0H                                                       14670000
+                                                                        14680000
+*--------------------------------------------------------------         14690000
+*   RELEASE RESPONSE ACCUMULATION AREAS                                 14700000
+*--------------------------------------------------------------         14710000
+                                                                        14720000
+PROCNORM DS    0H                                                       14730000
+         ICM   R2,15,$SRMRID@                                           14740000
+         BZ    PRCLNA        SKIP IF NOT HOLDING SHARED MQCA            14750000
+                                                                        14760000
+         $SRM  RELEASE,                                                X14770000
+               RSRCID=(R2),                                            X14780000
+               MF=(E,$SRMMFL)                                           14790000
+                                                                        14800000
+PRCLNA   DS    0H                                                       14810000
+                                                                        14820000
+*--------------------------------------------------------------         14830000
+*   MQCA DELETE WHEN NOT HELD AS SHARED RESOURCE                        14840000
+*--------------------------------------------------------------         14850000
+                                                                        14860000
+         ICM   R0,15,$MQCA   UNSHARED MQCA STILL PENDING?               14870000
+         BZ    PRCLN0        SKIP IF NOT                                14880000
+                                                                        14890000
+         MQCA  FREE,ANCHOR=$MQCA,                                      X14900000
+               RESTOKEN=$MQCARES,                                      X14910000
+               RESOWNER=*TSKPCBC                                        14920000
+                                                                        14930000
+PRCLN0   DS    0H                                                       14940000
+                                                                        14950000
+*--------------------------------------------------------------         14960000
+*   COMMAND PARSING WORKAREAS                                           14970000
+*--------------------------------------------------------------         14980000
+                                                                        14990000
+         ICM   R2,15,@OPLADDR     OPLIST                                15000000
+         BZ    PRCLN1                                                   15010000
+                                                                        15020000
+         STGRETN ADDR=(R2),LEN=*@OPLLEN,QH=TSKSTG                       15030000
+                                                                        15040000
+         XC    @OPLADDR,@OPLADDR  INDICATE STORAGE FREED                15050000
+         XC    @OPLLEN,@OPLLEN                                          15060000
+                                                                        15070000
+PRCLN1   DS    0H                                                       15080000
+                                                                        15090000
+*--------------------------------------------------------------         15100000
+*   COMMAND CONTENT SUMMARY                                             15110000
+*--------------------------------------------------------------         15120000
+                                                                        15130000
+         ICM   R2,15,@CCSADDR                                           15140000
+         BZ    PRCLN2                                                   15150000
+                                                                        15160000
+         STGRETN ADDR=(R2),LEN=*@CCSLEN,QH=TSKSTG                       15170000
+                                                                        15180000
+         XC    @CCSADDR,@CCSADDR  INDICATE STORAGE FREED                15190000
+         XC    @CCSLEN,@CCSLEN                                          15200000
+                                                                        15210000
+PRCLN2   DS    0H                                                       15220000
+                                                                        15230000
+*--------------------------------------------------------------         15240000
+*   PORTABLE CMDREQ                                                     15250000
+*--------------------------------------------------------------         15260000
+                                                                        15270000
+         ICM   R2,15,@CMDMSGA                                           15280000
+         BZ    PRCLN3                                                   15290000
+                                                                        15300000
+         STGRETN ADDR=(R2),LEN=*@CMDMSGL,QH=TSKSTG                      15310000
+                                                                        15320000
+         XC    @CMDMSGA,@CMDMSGA  INDICATE STORAGE FREED                15330000
+         XC    @CMDMSGL,@CMDMSGL                                        15340000
+                                                                        15350000
+PRCLN3   DS    0H                                                       15360000
+                                                                        15370000
+*--------------------------------------------------------------         15380000
+*   RETURN TO REQUESTOR                                                 15390000
+*--------------------------------------------------------------         15400000
+                                                                        15410000
+         LM    R0,R15,PROCREGS    RESTORE MAINLINE REGS                 15420000
+         BR    R14                RETURN                                15430000
+         DROP  R5,R6              CMDVERB TABLE, KEYWORD TABLE HDR      15440000
+                                                                        15450000
+         EJECT                                                          15460000
+***************************************************************         15470000
+*                                                                       15480000
+* ROUTINE: PROC_MSG - GENERAL COMMAND PROCESSING MESSAGE                15490000
+*                                                                       15500000
+***************************************************************         15510000
+                                                                        15520000
+PROC_MSG DS    0H                                                       15530000
+         STM   R0,R15,REGSAVE     PRESERVE MAINLINE REGS                15540000
+         LR    R2,R1              MESSAGE ID                            15550000
+                                                                        15560000
+         $MSG  (R2),DESTADD=RESPDEST,                                  X15570000
+               FIELDS=($CMDDEST,(*DWORD+0,4),(*DWORD+4,4))              15580000
+                                                                        15590000
+         LM    R0,R14,REGSAVE     RESTORE MAINLINE REGS                 15600000
+         BR    R14                RETURN                                15610000
+                                                                        15620000
+         EJECT ,                                                        15630000
+***************************************************************         15640000
+*                                                                       15650000
+* ROUTINE:  VRBDSTX - EXTRACT COMMAND VERB AND DESTINATION TASK         15660000
+*                                                                       15670000
+* ON ENTRY:                                                             15680000
+*                                                                       15690000
+*    R1 - COMMAND STRING ORIGIN                                         15700000
+*    R0 - COMMAND STRING LENGTH                                         15710000
+*                                                                       15720000
+* ON EXIT:                                                              15730000
+*                                                                       15740000
+*   R15 CONTAINS ONE OF THE FOLLOWING RETURN CODES                      15750000
+*                                                                       15760000
+*       RC00 - CMD VERB AND DESTINATION ACQUIRED                        15770000
+*                                                                       15780000
+*              R0 - LENGTH OF VERB AND DEST DESIGNATIONS                15790000
+*                                                                       15800000
+*       RC04 - INVALID VERB SYNTAX                                      15810000
+*       RC08 - INVALID DESTINATION SYNTAX                               15820000
+*                                                                       15830000
+***************************************************************         15840000
+                                                                        15850000
+VRBDSTX  DS    0H                                                       15860000
+         STM   R0,R15,REGSAVE     PRESERVE MAINLINE REGS                15870000
+         LR    R4,R1              COMMAND STRING FOLLOWED BY PAD        15880000
+         LTR   R3,R0              STRING LENGTH                         15890000
+         BNP   VRBDVSYN           VERB IS REQUIRED                      15900000
+                                                                        15910000
+         MVC   $CMDNAME,BLANKS    VERB NOT KNOWN                        15920000
+         MVC   $CMDDEST,BLANKS    DESTINATION UNKNOWN                   15930000
+                                                                        15940000
+*--------------------------------------------------------------         15950000
+*   EXTRACT AND VALIDATE VERB                                           15960000
+*--------------------------------------------------------------         15970000
+                                                                        15980000
+         MVI   WK256,4            VERB SCAN                             15990000
+         MVC   WK256+1(255),WK256                                       16000000
+         MVI   WK256+C' ',0       BREAK TO NON-BLANK                    16010000
+                                                                        16020000
+         LR    R5,R4              SCAN ORIGIN                           16030000
+         EX    R3,VRBDTRT         STRING IS ZERO TERMINATED             16040000
+         BC    MISSES,VRBDVSYN    VERB MISSING                          16050000
+         LR    R2,R1              START CHAR                            16060000
+         SR    R2,R5              LENGTH SPANNED                        16070000
+         SR    R3,R2              LENGTH REMAINING                      16080000
+                                                                        16090000
+         XC    WK256,WK256        SPAN EVERYTHING                       16100000
+         MVI   WK256+C' ',4       EXCEPT THE STANDARD DLMS              16110000
+         MVI   WK256+C'(',4                                             16120000
+         MVI   WK256+C',',4                                             16130000
+         MVI   WK256+X'0',4                                             16140000
+                                                                        16150000
+         LR    R5,R1              FIRST CHAR OF VERB (IS RESCANNED)     16160000
+         LA    R1,0(R3,R1)        PRESET END OF STRING ADDR             16170000
+         EX    R3,VRBDTRT         LOCATE END OF VERB                    16180000
+         LR    R2,R1              START CHAR                            16190000
+         SR    R2,R5              LENGTH OF VERB                        16200000
+         SR    R3,R2              LENGTH REMAINING                      16210000
+         C     R2,=A(L'$CMDNAME)  REASONABLE SIZE?                      16220000
+         BH    VRBDVSYN           ERROR IF NOT                          16230000
+         BCTR  R2,0               PREPARE FOR COPY                      16240000
+         EX    R2,*+4             CAPTURE AND ISOLATE VERB              16250000
+         MVC   $CMDNAME(*-*),0(R5)                                      16260000
+         LR    R5,R1              SCAN RESUMPTION ADDRESS               16270000
+                                                                        16280000
+*--------------------------------------------------------------         16290000
+*   EXTRACT AND VALIDATE DESTINATION NAME                               16300000
+*--------------------------------------------------------------         16310000
+                                                                        16320000
+         LTR   R3,R3              TEXT REMAINS?                         16330000
+         BNP   VRBDFIN            DONE IF NOT                           16340000
+         CLI   0(R5),C'('         DESTINATION SPECIFIER FOLLOWS?        16350000
+         BNE   VRBDFIN            DONE IF NOT                           16360000
+                                                                        16370000
+         XC    WK256,WK256        SPAN EVERYTHING                       16380000
+         MVI   WK256+C')',4       EXCEPT DESTINATION TERMINATOR         16390000
+                                                                        16400000
+         EX    R3,VRBDTRT         STRING IS ZERO TERMINATED             16410000
+         BC    MISSES,VRBDESYN    DEST INVALID                          16420000
+         LR    R2,R1              START CHAR                            16430000
+         SR    R2,R5              LENGTH SPANNED                        16440000
+         C     R2,=A(L'$CMDDEST)  REASONABLE SIZE?                      16450000
+         BH    VRBDESYN           ERROR IF NOT                          16460000
+         BCTR  R2,0               PREPARE FOR COPY                      16470000
+         EX    R2,*+4             CAPTURE AND ISOLATE VERB              16480000
+         MVC   $CMDDEST(*-*),0(R5)                                      16490000
+         LR    R5,R1              SCAN RESUMPTION ADDRESS               16500000
+                                                                        16510000
+*--------------------------------------------------------------         16520000
+*   RETURN LENGTH CONSUMED OR ERROR INDICATOR TO CALLER                 16530000
+*--------------------------------------------------------------         16540000
+                                                                        16550000
+VRBDFIN  DS    0H                 SUCCESS                               16560000
+         LR    R0,R5              RESUMPTION POINT                      16570000
+         SR    R0,R4              R0 <== # CHARS CONSUMED               16580000
+         LA    R15,RC00           SUCCESSFUL COMPLETION                 16590000
+         B     VRBDRET            DONE                                  16600000
+                                                                        16610000
+VRBDVSYN DS    0H                 MISSING OR INVALID VERB               16620000
+         LA    R15,RC04                                                 16630000
+         B     VRBDRET                                                  16640000
+                                                                        16650000
+VRBDESYN DS    0H                 MISSING OR INVALID DEST               16660000
+         LA    R15,RC08                                                 16670000
+                                                                        16680000
+VRBDRET  DS    0H                                                       16690000
+         LM    R1,R14,REGSAVE+4   RESTORE REGS                          16700000
+         LTR   R15,R15            REFLECT COMPLETION VIA CC             16710000
+         BR    R14                RETURN                                16720000
+                                                                        16730000
+VRBDTRT  TRT   0(*-*,R5),WK256    SCANNER AS EX OBJECT                  16740000
+                                                                        16750000
+         EJECT ,                                                        16760000
+***************************************************************         16770000
+*                                                                       16780000
+* ROUTINE:  TALLYOPS - ACQUIRE NUMBER OF OPERANDS AND VALUES            16790000
+*                                                                       16800000
+* DESCRIPTION:                                                          16810000
+*                                                                       16820000
+*    THIS ROUTINE IS USED TO DETERMINE STORAGE REQUIREMENTS             16830000
+*    FOR A COMMAND CONTENT SUMMARY.  WE RUN THE OPERAND LIST            16840000
+*    COMPLETED BY CMDSCAN AND TALLY THE TOTAL NUMBER OF                 16850000
+*    OPERANDS THAT WERE SPECIFIED, AND THE TOTAL NUMBER OF              16860000
+*    VALUES ASSOCIATED WITH THOSE OPERANDS.                             16870000
+*                                                                       16880000
+*                                                                       16890000
+* ON ENTRY:                                                             16900000
+*                                                                       16910000
+*     R1 - ADDR OF CMDSCAN OPERAND LIST (OPLIST)                        16920000
+*     R0 - NUMBER OF OPERAND LIST ENTRIES                               16930000
+*                                                                       16940000
+* ON EXIT:                                                              16950000
+*                                                                       16960000
+*     R1 - NUMBER OF OPERANDS SPECIFIED                                 16970000
+*     R0 - TOTAL NUMBER OF VALUES FOR ALL SPECIFIED OPERANDS            16980000
+*                                                                       16990000
+***************************************************************         17000000
+                                                                        17010000
+TALLYOPS DS    0H                                                       17020000
+         STM   R0,R15,REGSAVE     SAVE MAINLINE REGS                    17030000
+         LR    R4,R1              OPERAND COLLECTION LIST               17040000
+         USING OPLIST,R4          ADDRESSABILITY                        17050000
+         LR    R2,R0              NUMBER OF OPERANDS DEFINED            17060000
+                                                                        17070000
+         SR    R1,R1              KEYWORD (OPERAND) COUNT               17080000
+         SR    R0,R0              KEYWORD VALUE COUNT                   17090000
+                                                                        17100000
+TALLYNXT DS    0H                                                       17110000
+         CLI   OPLSPEC,0          OPERAND APPEARS IN CMD LINE?          17120000
+         BE    TALLYADV           SKIP IF NOT                           17130000
+         LA    R1,1(,R1)          ACCOUNT FOR OPERAND                   17140000
+         AH    R0,OPLCOUNT        AND ALL OF ITS VALUES                 17150000
+                                                                        17160000
+TALLYADV DS    0H                                                       17170000
+         LA    R4,OPLISTLN(,R4)   ADVANCE TO NEXT ENTRY                 17180000
+         BCT   R2,TALLYNXT        SCAN ALL OPERANDS                     17190000
+                                                                        17200000
+         LM    R2,R12,REGSAVE+8   RESTORE MAINLINE REGS                 17210000
+         SR    R15,R15            RETCODE NOT DEFINED                   17220000
+         BR    R14                RETURN                                17230000
+         DROP  R4                 OPLIST                                17240000
+                                                                        17250000
+         EJECT ,                                                        17260000
+***************************************************************         17270000
+*                                                                       17280000
+* ROUTINE: LOGCMD - LOG CONSOLE OR INTERNALLY SUBMITTED COMMAND         17290000
+*                                                                       17300000
+* ON ENTRY:                                                             17310000
+*                                                                       17320000
+*     R1 - COMMAND STRING ORIGIN                                        17330000
+*     R0 - COMMAND STRING LENGTH                                        17340000
+*                                                                       17350000
+***************************************************************         17360000
+                                                                        17370000
+LOGCMD   DS    0H                                                       17380000
+         STM   R0,R15,REGSAVE     SAVE MAINLINE REGS                    17390000
+         LR    R3,R1              COMMAND STRING ORIGIN                 17400000
+         LR    R2,R0              COMMAND STRING LENGTH                 17410000
+                                                                        17420000
+*--------------------------------------------------------------         17430000
+*   AUTOMATED SUBMITTERS ARE IDENTIFIED IN CMD LINE JOURNAL REC         17440000
+*--------------------------------------------------------------         17450000
+                                                                        17460000
+         TM    REQAMNM,BF         INVOKED ON BEHALF OF AUTOMATED SUBMIT 17470000
+         BZ    LOGINTRO           SKIP IF NOT                           17480000
+         MVI   AUTOSUB,C'<'       LEADING DLM (TRAILER IS ALWAYS ZERO)  17490000
+                                                                        17500000
+         @TRIM REQAMNM,L'REQAMNM,CHAR=NULL                              17510000
+                                                                        17520000
+         BCTR  R1,0               PREPARE SUBMITTER ID FOR COPY         17530000
+         EX    R1,*+4             MOVE TO PRESENTATION AREA             17540000
+         MVC   AUTOSUB+1(*-*),REQAMNM                                   17550000
+         LA    R15,AUTOSUB+1+1(R1)                                      17560000
+         MVC   0(2,R15),=C'> '    CLOSING DLM                           17570000
+                                                                        17580000
+*--------------------------------------------------------------         17590000
+*   ANNOUNCE COMMAND ARRIVAL SOURCE - MCS OR SUBMITTER TASK             17600000
+*--------------------------------------------------------------         17610000
+                                                                        17620000
+LOGINTRO DS    0H                                                       17630000
+         ICM   R0,15,CONSID       COMMAND SOURCE IS MCS CONSOLE?        17640000
+         BZ    LOGNTRNL           INTERNALLY ISSUED OTHERWISE           17650000
+                                                                        17660000
+         MVI   BYTE,0             ASSUME NO $JOBLOG ROUTING             17670000
+         TM    ICTSTAT2,ICT2$TSO  RUNNING UNDER TSO (DEBUG)?            17680000
+         BZ    *+8                SKIP IF NOT                           17690000
+         MVI   BYTE,$JOBLOG       ENSURE COMMAND ECHO TO PGMR           17700000
+                                                                        17710000
+         $MSG  000,DESTADD=BYTE,DEST=$LOGFILE,                         X17720000
+               FIELDS=(AUTOSUB,((R3),(R2)))                             17730000
+         B     LOGRET                                                   17740000
+                                                                        17750000
+LOGNTRNL DS    0H                                                       17760000
+         $MSG  001,DEST=$LOGFILE,                                      X17770000
+               FIELDS=(AUTOSUB,REQITASK,REQIUSER,((R3),(R2)))           17780000
+                                                                        17790000
+LOGRET   DS    0H                                                       17800000
+                                                                        17810000
+*--------------------------------------------------------------         17820000
+*   RETURN TO CALLER                                                    17830000
+*--------------------------------------------------------------         17840000
+                                                                        17850000
+         LM    R0,R14,REGSAVE     RESTORE MAINLINE REGS                 17860000
+         BR    R14                                                      17870000
+                                                                        17880000
+         EJECT ,                                                        17890000
+***************************************************************         17900000
+*                                                                       17910000
+* ROUTINE:  EDITCIB - EXTRACT COMMAND INFO FROM CIB                     17920000
+*                                                                       17930000
+* ON ENTRY:                                                             17940000
+*                                                                       17950000
+*    R1 - ADDR OF CONSOLE INPUT BUFFER (CIB)                            17960000
+*                                                                       17970000
+***************************************************************         17980000
+                                                                        17990000
+EDITCIB  DS    0H                                                       18000000
+         STM   R0,R15,REGSAVE     SAVE MAINLINE REGS                    18010000
+         LR    R3,R1              CIB                                   18020000
+         USING CIB,R3             MAPPED                                18030000
+                                                                        18040000
+         LA    R0,SICI            CLEAR SOURCE INDEPENDENT COMMON INFO  18050000
+         LA    R1,SICILN                                                18060000
+         SR    R15,R15                                                  18070000
+         MVCL  R0,R14                                                   18080000
+                                                                        18090000
+         LH    R2,CIBDATLN        LENGTH OF COMMAND TEXT                18100000
+         ST    R2,INCMDLEN        POST TEXT LENGTH                      18110000
+         LTR   R2,R2              ANY TEXT TO PROCESS?                  18120000
+         BZ    EDITCLAS           DONE IF NONE                          18130000
+                                                                        18140000
+         LA    R0,L'INCMD         MAX LENGTH OF INPUT COMMAND           18150000
+         CR    R2,R0              MAX EXCEEDED?                         18160000
+         BNH   *+6                SKIP IF NOT                           18170000
+         LR    R2,R0              TRUNCATE                              18180000
+         BCTR  R2,0               PREPARE FOR EX                        18190000
+         EX    R2,*+4             COPY CMDLINE                          18200000
+         MVC   INCMD(*-*),CIBDATA                                       18210000
+                                                                        18220000
+EDITCLAS DS    0H                                                       18230000
+         LH    R4,CIBXOFF         OFFSET TO CIB EXTENSION               18240000
+         LA    R4,CIB(R4)         EXTENSION ORIGIN                      18250000
+         USING CIBX,R4            CIB EXTENSION FORMAT                  18260000
+         MVC   CONSID,CIBXCNID    CONSOLE ID                            18270000
+         MVC   CONSNAME,CIBXCNNM  CONSOLE NAME                          18280000
+         MVC   CONSCART,CIBXCART  CMD RESPONSE TOKEN                    18290000
+                                                                        18300000
+         ICM   R1,15,CIBXUTOK     GET UTOKEN ADDRESS                    18310000
+         BZ    EDITNOTK           NONE PROVIDED                         18320000
+         BAS   R14,COPYUTOK       MAKE LOCAL COPY                       18330000
+                                                                        18340000
+EDITNOTK DS    0H                                                       18350000
+         MVI   CLASCMD,CLASCMDF   ASSUME MODIFY                         18360000
+         CLI   CIBVERB,CIBMODFY                                         18370000
+         BE    EDITCRET                                                 18380000
+                                                                        18390000
+         MVI   CLASCMD,CLASCMDS   ASSUME START                          18400000
+         CLI   CIBVERB,CIBSTART                                         18410000
+         BE    EDITCRET                                                 18420000
+                                                                        18430000
+         MVI   CLASCMD,CLASCMDP   ASSUME STOP                           18440000
+         CLI   CIBVERB,CIBSTOP                                          18450000
+         BE    EDITCRET                                                 18460000
+                                                                        18470000
+         MVI   CLASCMD,C'?'       DIAGNOSTIC                            18480000
+                                                                        18490000
+EDITCRET DS    0H                                                       18500000
+         LM    R0,R14,REGSAVE     RESTORE MAINLINE REGS                 18510000
+         SR    R15,R15            NOT DEFINED                           18520000
+         BR    R14                RETURN                                18530000
+         DROP  R3,R4              CIB, CIBX                             18540000
+                                                                        18550000
+         EJECT ,                                                        18560000
+****************************************************************        18570000
+*                                                                       18580000
+* ROUTINE: COPYUTOK - IF APF-AUTH, COPY UTOKEN TO LOCAL STORAGE         18590000
+*                                                                       18600000
+* ON ENTRY:                                                             18610000
+*                                                                       18620000
+*    R1 - UTOKEN ADDRESS                                                18630000
+*                                                                       18640000
+****************************************************************        18650000
+                                                                        18660000
+COPYUTOK DS    0H                                                       18670000
+         STM   R0,R15,REGSAVE2    SAVE CALLER'S REGISTERS               18680000
+                                                                        18690000
+         TM    ICTSTAT2,ICT2$APF  APF AUTHORIZED ?                      18700000
+         BNO   COPYNOUT           NO, SKIP COPY OF UTOKEN               18710000
+                                                                        18720000
+         LR    R3,R1              R3 --> UTOKEN                         18730000
+         USING TOKEN,R3                                                 18740000
+                                                                        18750000
+         MODESET EXTKEY=ZERO,     SWITCH TO KEY ZERO                   +18760000
+               SAVEKEY=(2)                                              18770000
+                                                                        18780000
+         SR    R1,R1              PREPARE FOR IC OF ...                 18790000
+         IC    R1,TOKLEN          ... UTOKEN LENGTH                     18800000
+         ST    R1,UTOKENL         SAVE LENGTH                           18810000
+         BCTR  R1,0               LOCALIZE UTOKEN                       18820000
+         EX    R1,*+4                                                   18830000
+         MVC   UTOKEN(0),TOKEN                                          18840000
+         DROP  R3                                                       18850000
+                                                                        18860000
+         MODESET KEYADDR=(2)      RESTORE KEY                           18870000
+                                                                        18880000
+COPYNOUT DS    0H                                                       18890000
+         LM    R0,R15,REGSAVE2    RESTORE CALLER'S REGISTERS            18900000
+         BR    R14                RETURN TO CALLER                      18910000
+                                                                        18920000
+         EJECT ,                                                        18930000
+****************************************************************        18940000
+*                                                                       18950000
+* ROUTINE: LOCVERBE - LOCATE COMMAND TABLE ENTRY FOR GIVEN VERB         18960000
+*                                                                       18970000
+* ON ENTRY:                                                             18980000
+*                                                                       18990000
+*    R1 - COMMAND VERB TABLE ORIGIN                                     19000000
+*    R0 - COMMAND VERB                                                  19010000
+*                                                                       19020000
+* ON EXIT:                                                              19030000
+*                                                                       19040000
+*    R15 CONTAINS ONE OF THE FOLLOWING RETURN CODES                     19050000
+*                                                                       19060000
+*        RC00 - VERB ENTRY FOUND AND RETURNED VIA R1 (CMDVERB)          19070000
+*        RC04 - MATCHING VERB ENTRY NOT FOUND                           19080000
+*                                                                       19090000
+****************************************************************        19100000
+                                                                        19110000
+LOCVERBE DS    0H                                                       19120000
+         LR    R15,R0             COMMAND VERB NAME                     19130000
+         USING CMDVERB,R1         COMMAND VERB TABLE ORIGIN             19140000
+                                                                        19150000
+LOCVERBT DS    0H                                                       19160000
+         CLC   CMDLNAME,0(R15)    MATCHING LONG NAMES?                  19170000
+         BE    LOCVERBH                                                 19180000
+         CLC   CMDSNAME,0(R15)    MATCHING SHORT NAMES?                 19190000
+         BE    LOCVERBH                                                 19200000
+                                                                        19210000
+         LA    R1,CMDTLN(,R1)     ADVANCE TO NEXT ENTRY                 19220000
+         CLI   CMDLNAME,0         END OF TABLE?                         19230000
+         BNE   LOCVERBT           CONTINUE SCAN                         19240000
+         LA    R15,RC04           SEARCH FAILS                          19250000
+         B     LOCVERBX                                                 19260000
+                                                                        19270000
+LOCVERBH DS    0H                 MATCHING ENTRY RETURNED VIA R1        19280000
+         LA    R15,RC00           SUCCESS                               19290000
+                                                                        19300000
+LOCVERBX DS    0H                                                       19310000
+         LTR   R15,R15            REFLECT COMPETION STATUS VIA CC       19320000
+         BR    R14                                                      19330000
+         DROP  R1                 CMDVERB                               19340000
+                                                                        19350000
+         EJECT ,                                                        19360000
+***************************************************************         19370000
+*                                                                       19380000
+* ROUTINE: ANALPRTN - ISSUE STANDARD COMMAND COMPLETION MSGS            19390000
+*                                                                       19400000
+* DESCRIPTION:                                                          19410000
+*                                                                       19420000
+*    This routine is invoked to issue the standard command              19430000
+*    completion message upon CMDPROC return or the optional             19440000
+*    CMDTASK response to the command scheduler.  Additionally,          19450000
+*    if a failure is noted (RC >= CCODE_FAIL) and the command           19460000
+*    was issued by an automated cmd submission process, that            19470000
+*    process is terminated.                                             19480000
+*                                                                       19490000
+*                                                                       19500000
+* ON ENTRY:                                                             19510000
+*                                                                       19520000
+*    R1 - ADDR OF CL8 COMMAND VERB                                      19530000
+*    R0 - STANDARD COMMAND PROCESSING ROUTINE COMPLETION CODE           19540000
+*                                                                       19550000
+***************************************************************         19560000
+                                                                        19570000
+ANALPRTN DS    0H                                                       19580000
+         STM   R0,R15,REGSAVE                                           19590000
+         LR    R3,R1              COMMAND VERB                          19600000
+         LR    R4,R0              STD CMD COMPLETION CODE OR $$ABEND    19610000
+                                                                        19620000
+         CH    R4,=AL2(CCODE_NORESP)                                    19630000
+         BE    ANARET                                                   19640000
+                                                                        19650000
+*--------------------------------------------------------------         19660000
+*   ISSUE STANDARD COMPLETION MESSAGE                                   19670000
+*--------------------------------------------------------------         19680000
+                                                                        19690000
+         LA    R2,MSGABE#         ASSUME NON-STANDARD RC                19700000
+         CH    R4,=AL2($$ABEND)   PROCESS ABENDED?                      19710000
+         BE    ANAMSG             YES, ISSUE MESSAGE                    19720000
+         CH    R4,=AL2($$TERM)    PROCESS TERMINATED PREMATURALLY       19730000
+         BE    ANAMSG             YES, ISSUE MESSAGE                    19740000
+                                                                        19750000
+         LA    R2,MSGBASE#(,R4)   BASE FOR STD CMD PROC MESSAGES        19760000
+                                                                        19770000
+ANAMSG   DS    0H                                                       19780000
+         $MSG  (R2),DESTADD=RESPDEST,FIELDS=(((R3),8))                  19790000
+                                                                        19800000
+*--------------------------------------------------------------         19810000
+*   TERMINATE AUTOMATED CMD SUBMITTER IF ITS COMMAND FAILED             19820000
+*--------------------------------------------------------------         19830000
+                                                                        19840000
+         TM    CMRQAMNM,BF        AUTO CMD IS SUBMITTER?                19850000
+         BZ    ANARET             SKIP IF NOT                           19860000
+         CH    R4,=AL2(CCODE_FAIL)                                      19870000
+         BL    ANARET             NORMAL COMMAND COMPLETION             19880000
+                                                                        19890000
+         $MSG  385,DESTADD=RESPDEST,  AUTO CMD TERMED IF CMD IN ERROR  X19900000
+               FIELDS=(CMRQAMNM)                                        19910000
+                                                                        19920000
+         $PMON MONITORID=CMRQAMNM,  TERMINATE AUTO CMD SUBMISSION      X19930000
+               MONIDNUM=*CMRQAMN#,                                     X19940000
+               CMDREQ=CMDREQ,                                          X19950000
+               MF=(E,MFE_LIST)                                          19960000
+                                                                        19970000
+*--------------------------------------------------------------         19980000
+*   RETURN TO CALLER                                                    19990000
+*--------------------------------------------------------------         20000000
+                                                                        20010000
+ANARET   DS    0H                                                       20020000
+         LM    R0,R14,REGSAVE     RESTORE MAINLINE REGS                 20030000
+         BR    R14                                                      20040000
+                                                                        20050000
+MSGBASE# EQU   50                                                       20060000
+MSGABE#  EQU   90                                                       20070000
+                                                                        20080000
+         EJECT                                                          20090000
+***************************************************************         20100000
+*                                                                       20110000
+* ROUTINE: ACKFAIL - DOCUMENT RESPONSE ACKNOWLEDGEMENT ERROR            20120000
+*                                                                       20130000
+* ON ENTRY:                                                             20140000
+*                                                                       20150000
+*    R15-R0 CONTAIN DIAGNOSTIC DATA GENERATED BY $COMACK                20160000
+*    R1     CONTAINS THE ADDRESS OF THE RESPONDING CMDTASK NAME         20170000
+*                                                                       20180000
+***************************************************************         20190000
+                                                                        20200000
+ACKFAIL  DS    0H                                                       20210000
+         STM   R0,R15,REGSAVE     SAVE MAINLINE REGS                    20220000
+                                                                        20230000
+         LR    R3,R1              RESPONDING ITASK NAME PTR             20240000
+         LR    R5,R15             RETCODE                               20250000
+         LR    R6,R0              RSNCODE                               20260000
+                                                                        20270000
+         $MSG  026,DESTADD=$LOGFILE+$JOBLOG,                           X20280000
+               FIELDS=(((R3),8),((R5)),((R6)))                          20290000
+                                                                        20300000
+         LM    R0,R14,REGSAVE     RESTORE MAINLINE REGS                 20310000
+         BR    R14                RETURN                                20320000
+                                                                        20330000
+         EJECT ,                                                        20340000
+***************************************************************         20350000
+*                                                                       20360000
+*   CATASTROPHIC LOGIC FAILURES, ETC.                                   20370000
+*                                                                       20380000
+***************************************************************         20390000
+                                                                        20400000
+ERR_STG  DS    0H                                                       20410000
+         ST    R15,FWORD                                                20420000
+         $ABEND ABE_STORAGE,*FWORD,DUMP=YES,                           X20430000
+               TITLE='STORAGE MANAGMENT FAILURE'                        20440000
+                                                                        20450000
+         EJECT ,                                                        20460000
+***************************************************************         20470000
+*                                                                       20480000
+*   LOCAL READ/ONLY DATA AREAS, ETC.                                    20490000
+*                                                                       20500000
+***************************************************************         20510000
+                                                                        20520000
+CMD_F    DC    A(L'CMDFDOC,CMDFDOC)                                     20530000
+CMD_S    DC    A(L'CMDSDOC,CMDSDOC)                                     20540000
+CMD_P    DC    A(L'CMDPDOC,CMDPDOC)                                     20550000
+CMD_@    DC    A(L'CMD@DOC,CMD@DOC)                                     20560000
+                                                                        20570000
+CMDFDOC  DC    C'MODIFY without operands ignored'                       20580000
+CMDSDOC  DC    C'STARTED by operator'                                   20590000
+CMDPDOC  DC    C'STOPPED by operator'                                   20600000
+CMD@DOC  DC    C'Unknown request type'                                  20610000
+                                                                        20620000
+FSTOP    DC    C'STOP'                                                  20630000
+BLANKS   DC    CL16' '                                                  20640000
+                                                                        20650000
+*--------------------------------------------------------------         20660000
+                                                                        20670000
+         LTORG ,                                                        20680000
+                                                                        20690000
+         PRINT NOGEN                                                    20700000
+         ICVT  ,                                                        20710000
+         ITASK ,                                                        20720000
+         IUSER ,                                                        20730000
+                                                                        20740000
+         DSECT ,                                                        20750000
+         IEZCOM ,                                                       20760000
+                                                                        20770000
+         DSECT ,                                                        20780000
+CIB      IEZCIB ,                                                       20790000
+                                                                        20800000
+         ICHRUTKN ,                                                     20810000
+                                                                        20820000
+         IHAACEE ,                                                      20830000
+         END   ,                                                        20840000

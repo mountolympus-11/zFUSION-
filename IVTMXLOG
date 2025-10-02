@@ -1,0 +1,306 @@
+IVTMXLOG TITLE 'INTEGRATOR - VTAM LOGON EXIT'                           00010000
+**<DOC-ON>************************************************************* 00020000
+*                                                                       00030000
+* ROUTINE: IVTMXLOG - INTEGRATOR VTAM LOGON EXIT                        00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    THE LOGON EXIT RECEIVES A CINIT RU DESCRIBING A PENDING            00080000
+*    SESSION REQUEST WHERE THIS PRODUCT WILL BE ACTING AS THE           00090000
+*    PLU AND THE SESSION REQUESTOR WILL BE ACTING AS THE SLU.           00100000
+*    THIS EXIT BUILDS A LOGON WORK ELEMENT AND QUEUES IT TO THE         00110000
+*    VTAM MAIN TASK.  THE VTAM MAIN TASK STARTS AN IVUSER SUBTASK       00120000
+*    AND PASSES THE LOGON WORK ELEMENT TO THE IVUSER SUBTASK.           00130000
+*    THE IVUSER SUBTASK STARTS A SESSION PROCESS AND PASSES THE         00140000
+*    LOGON WORK ELEMENT TO THE SESSION PROCESS.  THE SESSION            00150000
+*    PROCESS EXAMINES THE CINIT AND EITHER ACCEPTS THE SESSION          00160000
+*    OR REJECTS THE SESSION.                                            00170000
+*                                                                       00180000
+* ON ENTRY:                                                             00190000
+*                                                                       00200000
+*    BAKR IS USED TO SAVE REGISTERS.                                    00210000
+*                                                                       00220000
+*    R15 = ENTRY POINT ADDRESS                                          00230000
+*    R14 = RETURN ADDRESS                                               00240000
+*    R01 = PARAMETER LIST ADDRESS                                       00250000
+*          +00(4): ADDRESS OF ACB                                       00260000
+*          +04(4): ADDRESS OF 8-BYTE SYMBOLIC NAME OF SLU               00270000
+*          +08(4): IF SIMLOGON --> NIB USERFLD VALUE                    00280000
+*                  OTHERWISE   --> 0                                    00290000
+*          +0C(4): LENGTH OF USERDATA                                   00300000
+*                  NOTE: USERDATA CAN BE OBTAINED FROM CINIT            00310000
+*                        OR INQUIRE OPTCD=LOGONMSG                      00320000
+*          +10(4): VTAM READ-ONLY RPL                                   00330000
+*          +14(4): CID OF PENDING SESSION                               00340000
+*                                                                       00350000
+* ON EXIT:                                                              00360000
+*                                                                       00370000
+*    R15 = 0                                                            00380000
+*    R00 = 0                                                            00390000
+*    R01 = 0                                                            00400000
+*                                                                       00410000
+*    ALL OTHER REGISTERS ARE RESTORED BY PR.                            00420000
+*                                                                       00430000
+**<DOC-OFF>************************************************************ 00440000
+                                                                        00450000
+         EJECT ,                                                        00460000
+*********************************************************************** 00470000
+*                                                                       00480000
+* MAINTENANCE:                                                          00490000
+*                                                                       00500000
+*   08/01/93 RANDY WITEK                                                00510000
+*                                                                       00520000
+*********************************************************************** 00530000
+         EQUS  ,                  GENERAL EQUATES                       00540000
+                                                                        00550000
+RICVT    EQU   R11                INTEGRATOR CVT POINTER                00560000
+RITASK   EQU   R10                ASSOCIATED ITASK POINTER              00570000
+RIVTAM   EQU   R9                 INTEGRATOR VTAM CVT POINTER           00580000
+RIACB    EQU   R8                 ASSOCIATED IACB POINTER               00590000
+RIRPL    EQU   R7                 ASSOCIATED RPL/IRPL POINTER           00600000
+RISESS   EQU   R6                 ASSOCIATED ISESS POINTER              00610000
+RIWE     EQU   R5                 WORK ELEMENT POINTER                  00620000
+                                                                        00630000
+         USING ICVT,RICVT         ESTABLISH ADDRESSIBILTY               00640000
+         USING IVTAMCVT,RIVTAM    ESTABLISH ADDRESSIBILTY               00650000
+         USING ITASK,RITASK       ESTABLISH ADDRESSIBILTY               00660000
+         USING IACB,RIACB         ESTABLISH ADDRESSIBILTY               00670000
+         USING IRPL,RIRPL         ESTABLISH ADDRESSIBILTY               00680000
+         USING IWEVTAM,RIWE       ESTABLISH ADDRESSIBILTY               00690000
+         USING ISESS,RISESS       ESTABLISH ADDRESSIBILTY               00700000
+                                                                        00710000
+WORKAREA #WORK ,                  READ/WRITE WORKAREA                   00720000
+         DS    0D                                                       00730000
+RCVPARMS DS    XL(L'IVR)          IVTAMRPA STORAGE                      00740000
+ESTAEMFL DS    XL(L'ESTAEXPL)     PARMLIST CONSTRUCTION                 00750000
+FRRPARM  DS    A                  RETURN AREA FOR FRR PARM ADDRESS      00760000
+SAVER2   DS    F                  TEMPORARY SAVE AREA                   00770000
+RETR15   DS    F                  RETURN CODE VALUE                     00780000
+RETR0    DS    F                  RETURN REGISTER 0                     00790000
+RETR1    DS    F                  RETURN REGISTER 1                     00800000
+RETREGS  EQU   RETR15,*-RETR15    INCLUSIVE SYMBOL                      00810000
+FLAG     DS    X                                                        00820000
+FLESTAEX EQU   X'08'              ESTAEX ACTIVE                         00830000
+FLFRR    EQU   X'04'              FRR    ACTIVE                         00840000
+WORKLEN  #ENDWORK                 END OF WORKAREA                       00850000
+                                                                        00860000
+IVTMXLOG #VTENTER BASE=R12,       VTAM EXIT ROUTINE LINKAGE            +00870000
+               AMODE=31,                                               +00880000
+               RMODE=ANY,                                              +00890000
+               PREG=(R2),                                              +00900000
+               EXITYPE=PLIST                                            00910000
+                                                                        00920000
+         USING IVTAMRPA,RCVPARMS  ESTABLISH ADDRESSIBILITY              00930000
+                                                                        00940000
+*---------------------------------------------------------------------- 00950000
+* ESTABLISH RECOVERY ENVIRONMENT                                        00960000
+*---------------------------------------------------------------------- 00970000
+                                                                        00980000
+         ST    R2,SAVER2          SAVE PARM REGISTER                    00990000
+         LA    R15,IVTXRTRY       RETRY ROUTINE ADDRESS                 01000000
+         ST    R15,IVRRETAD       SET RETRY ROUTINE ADDRESS             01010000
+         LA    R15,IVTAMRPA       PARAMETERS ADDRESS                    01020000
+         ST    R15,IVRRPA@        SET ADDRESS FOR FRR                   01030000
+         L     R0,=F'-1'          SHOW REGS RESTORED FROM PARM AREA     01040000
+         STM   R0,R15,IVRR00      SAVE RETRY REGISTERS                  01050000
+         MVC   IVRMOD,=CL8'IVTMTASK'                                    01060000
+         MVC   IVRCSECT,=CL8'IVTMXLOG'                                  01070000
+         MVC   IVRFRR,=CL8'IVTMXRCV'                                    01080000
+         MVC   IVRTYPE,=CL8'ESTAEX'                                     01090000
+         L     R3,=V(IVTMXRCV)    ADDR OF VTAM EXIT RECOVERY ROUTINE    01100000
+         ICM   R0,15,PSATOLD      SRB MODE?                             01110000
+         BZ    ESTFRR             BRANCH IF YES                         01120000
+                                                                        01130000
+         MVC   ESTAEMFL(L'ESTAEXPL),ESTAEXL                             01140000
+                                                                        01150000
+         ESTAEX (R3),                                                  +01160000
+               CT,                                                     +01170000
+               PARAM=RCVPARMS,                                         +01180000
+               TERM=YES,                                               +01190000
+               MF=(E,ESTAEMFL)    ESTABLISH RECOVERY                    01200000
+                                                                        01210000
+         OI    FLAG,FLESTAEX      RECOVERY ENVIRONMENT ESTABLISHED      01220000
+         B     RECOVSET           AND CONTINUE                          01230000
+                                                                        01240000
+ESTFRR   DS    0H                                                       01250000
+                                                                        01260000
+         MVC   IVRTYPE,=CL8'FRR'                                        01270000
+                                                                        01280000
+         MODESET EXTKEY=ZERO,                                          +01290000
+               SAVEKEY=(2)        SET KEY ZERO                          01300000
+                                                                        01310000
+         SETFRR A,                                                     +01320000
+               FRRAD=(R3),                                             +01330000
+               WRKREGS=(14,15),                                        +01340000
+               PARMAD=FRRPARM     ESTABLISH RECOVERY                    01350000
+                                                                        01360000
+         L     R1,FRRPARM         PARM AREA FOR FRR                     01370000
+         MVC   0(12,R1),RCVPARMS  SET TYPE & PARM AREA POINTER          01380000
+                                                                        01390000
+         MODESET KEYADDR=(2)      RESTORE PREVIOUS KEY                  01400000
+                                                                        01410000
+         OI    FLAG,FLFRR         RECOVERY ENVIRONMENT ESTABLISHED      01420000
+         B     RECOVSET           AND CONTINUE                          01430000
+                                                                        01440000
+RECOVSET DS    0H                                                       01450000
+                                                                        01460000
+         L     R2,SAVER2          RESTORE PARAMETER REGISTER            01470000
+                                                                        01480000
+*---------------------------------------------------------------------- 01490000
+* ALLOCATE A LOGON WORK ELEMENT                                         01500000
+*---------------------------------------------------------------------- 01510000
+                                                                        01520000
+         L     RIRPL,16(,R2)      ADDRESS OF VTAM-RPL                   01530000
+         LA    R4,L'IWEX2         BASIC LENGTH OF WORK ELEMENT          01540000
+         A     R4,RPLRLEN         PLUS LENGTH OF CINIT RU               01550000
+         ST    R2,SAVER2          SAVE ACROSS CALL                      01560000
+                                                                        01570000
+         $VTAMWE (R4),            SIZE                                 +01580000
+               IWECXLOG           ELEMENT CODE                          01590000
+                                                                        01600000
+         L     R2,SAVER2          RESTORE R2                            01610000
+         LR    RIWE,R1                                                  01620000
+         ST    RIACB,IWEX2ACB     SET ACB ADDR IN WORK ELEMENT          01630000
+         L     R1,4(,R2)          ADDRESS OF SYMBOLIC NAME              01640000
+         MVC   IWEX2LU,0(R1)      LUNAME OF PENDING SLU DEVICE          01650000
+         MVC   IWEX2USR,8(R2)     USERFLD (SIMLOGON ONLY)               01660000
+         MVC   IWEX2UDL,12(R2)    LENGTH OF USERDATA IN CINIT           01670000
+         MVC   IWEX2CID,20(R2)    CID OF PENDING SESSION                01680000
+         SR    R1,R1              CLEAR FOR IC                          01690000
+         IC    R1,RPLLEN          LENGTH OF VTAM-RPL                    01700000
+         BCTR  R1,0               LENGTH CODE                           01710000
+         EX    R1,COPYRPL         COPY THE RPL                          01720000
+                                                                        01730000
+         L     R2,RPLAREA         ADDRESS OF CINIT RU                   01740000
+         L     R3,RPLRLEN         LENGTH OF CINIT RU                    01750000
+         LR    R1,R3              COPY LENGTH FOR MVCL                  01760000
+         LA    R0,IWEX2RU         ADDRESS TO COPY TO                    01770000
+         MVCL  R0,R2              COPY THE CINIT RU                     01780000
+                                                                        01790000
+COPY     USING IRPL,IWEX2RPL      SYMBOLIC REF TO RPL COPY              01800000
+                                                                        01810000
+         L     R3,RPLAAREA        ADDR OF CONTROL VECTORS IN CINIT      01820000
+         S     R3,RPLAREA         OFFSET OF CONTROL VECTORS             01830000
+         LA    R2,IWEX2RU         ADDRESS OF CINIT COPY                 01840000
+         ST    R2,COPY.RPLAREA    SET ADDRESS IN RPL COPY               01850000
+         AR    R2,R3              ADDRESS OF CV'S IN CINIT COPY         01860000
+         ST    R2,COPY.RPLAAREA   SET ADDRESS IN RPL COPY               01870000
+         L     R2,RPLRLEN         LENGTH OF CINIT RU                    01880000
+         SR    R2,R3              LENGTH OF CONTROL VECTORS             01890000
+         ST    R2,COPY.RPLAARLN   SET LENGTH IN RPL COPY                01900000
+         ST    R2,COPY.RPLARCLN   SET LENGTH IN RPL COPY                01910000
+                                                                        01920000
+*---------------------------------------------------------------------- 01930000
+* TRACE THE MODULE INVOCATION                                           01940000
+*---------------------------------------------------------------------- 01950000
+                                                                        01960000
+         $TRACE *=A(TRC_IVTMXLOG),32,STDENV=NO     32 USER BYTES        01970000
+                                                                        01980000
+         BNZ   NOMTRACE           BRANCH IF TRACING NOT AVAILABLE       01990000
+                                                                        02000000
+         MVC   4(4,R1),IWEX2USR   USRFLD                                02010000
+         MVC   8(4,R1),IWEX2ACB   ACB                                   02020000
+         MVC   12(4,R1),IWEX2CID  CID                                   02030000
+         MVC   16(8,R1),IWEX2LU   LU NAME                               02040000
+                                                                        02050000
+NOMTRACE DS    0H                                                       02060000
+                                                                        02070000
+*---------------------------------------------------------------------- 02080000
+* QUEUE LOGON WORK ELEMENT TO VTAM MAIN ITASK                           02090000
+*---------------------------------------------------------------------- 02100000
+                                                                        02110000
+         $VTAMQ (RIWE),           WORK ELEMENT                         +02120000
+               IVTWEQ,            QUEUE                                +02130000
+               STDENV=NO          EXIT ROUTINE                          02140000
+                                                                        02150000
+         B     RETURN                                                   02160000
+                                                                        02170000
+*---------------------------------------------------------------------- 02180000
+* RETRY ROUTINE SCHEDULED BY RECOVERY                                   02190000
+*---------------------------------------------------------------------- 02200000
+                                                                        02210000
+IVTXRTRY DS    0H                                                       02220000
+                                                                        02230000
+         LTR   R0,R0              WERE REGISTERS RESTORED FOR RETRY?    02240000
+         BM    REGSOK             BRANCH IF YES, READY TO EXIT          02250000
+X        USING IVTAMRPA,R1        PARM AREA ADDRESS MUST BE IN R1       02260000
+         LM    R0,R15,X.IVRR00    RESTORE ALL THE REGISTERS             02270000
+         DROP  X                                                        02280000
+                                                                        02290000
+REGSOK   DS    0H                                                       02300000
+                                                                        02310000
+         ICM   R0,15,PSATOLD      SRB MODE?                             02320000
+         BNZ   RETURN             BRANCH IF NOT                         02330000
+         ICM   R1,B'0001',=X'80'  KEY 8 IN BITS 24-27                   02340000
+         MODESET KEYREG=(R1)      SET KEY 8                             02350000
+         B     RETURN             AND WE ARE READY TO EXIT              02360000
+                                                                        02370000
+*---------------------------------------------------------------------- 02380000
+* RETURN TO VTAM FROM EXIT ROUTINE                                      02390000
+*---------------------------------------------------------------------- 02400000
+                                                                        02410000
+RETURN   DS    0H                                                       02420000
+                                                                        02430000
+         TM    FLAG,FLESTAEX      IS ESTAEX ESTABLISHED?                02440000
+         BNO   RETFRR             BRANCH IF NOT                         02450000
+                                                                        02460000
+         ESTAEX 0                 DELETE RECOVERY ENVIRONMENT           02470000
+                                                                        02480000
+         NI    FLAG,255-FLESTAEX  CLEAR FLAG                            02490000
+         B     EXITNOW            AND EXIT                              02500000
+                                                                        02510000
+RETFRR   DS    0H                                                       02520000
+                                                                        02530000
+         TM    FLAG,FLFRR         IS FRR ESTABLISHED?                   02540000
+         BNO   EXITNOW            BRANCH IF NOT                         02550000
+                                                                        02560000
+         MODESET EXTKEY=ZERO,                                          +02570000
+               SAVEKEY=(2)        SET KEY ZERO                          02580000
+                                                                        02590000
+         SETFRR D,                                                     +02600000
+               WRKREGS=(14,15)    DELETE RECOVERY ENVIRONMENT           02610000
+                                                                        02620000
+         MODESET KEYADDR=(2)      RESTORE PREVIOUS KEY                  02630000
+                                                                        02640000
+         NI    FLAG,255-FLFRR     CLEAR FLAG                            02650000
+         B     EXITNOW            AND EXIT                              02660000
+                                                                        02670000
+EXITNOW  DS    0H                                                       02680000
+                                                                        02690000
+         LM    R15,R1,RETREGS     LOAD RETURN REGISTERS                 02700000
+                                                                        02710000
+         #VTEXIT ,                RETURN                                02720000
+                                                                        02730000
+*---------------------------------------------------------------------- 02740000
+*  CONSTANTS AND LITERALS                                               02750000
+*---------------------------------------------------------------------- 02760000
+                                                                        02770000
+COPYRPL  MVC   IWEX2RPL(*-*),0(RIRPL)  COPY VTAM-RPL TO WORK ELEMENT    02780000
+                                                                        02790000
+ESTAEXL  ESTAEX *-*,CT,MF=L       ESTAEX PLIST                          02800000
+ESTAEXPL EQU   ESTAEXL,*-ESTAEXL                                        02810000
+                                                                        02820000
+         LTORG ,                                                        02830000
+         PRINT NOGEN                                                    02840000
+         IVTAMRPA ,               INTEGRATOR VTAM RECOVERY PARAMETERS   02850000
+         IHAFRRS ,                MVS FRR STACK                         02860000
+         IHAPSA ,                 MVS PREFIXED STORAGE AREA             02870000
+         ISTDBIND ,               VTAM BIND IMAGE                       02880000
+         TRACODES ,               INTEGRATOR TRACE CODE EQUATES         02890000
+         ICVT  ,                  INTEGRATOR CVT                        02900000
+         IVTAMCVT ,               INTEGRATOR VTAM CVT                   02910000
+         ITASK ,                  INTEGRATOR TASK BLOCK                 02920000
+         IACB ,                   INTEGRATOR VTAM ACB+                  02930000
+         IRPL ,                   INTEGRATOR VTAM RPL+                  02940000
+         INIB ,                   INTEGRATOR VTAM NIB+                  02950000
+         ISESS ,                  INTEGRATOR SESSION BLOCK              02960000
+         IVUSER ,                 INTEGRATOR VTAM USER BLOCK            02970000
+         IWEVTAM ,                INTEGRATOR VTAM WORK ELEMENT          02980000
+         TMSG  ,                  INTEGRATOR INTERTASK MSG FORMAT       02990000
+         EVCODES ,                INTEGRATOR EVENT CODES                03000000
+         ABCODES ,                INTEGRATOR $ABEND CODES               03010000
+         MSGCODES ,               INTEGRATOR INTERTASK MSGING CODES     03020000
+         $TASK DSECT=YES          INTEGRATOR $TASK SERVICES             03030000
+         $VTAM DSECT=YES          INTEGRATOR $VTAM SERVICES             03040000
+         IFGEXLST ,               VTAM EXIT LIST                        03050000
+         END   ,                                                        03060000

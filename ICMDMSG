@@ -1,0 +1,1046 @@
+ICMDMSG  TITLE '- MESSAGE OPTION UPDATE AND DISPLAY'                    00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE: ICMDMSG - MESSAGE OPTION UPDATE AND DISPLAY                  00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This routine processes the various forms of the MESSAGE            00080000
+*    command which are used to update and/or display message            00090000
+*    routing and activation by message class on either a                00100000
+*    system-wide level or for specific workunits.                       00110000
+*                                                                       00120000
+*    The ON, OFF, and CLASSES() operands are used together to           00130000
+*    activate message classes.  The DESTS() operand may be used         00140000
+*    to assign or retract message destinations from an active           00150000
+*    or inactive message class.  If the message class is                00160000
+*    inactive the routing changes occur when the message is             00170000
+*    activated.  The destination list provided may replace, add         00180000
+*    to or delete from current destinations depending on the            00190000
+*    use of the REP, ADD, or DEL keywords, respectively.  REP           00200000
+*    is assumed by default.                                             00210000
+*                                                                       00220000
+*    The DISPLAY option may be specified alone or in                    00230000
+*    combination with message class update operands and/or the          00240000
+*    TASK() operand.  If TASK() is omitted the system wide              00250000
+*    message class table is formatted.  If TASK() is provided,          00260000
+*    the active msg classes for the named workunit are listed.          00270000
+*    If DISPLAY is specified together with a status update              00280000
+*    operand, the display reflects the changes imposed by those         00290000
+*    operands.                                                          00300000
+*                                                                       00310000
+*    The CLASSES() operand contains a list of one or more               00320000
+*    message class names and/or message codes, each of which is         00330000
+*    activated or inactivated depending on the inclusion of ON          00340000
+*    or OFF.  Optionally, the (*) wild card character may be            00350000
+*    used to designate all message classes.                             00360000
+*                                                                       00370000
+*    The "MSG DEFAULTS TASK(taskname)" form of the command is           00380000
+*    used to revert to standard system message handling for             00390000
+*    the named task.  It cancels the affects of any previously          00400000
+*    issued MSG commands issued against that task.                      00410000
+*                                                                       00420000
+*                                                                       00430000
+* BASIC SYNTAX:                                                         00440000
+*                                                                       00450000
+*    MESSAGE                                                            00460000
+*    MESSAGE DISPLAY íTASK(...)ù                                        00470000
+*    MESSAGE ON/OFF  íCLASSES(..,..)ù íDESTS(..,..)ù íTASK(...)ù        00480000
+*    MSG     DEFAULTS TASK(...)                                         00490000
+*                                                                       00500000
+*                                                                       00510000
+* ON ENTRY:                                                             00520000
+*                                                                       00530000
+*    R1  contains the address of the command request block              00540000
+*        (CMDREQ) in local CMDPROC format                               00550000
+*                                                                       00560000
+**<DOC-OFF>****************************************************         00570000
+                                                                        00580000
+         EJECT                                                          00590000
+***************************************************************         00600000
+*                                                                       00610000
+* MAINTENANCE:                                                          00620000
+*                                                                       00630000
+*    05/19/93 R. Turgeon                                                00640000
+*             Initial version                                           00650000
+*                                                                       00660000
+*    02/01/95 R. Witek                                                  00670000
+*             Fix name-to-code return value                             00680000
+*                                                                       00690000
+*    08/12/95 R. Turgeon                                                00700000
+*             Workunit updates not consistently reflected to            00710000
+*             the ITASK message buffer because ACTNFLGS not             00720000
+*             properly set.                                             00730000
+*                                                                       00740000
+***************************************************************         00750000
+                                                                        00760000
+         EJECT                                                          00770000
+         #WORK ,             BEGIN WORKAREA                             00780000
+                                                                        00790000
+MAJOPT   DS    X             MAJOR, STATUS-CHANGING OPERANDS            00800000
+MAJON    EQU   X'80'            ENABLE MESSAGE CLASSES                  00810000
+MAJOFF   EQU   X'40'            DISABLE MESSAGE CLASSES                 00820000
+MAJDFLT  EQU   X'20'            REVERT WU TO SYSTEM DEFAULTS            00830000
+                                                                        00840000
+MINOPT   DS    X             MINOR OPTIONS                              00850000
+MINADD   EQU   X'80'            ADD DESTINATION                         00860000
+MINDEL   EQU   X'40'            DEL DESTINATION                         00870000
+MINREP   EQU   X'20'            REP DESTINATIONS                        00880000
+                                                                        00890000
+MCLOPT   DS    X             MESSAGE CLASS LIST PROVIDED (T/F)          00900000
+DSTOPT   DS    X             DESTINATION LIST PROVIDED (T/F)            00910000
+DSTMASK  DS    X             DESTINATION MASK CONSTRUCTED FROM LIST     00920000
+                                                                        00930000
+DISPITEM DS    X             COMPONENT LIST FOR FINAL DISPLAY           00940000
+DISPEXPL EQU   X'80'            EXPLICIT DISPLAY REQUEST                00950000
+DISPNACT EQU   X'02'            DESIGNATED WORKUNIT IS NOT ACTIVE       00960000
+                                                                        00970000
+ACTNFLGS DS    X             MESSAGE CLASS ACTION FLAGS                 00980000
+ACTCHG   EQU   X'80'            MESSAGE TABLE ENTRIES UPDATED           00990000
+ACTREP   EQU   X'40'            MESSAGE TABLE REPLACEMENT REQUIRED      01000000
+ACTWILD  EQU   X'20'            ALL CLASSES (WILDCARD) REQUEST          01010000
+ACTERR   EQU   X'01'            COMMAND CONTENT ERROR ENCOUNTERED       01020000
+                                                                        01030000
+ENVFLGS  DS    X             ENVIRONMENTAL FLAGS                        01040000
+ENVLOCK  EQU   X'80'            DISP LOCK ACQUIRED                      01050000
+                                                                        01060000
+MCLORG   DS    A             ORIGIN OF MSG CLASS LIST (CCSVALS)         01070000
+MCLCOUNT DS    F             NUMBER OF MSG CLASSES SPECIFIED            01080000
+MSGTABP  DS    A             ADDR OF SYSTEM / WORKUNIT MSG CLASS TABLE  01090000
+DELTABP  DS    A             ADDR OF MSG CLASS TABLE TO FREE            01100000
+                                                                        01110000
+DSTORG   DS    A             ORIGIN OF DESTINATION LIST (CCSVALS)       01120000
+DSTCOUNT DS    F             NUMBER OF DESTINATIONS SPECIFIED           01130000
+                                                                        01140000
+TASKNAME DS    CL8           TASK() DESIGNATION OR ZERO                 01150000
+SCOPE    DS    CL8           SYSTEM / WORKUNIT MSG TOKEN                01160000
+STATUS   DS    CL8           ACTIVE / INACTIVE MSG TOKEN                01170000
+MCLNAME  DS    CL12          MESSAGE CLASS NAME                         01180000
+DSTNAME  DS    CL8           DESTINATION NAME                           01190000
+                                                                        01200000
+DSTLINE  DS    CL(8*8)       DESTINATION LIST OUTPUT LINE               01210000
+MSGCODES DS    CL48          MSG CLASS CODES FROM CLASSES() OPERAND     01220000
+                                                                        01230000
+REGSAVE  DS    16F           LOCAL ROUTINE SAVEAREA                     01240000
+WK256    DS    XL256         LARGE PLIST CONSTRUCTION, ETC.             01250000
+                                                                        01260000
+$$MAXCLS EQU   C'Z'-C'A'+1+1                                            01270000
+$$TABSIZ EQU   $$MAXCLS*MSGCSLN   SIZE OF MESSAGE CLASS ARRAY           01280000
+                                                                        01290000
+         EJECT ,                                                        01300000
+         IWUENTUD DSECT=NO   WORK UNIT LOCATOR USERDATA                 01310000
+                                                                        01320000
+         #ENDWORK ,          END OF WORKAREA                            01330000
+                                                                        01340000
+         EJECT                                                          01350000
+         CMDREQ  ,           COMMAND REQUEST BLOCK                      01360000
+                                                                        01370000
+         EJECT                                                          01380000
+         CCSUMRY ,           COMMAND OPERAND PREPARSE SUMMARY           01390000
+                                                                        01400000
+         EJECT                                                          01410000
+         $WULOC DSECT=YES    TASK / PROCESS LOCATOR SERVICE             01420000
+                                                                        01430000
+         EJECT                                                          01440000
+         $MCLASS DSECT=YES   MSG CLASS DEFINITIONS AND CLASS ANTRIES    01450000
+                                                                        01460000
+         $MSGCNST ,          MESSAGE CONSTANTS / ROUTING CODES          01470000
+                                                                        01480000
+         EJECT                                                          01490000
+         KEYCODES COMMANDSET=MESSAGE                                    01500000
+                                                                        01510000
+         CMDCODES ,                                                     01520000
+                                                                        01530000
+         ABCODES ,                                                      01540000
+                                                                        01550000
+         EQUS  ,                                                        01560000
+                                                                        01570000
+         $MSGDFT PREFIX=ICTPID,COMPID='CMD',TABLE=*#MSGS,              X01580000
+               CONID=*CMRQCNID,CONNAME=CMRQCNAM,CART=CMRQCART,         X01590000
+               DESTADD=*CMRQDMSK,                                      X01600000
+               MSGQA=*CMRQMQA,STGQH=*CMRQSTGQ,                         X01610000
+               MF=(E,WK256)                                             01620000
+                                                                        01630000
+         EJECT                                                          01640000
+ICMDMSG  #ENTER PREG=R8                                                 01650000
+                                                                        01660000
+         USING ITASK,R10                                                01670000
+                                                                        01680000
+         EJECT ,                                                        01690000
+***************************************************************         01700000
+*                                                                       01710000
+*    COMMAND PARSE                                                      01720000
+*                                                                       01730000
+***************************************************************         01740000
+         USING CMDREQ,R8          COMMAND REQUEST BLOCK                 01750000
+         ICM   R7,15,CMRQSMRY     ASSOC COMMAND SUMMARY                 01760000
+         BZ    VALIDATE           ASSUME DEFAULTS                       01770000
+         USING CCSUMRY,R7         COMMAND OPERAND SUMMARY FORMAT        01780000
+         ICM   R5,15,CMRQSMR#     TOTAL NUMBER OF OPERAND ENTRIES       01790000
+         BZ    VALIDATE           ASSUME DEFAULTS                       01800000
+         L     R6,CMRQOPST        OPERAND STRING ORIGIN                 01810000
+                                                                        01820000
+*--------------------------------------------------------------         01830000
+*   IDENTIFY THE OPERANDS PROVIDED AND VALIDATE                         01840000
+*--------------------------------------------------------------         01850000
+PARSENXT DS    0H                                                       01860000
+         CLC   CCSID,=AL2(MSG_DISPLAY)                                  01870000
+         BE    DISPKEY            DISPLAY OPTION                        01880000
+                                                                        01890000
+         CLC   CCSID,=AL2(MSG_TASK)                                     01900000
+         BE    PTSKNM             SPECIFIC WORKUNIT REFERENCE           01910000
+                                                                        01920000
+         LA    R1,MAJON           MESSAGE CLASS ENABLE                  01930000
+         CLC   CCSID,=AL2(MSG_ON)                                       01940000
+         BE    MAJKEY                                                   01950000
+                                                                        01960000
+         LA    R1,MAJOFF          MESSAGE CLASS DISABLE                 01970000
+         CLC   CCSID,=AL2(MSG_OFF)                                      01980000
+         BE    MAJKEY                                                   01990000
+                                                                        02000000
+         LA    R1,MAJDFLT         REVERT WU TO SYSTEM DEFAULTS          02010000
+         CLC   CCSID,=AL2(MSG_DEFAULTS)                                 02020000
+         BE    MAJKEY                                                   02030000
+                                                                        02040000
+         LA    R1,MINADD          DESTINATION LIST UPDATE TYPES         02050000
+         CLC   CCSID,=AL2(MSG_ADD)                                      02060000
+         BE    MINKEY                                                   02070000
+         LA    R1,MINDEL                                                02080000
+         CLC   CCSID,=AL2(MSG_DEL)                                      02090000
+         BE    MINKEY                                                   02100000
+         LA    R1,MINREP                                                02110000
+         CLC   CCSID,=AL2(MSG_REP)                                      02120000
+         BE    MINKEY                                                   02130000
+                                                                        02140000
+         CLC   CCSID,=AL2(MSG_CLASSES)                                  02150000
+         BE    PMSGCLAS           MESSAGE CLASS LIST                    02160000
+                                                                        02170000
+         CLC   CCSID,=AL2(MSG_DESTS)                                    02180000
+         BE    PMSGDEST           MESSAGE DESTINATION LIST              02190000
+         B     ERREJECT           REJECT OTHERWISE                      02200000
+                                                                        02210000
+*--------------------------------------------------------------         02220000
+*   FLAG MAJOR, MINOR FUNCTIONS AND OPTIONS                             02230000
+*--------------------------------------------------------------         02240000
+MAJKEY   DS    0H                                                       02250000
+         CLI   MAJOPT,0           ONLY KEYWORD OF MAJOR GROUP?          02260000
+         BNE   ERRCNFLC           CONFLICTING OPERANDS OTHERWISE        02270000
+         STC   R1,MAJOPT          POST REQUEST TYPE                     02280000
+         B     ADVANCE            ADVANCE TO NEXT OPERAND               02290000
+                                                                        02300000
+MINKEY   DS    0H                                                       02310000
+         CLI   MINOPT,0           ONLY KEYWORD OF MINOR GROUP?          02320000
+         BNE   ERRCNFLC           CONFLICTING OPERANDS OTHERWISE        02330000
+         STC   R1,MINOPT          POST REQUEST TYPE                     02340000
+         B     ADVANCE            ADVANCE TO NEXT OPERAND               02350000
+                                                                        02360000
+DISPKEY  DS    0H                 DISPLAY KEYWORD                       02370000
+         OI    DISPITEM,DISPEXPL  RETAIN REQUEST                        02380000
+         B     ADVANCE            ADVANCE TO NEXT OPERAND               02390000
+                                                                        02400000
+*--------------------------------------------------------------         02410000
+*   WORKUNIT REFERENCE                                                  02420000
+*--------------------------------------------------------------         02430000
+PTSKNM   DS    0H                 TASK(<TASKNAME>)                      02440000
+         CLC   CCSVALCT,=H'1'     SINGLE VALUE?                         02450000
+         BNE   ERRSYNTX           SYNTAX PROBLEM OTHERWISE              02460000
+         LH    R2,CCSVLEN         FETCH VALUE LENGTH                    02470000
+         LTR   R2,R2              LENGTH OF STRING                      02480000
+         BNP   ERRSYNTX           SYNTAX ERROR                          02490000
+         CH    R2,=AL2(L'TASKNAME)   CORRECT LENGTH?                    02500000
+         BH    ERRSYNTX           ERROR IF NOT                          02510000
+                                                                        02520000
+         MVC   TASKNAME,BLANKS    BLANK PAD                             02530000
+         L     R3,CCSVDISP        OFFSET TO TASKNAME IN CMD LINE        02540000
+         AR    R3,R6              CONVERT OFFSET TO ADDRESS             02550000
+         BCTR  R2,0               PREPARE FOR EX                        02560000
+         EX    R2,*+4             LOCAL COPY OF TASKNAME                02570000
+         MVC   TASKNAME(*-*),0(R3)                                      02580000
+         B     ADVANCE            ADVANCE TO NEXT OPERAND               02590000
+                                                                        02600000
+*--------------------------------------------------------------         02610000
+*   MESSAGE CLASS LIST                                                  02620000
+*--------------------------------------------------------------         02630000
+PMSGCLAS DS    0H                                                       02640000
+         MVI   MCLOPT,TRUE        MESSAGE CLASS LIST PROVIDED           02650000
+         LA    R0,CCSVALS         VALUE LIST ORIGIN                     02660000
+         ST    R0,MCLORG          DEFER SCAN                            02670000
+         LH    R0,CCSVALCT        NUMBER OF MESSAGE CLASS ENTRIES       02680000
+         ST    R0,MCLCOUNT        SIZE OF LIST                          02690000
+         B     ADVANCE            ADVANCE TO NEXT OPERAND               02700000
+                                                                        02710000
+*--------------------------------------------------------------         02720000
+*   DESTINATION LIST                                                    02730000
+*--------------------------------------------------------------         02740000
+PMSGDEST DS    0H                                                       02750000
+         MVI   DSTOPT,TRUE        MESSAGE DESTINATIONS PROVIDED         02760000
+         LA    R0,CCSVALS         VALUE LIST ORIGIN                     02770000
+         ST    R0,DSTORG          DEFER SCAN                            02780000
+         LH    R0,CCSVALCT        NUMBER OF MESSAGE CLASS ENTRIES       02790000
+         ST    R0,DSTCOUNT        SIZE OF LIST                          02800000
+         B     ADVANCE            ADVANCE TO NEXT OPERAND               02810000
+                                                                        02820000
+*--------------------------------------------------------------         02830000
+*   PROCESS ALL KEYWORDS                                                02840000
+*--------------------------------------------------------------         02850000
+ADVANCE  DS    0H                                                       02860000
+         LA    R15,CCSVSLN        LENGTH OF EACH VALUE ENTRY            02870000
+         MH    R15,CCSVALCT       TOTAL SIZE CONSUMED BY VALUES         02880000
+         LA    R7,CCSUMRY+CCSPFXL(R15)                                  02890000
+         BCT   R5,PARSENXT        EXAMINE ALL OPERANDS                  02900000
+         DROP  R7                 CCSUMRY                               02910000
+                                                                        02920000
+         EJECT ,                                                        02930000
+***************************************************************         02940000
+*                                                                       02950000
+*    COMMAND VALIDATION - ENSURE REQUEST COMPLETENESS                   02960000
+*                                                                       02970000
+***************************************************************         02980000
+VALIDATE DS    0H                                                       02990000
+         TM    MAJOPT,MAJON+MAJOFF   MSG ENABLE OR DISABLE?             03000000
+         BZ    VPRIOPS            ELSEWHERE IF NOT                      03010000
+         CLI   MCLOPT,0           CLASS LIST PROVIDED?                  03020000
+         BE    ERRAMBIG           AMBIGUOUS REQUEST IF NOT              03030000
+                                                                        03040000
+VPRIOPS  DS    0H                 NO ON/OFF OPERAND GIVEN               03050000
+         CLI   DSTOPT,0           DESTINATIONS PROVIDED?                03060000
+         BE    VREVERT            SKIP IF NOT                           03070000
+         CLI   MCLOPT,0           MESSAGE CLASSES GIVEN?                03080000
+         BE    ERRAMBIG           DEST() PREREQS CLASS()                03090000
+                                                                        03100000
+VREVERT  DS    0H                                                       03110000
+         TM    MAJOPT,MAJDFLT     REVERT TO DEFAULTS?                   03120000
+         BNO   VCMDFTS            BYPASS IF NOT                         03130000
+         TM    TASKNAME,BF        WORKUNIT IDENTIFIED?                  03140000
+         BZ    ERRAMBIG           ERROR IF NOT                          03150000
+         CLI   MCLOPT,0           MESSAGE CLASSES GIVEN?                03160000
+         BNE   ERRSYNTX           NO INTERPRETATION                     03170000
+                                                                        03180000
+VCMDFTS  DS    0H                                                       03190000
+         MVC   FWORD(1),DISPITEM  DISPLAY FLAGS                         03200000
+         NI    FWORD,DISPEXPL     ISOLATE DISPLAY OPERAND               03210000
+         OC    FWORD(1),MAJOPT    ROLL-IN MAJOR OPERANDS                03220000
+         OC    FWORD(1),MCLOPT    CLASS UPDATES                         03230000
+         BNZ   *+8                SKIP IF SOME FUNCTION SPECIFIED       03240000
+         OI    DISPITEM,DISPEXPL  ELSE DEFAULT TO DISPLAY               03250000
+                                                                        03260000
+VAL_FIN  DS    0H                                                       03270000
+         CLI   MINOPT,0           DEST() APPLICATION OPTION GIVEN?      03280000
+         BNZ   *+8                SKIP IF NOT                           03290000
+         MVI   MINOPT,MINREP      REPLACE MSG DESTINATIONS              03300000
+                                                                        03310000
+         L     R0,ICTMSGCL        REF SYSTEM-WIDE MSG CLASS TABLE       03320000
+         ST    R0,MSGTABP         SAVE MESSAGE CLASS TABLE PTR          03330000
+                                                                        03340000
+         EJECT                                                          03350000
+***************************************************************         03360000
+*                                                                       03370000
+*   VALIDATE DESTINATION LIST, CONSTRUCT DESTINATION MASK               03380000
+*                                                                       03390000
+***************************************************************         03400000
+         CLI   DSTOPT,0           DESTINATION LIST PROVIDED?            03410000
+         BE    EDESTLST           SKIP SECTION IF NOT                   03420000
+         ICM   R5,15,DSTCOUNT     NUMBER OF DESTINATION LABELS GIVEN    03430000
+         BNP   SDSTERR            INVALID SYNTAX IF NONE                03440000
+         L     R7,DSTORG          DESTINATION LIST ENTRY ORIGIN         03450000
+         USING CCSVALS,R7         ENTRY ADDRESSABILITY                  03460000
+                                                                        03470000
+SDSTNEXT DS    0H                 PROCESS NEXT ENTRY                    03480000
+         MVC   DSTNAME,BLANKS     MESSAGE CLASS NAME                    03490000
+         SR    R2,R2              PREPARE FOR INSERT                    03500000
+         ICM   R2,3,CCSVLEN       LENGTH OF VALUE                       03510000
+         BNP   SDSTINV            INVALID SYNTAX                        03520000
+         L     R3,CCSVDISP        OFFSET IN CMDLINE TO VALUE STRING     03530000
+         AR    R3,R6              CONVERT OFFSET TO ADDRESS             03540000
+                                                                        03550000
+         CH    R2,=AL2(L'DSTNAME) NAME LENGTH EXCESSIVE?                03560000
+         BH    SDSTINV            INVALID SYNTAX IF SO                  03570000
+         BCTR  R2,0               LENGTH CODE                           03580000
+         EX    R2,*+4             PADDED COPY OF MESSAGE CLASS NAME     03590000
+         MVC   DSTNAME(*-*),0(R3) EX OBJECT                             03600000
+                                                                        03610000
+*--------------------------------------------------------------         03620000
+*   MATCH DESTINATION TO MASK POSITION                                  03630000
+*--------------------------------------------------------------         03640000
+         LA    R3,DESTCDES        PREPARE FOR DEST TABLE SCAN           03650000
+         LA    R14,L'DESTCDES                                           03660000
+         LA    R15,DESTCEND-1                                           03670000
+                                                                        03680000
+SDSTSCAN DS    0H                                                       03690000
+         CLC   DSTNAME,#DESTNAM(R3)                                     03700000
+         BE    SDSTHIT            MATCHING DEST LABEL FOUND             03710000
+         BXLE  R3,R14,SDSTSCAN    ELSE CONTINUE SCAN                    03720000
+                                                                        03730000
+*--------------------------------------------------------------         03740000
+*   INVALID DESTINATION LIST ENTRY ENCOUNTERED                          03750000
+*--------------------------------------------------------------         03760000
+SDSTINV  DS    0H                 INVALID DESTINATION LIST ENTRY        03770000
+         OI    ACTNFLGS,ACTERR    TERMINATING ERROR ENCOUNTERED         03780000
+         $MSG  311,FIELDS=(DSTNAME)                                     03790000
+         B     SDSADV             COMMAND REJECTED                      03800000
+                                                                        03810000
+*--------------------------------------------------------------         03820000
+*   ADVANCE TO NEXT DEST() ENTRY                                        03830000
+*--------------------------------------------------------------         03840000
+SDSTHIT  DS    0H                                                       03850000
+         OC    DSTMASK,#DESTCDE(R3)                                     03860000
+                                                                        03870000
+SDSADV   DS    0H                 ADVANCE TO NEXT ENTRY                 03880000
+         LA    R7,CCSVALS+CCSVSLN ADVANCE TO NEXT MESSAGE CLASS ENTRY   03890000
+         BCT   R5,SDSTNEXT        PROCESS ALL ENTRIES                   03900000
+         B     EDESTLST           DONE                                  03910000
+         DROP  R7                 CCSVALS                               03920000
+                                                                        03930000
+SDSTERR  DS    0H                 INVALID DESTINATION LIST              03940000
+         OI    ACTNFLGS,ACTERR    TERMINATING ERROR ENCOUNTERED         03950000
+         $MSG  312                UNSPECIFIED DEST() OPERAND ERROR      03960000
+                                                                        03970000
+EDESTLST DS    0H                                                       03980000
+                                                                        03990000
+         EJECT ,                                                        04000000
+***************************************************************         04010000
+*                                                                       04020000
+*   VALIDATE CLASS LIST - CONSTRUCT MESSAGE CODE ARRAY                  04030000
+*                                                                       04040000
+***************************************************************         04050000
+         CLI   MCLOPT,0           MESSAGE CLASS LIST PROVIDED?          04060000
+         BE    EMSGCLST           SKIP IF NOT                           04070000
+         ICM   R5,15,MCLCOUNT     NUMBER OF MESSAGE CLASSES GIVEN       04080000
+         BNP   MCLERR             INVALID SYNTAX IF NONE                04090000
+         L     R7,MCLORG          MESSAGE CLASS ENTRY ORIGIN            04100000
+         USING CCSVALS,R7         ENTRY ADDRESSABILITY                  04110000
+         LA    R4,MSGCODES        MESSAGE CODE ARRAY ORIGIN             04120000
+                                                                        04130000
+MCLNEXT  DS    0H                 PROCESS NEXT ENTRY                    04140000
+         MVC   MCLNAME,BLANKS     MESSAGE CLASS NAME                    04150000
+         SR    R2,R2              PREPARE FOR INSERT                    04160000
+         ICM   R2,3,CCSVLEN       LENGTH OF VALUE                       04170000
+         BNP   MCLINVE            INVALID SYNTAX                        04180000
+         L     R3,CCSVDISP        OFFSET IN CMDLINE TO VALUE STRING     04190000
+         AR    R3,R6              CONVERT OFFSET TO ADDRESS             04200000
+                                                                        04210000
+         CH    R2,=AL2(L'MCLNAME) NAME LENGTH EXCESSIVE?                04220000
+         BH    MCLINVE            INVALID SYNTAX IF SO                  04230000
+         BCTR  R2,0               LENGTH CODE                           04240000
+         EX    R2,*+4             PADDED COPY OF MESSAGE CLASS NAME     04250000
+         MVC   MCLNAME(*-*),0(R3) EX OBJECT                             04260000
+                                                                        04270000
+*--------------------------------------------------------------         04280000
+*   ACCEPT CLASS NAME, CODE, OR SINGLE WILD CARD                        04290000
+*--------------------------------------------------------------         04300000
+         LTR   R2,R2              SINGLE CHAR?                          04310000
+         BNZ   MCLMATCH           LOOKUP REQUIRED IF NOT                04320000
+         CLC   MCLCOUNT,=F'1'     SINGLE VALUE?                         04330000
+         BNE   MCLMSCOD           LOOKUP REQUIRED IF NOT                04340000
+         CLC   =C'*',0(R3)        WILDCARD REFERENCE?                   04350000
+         BNE   MCLMSCOD           ELSEWHERE IF NOT                      04360000
+         OI    ACTNFLGS,ACTWILD   WILD CARD REF TO ALL CLASSES          04370000
+         B     MCLADV             DONE                                  04380000
+                                                                        04390000
+MCLMSCOD DS    0H                 MESSAGE CODE PROVIDED, VALIDATE       04400000
+         LA    R1,MCLNAME         CANDIDATE MESSAGE CODE                04410000
+         BAS   R14,CODTONAM       VALIDATION                            04420000
+         BNZ   MCLINVE            INVALID CLASS CODE                    04430000
+         MVC   0(1,R4),MCLNAME    ACCEPT CODE                           04440000
+         B     MCLOK                                                    04450000
+                                                                        04460000
+MCLMATCH DS    0H                                                       04470000
+         LA    R1,MCLNAME         MESSAGE CLASS NAME PROVIDED           04480000
+         BAS   R14,NAMTOCOD       CONVERT NAME TO CODE                  04490000
+         BNZ   MCLINVE            INVALID CLASS NAME                    04500000
+         MVC   0(1,R4),0(R1)      ACCEPT CODE                           04510000
+         B     MCLOK                                                    04520000
+                                                                        04530000
+*--------------------------------------------------------------         04540000
+*   INVALID MESSAGE CLASS NAME OR CODE ENCOUNTERED                      04550000
+*--------------------------------------------------------------         04560000
+MCLINVE  DS    0H                 INVALID MSG CLASS OR CODE             04570000
+         OI    ACTNFLGS,ACTERR    TERMINATING ERROR ENCOUNTERED         04580000
+         $MSG  313,FIELDS=(MCLNAME)  INVALID MSG CLASS VALUE            04590000
+         B     MCLADV             ONWARD                                04600000
+                                                                        04610000
+*--------------------------------------------------------------         04620000
+*   ACCEPT CURRENT CLASS() ENTRY AND ADVANCE TO NEXT                    04630000
+*--------------------------------------------------------------         04640000
+MCLOK    DS    0H                 MESSAGE CODE ACCEPTED                 04650000
+         LA    R4,1(,R4)          ADVANCE TO NEXT MSGCODE ARRAY ENTRY   04660000
+                                                                        04670000
+MCLADV   DS    0H                                                       04680000
+         LA    R7,CCSVALS+CCSVSLN ADVANCE TO NEXT MESSAGE CLASS ENTRY   04690000
+         BCT   R5,MCLNEXT         PROCESS ALL ENTRIES                   04700000
+         B     EMSGCLST           DONE                                  04710000
+         DROP  R7                 CCSVALS                               04720000
+                                                                        04730000
+MCLERR   DS    0H                 INVALID DESTINATION LIST              04740000
+         OI    ACTNFLGS,ACTERR    TERMINATING ERROR ENCOUNTERED         04750000
+         $MSG  314                                                      04760000
+                                                                        04770000
+EMSGCLST DS    0H                                                       04780000
+                                                                        04790000
+         EJECT ,                                                        04800000
+***************************************************************         04810000
+*                                                                       04820000
+*   LOCATE TASK INFO INCLUDING PREVIOUSLY CREATED MSG TABLE.            04830000
+*   ALL WORKUNIT ORIENTED UPDATES ARE PERFORMED HOLDING THE             04840000
+*   DISP LOCK.                                                          04850000
+*                                                                       04860000
+***************************************************************         04870000
+         TM    ACTNFLGS,ACTERR    ERROR REPORTED?                       04880000
+         BO    ERRSYNTX           COMMAND IS FAILED                     04890000
+         TM    TASKNAME,BF        WORKUNIT ORIENTED REQUEST?            04900000
+         BZ    APPLY              ELSE READY FOR CHANGE APPLICATION     04910000
+                                                                        04920000
+         BAS   R14,DISPLOCK       ACQUIRE DISPATCHER LOCK               04930000
+                                                                        04940000
+         $WULOC LOCATE,           LOCATE THE NAMED WORKUNIT            X04950000
+               USERDATA=IWUENTUD, RETURN PROCESS INFO                  X04960000
+               TSKNAME=TASKNAME,  DESIGNATED TASK NAME                 X04970000
+               MF=(E,MFE_LIST)    DUPLICATION FLAG RETURNED IN R0       04980000
+                                                                        04990000
+         BNZ   INACTIV            ITASK IS NOT DEFINED                  05000000
+         ICM   R1,15,WUDITASK     ITASK BLOCK CREATED?                  05010000
+         BNZ   ACTIV              ITASK IS ACTIVE                       05020000
+                                                                        05030000
+INACTIV  DS    0H                                                       05040000
+         OI    DISPITEM,DISPNACT  CONVEY INACTIVE STATUS TO CALLER      05050000
+         SR    R0,R0              RESET $WULOC DUPLICATE INSTANCE FLAG  05060000
+                                                                        05070000
+*--------------------------------------------------------------         05080000
+*   DETERMINE WHETHER WORKUNIT IS UNIQUELY IDENTIFIED                   05090000
+*--------------------------------------------------------------         05100000
+ACTIV    DS    0H                                                       05110000
+         LTR   R0,R0              AMBIGUOUS WORKUNIT REFERENCE?         05120000
+         BZ    LOCMTAB            SKIP IF NOT                           05130000
+                                                                        05140000
+         BAS   R14,DISPUNLK       RELINQUISH DISP LOCK                  05150000
+         $MSG  070                WORKUNIT NOT UNIQUELY IDENTIFIED      05160000
+         B     ERRAMBIG           FAIL                                  05170000
+                                                                        05180000
+*--------------------------------------------------------------         05190000
+*   ACCEPT MODEL MSG CLASS TABLE, CREATE NEW MODEL IF NOT AVAIL         05200000
+*--------------------------------------------------------------         05210000
+LOCMTAB  DS    0H                                                       05220000
+         ICM   R2,15,WUDMSGCL     ADDR MODEL CLASS TABLE ASSOC WITH WU  05230000
+         ST    R2,MSGTABP         USING WORKUNIT MSG TABLE              05240000
+         BNZ   MTEXIST            PREVIOUSLY CREATED                    05250000
+         TM    MAJOPT,MAJDFLT     DELETING WORKUNIT'S PRIVATE COPY?     05260000
+         BO    MTEXIST            SKIP ALLOCATION IF SO                 05270000
+         CLI   MCLOPT,0           MESSAGE CLASSES CHANGING?             05280000
+         BE    MTEXIST            NO ALLOCATION NEEDED OTHERWISE        05290000
+                                                                        05300000
+         STGGET $$TABSIZ,QH=ICTSTGDL                                    05310000
+         BNZ   ABN_STG            STORAGE FAILURE                       05320000
+                                                                        05330000
+         LR    R2,R1              ACCEPT BLOCK                          05340000
+         ST    R2,MSGTABP         CAST AS MSG CLASS TABLE               05350000
+         OI    ACTNFLGS,ACTREP    MODEL MSG TABLE REPLACE REQUIRED      05360000
+                                                                        05370000
+         LR    R14,R2             TABLE ADDR                            05380000
+         LA    R15,$$TABSIZ       TABLE SIZE                            05390000
+         LR    R1,R15             SOURCE SIZE = TARGET SIZE             05400000
+         ICM   R0,15,ICTMSGCL     SYSTEM TABLE AS STARTING TEMPLATE     05410000
+         BZ    *+6                PROGRAMMING ERROR                     05420000
+         MVCL  R14,R0             STARTING POINT                        05430000
+                                                                        05440000
+*--------------------------------------------------------------         05450000
+*   DELETE WORKUNIT MSG TABLE IF REVERT-TO-DEFAULTS REQUEST             05460000
+*--------------------------------------------------------------         05470000
+MTEXIST  DS    0H                                                       05480000
+         TM    MAJOPT,MAJDFLT     REVERTING TO DEFAULTS?                05490000
+         BNO   APPLY              TABLE READY FOR UPDATES IF NOT        05500000
+                                                                        05510000
+         L     R2,MSGTABP         MODEL TABLE IF PREV ALLOCATED         05520000
+         ST    R2,DELTABP         IDENTIFY TABLE TO FREE                05530000
+         XC    MSGTABP,MSGTABP    CLEAR THE PTR                         05540000
+         OI    ACTNFLGS,ACTREP    MODEL MSG TABLE REPLACE REQUIRED      05550000
+                                                                        05560000
+         $MSG  320,FIELDS=(TASKNAME)                                    05570000
+                                                                        05580000
+         EJECT                                                          05590000
+***************************************************************         05600000
+*                                                                       05610000
+*   APPLY UPDATE OPERANDS TO SELECTED MESSAGE TABLE                     05620000
+*                                                                       05630000
+***************************************************************         05640000
+APPLY    DS    0H                                                       05650000
+         ICM   R2,15,MSGTABP      MESSAGE TABLE AVAILABLE?              05660000
+         BZ    EAPPLY             NO UPDATES POSSIBLE IF NOT            05670000
+         OI    ACTNFLGS,ACTCHG    CHANGES OCCURRING                     05680000
+                                                                        05690000
+         TM    MINOPT,MINDEL      DELETING DESTINATIONS?                05700000
+         BNO   *+8                SKIP IF NOT                           05710000
+         XI    DSTMASK,FF         ELSE INVERT FOR USE IN 'AND'          05720000
+                                                                        05730000
+         TM    ACTNFLGS,ACTWILD   WILD CARD UPDATE?                     05740000
+         BNO   APPSEL             SELECTED CLASSES ONLY IF NOT          05750000
+         LA    R5,L'ALLCLASS      ALPHABET SOUP                         05760000
+         LA    R6,ALLCLASS                                              05770000
+         B     APPNEXT                                                  05780000
+                                                                        05790000
+APPSEL   DS    0H                                                       05800000
+         ICM   R5,15,MCLCOUNT     NUMBER OF AFFECTED CLASSES            05810000
+         BZ    EAPPLY             STRANGE                               05820000
+         LA    R6,MSGCODES        AFFECTED MESSAGE CODES                05830000
+                                                                        05840000
+         USING MSGCSENT,R7        MESSAGE ENTRY FORMAT                  05850000
+                                                                        05860000
+APPNEXT  DS    0H                                                       05870000
+         LR    R7,R2              MESSAGE TABLE ORIGIN                  05880000
+         CLI   0(R6),C' '         DEFAULT ENTRY?                        05890000
+         BE    APPUPD             CORRECTLY POSITIONED IF SO            05900000
+         SR    R4,R4              PREPARE FOR INSERT                    05910000
+         IC    R4,0(,R6)          FETCH NEXT MSG CODE                   05920000
+         SH    R4,=AL2(C'A')                                            05930000
+         MH    R4,=AL2(MSGCSLN)        OFFSET TO ENTRY                  05940000
+         LA    R7,MSGCSENT+MSGCSLN(R4) ADDRESS OF ENTRY                 05950000
+                                                                        05960000
+*--------------------------------------------------------------         05970000
+*   APPLY UPDATE TO MESSAGE CLASS ENTRY                                 05980000
+*--------------------------------------------------------------         05990000
+APPUPD   DS    0H                                                       06000000
+         CLI   MSGCSCOD,0         MESSAGE CLASS DEFINED                 06010000
+         BE    APPADV             SKIP ON CLASS TAB SWEEP               06020000
+         CLI   DSTOPT,0           DESTINATION CHANGED?                  06030000
+         BE    APPACT             SKIP IF NOT                           06040000
+                                                                        06050000
+         TM    MINOPT,MINREP      REPLACE DESTINATION LIST              06060000
+         BNO   *+10                                                     06070000
+         MVC   MSGCSDST,DSTMASK                                         06080000
+                                                                        06090000
+         TM    MINOPT,MINADD      ADD TO DESTINATION LIST               06100000
+         BNO   *+10                                                     06110000
+         OC    MSGCSDST,DSTMASK                                         06120000
+                                                                        06130000
+         TM    MINOPT,MINDEL      DEL FROM DESTINATION LIST             06140000
+         BNO   *+10                                                     06150000
+         NC    MSGCSDST,DSTMASK                                         06160000
+                                                                        06170000
+APPACT   DS     0H                                                      06180000
+         TM    MAJOPT,MAJON       CLASS ENABLE?                         06190000
+         BNO   *+8                SKIP IF NOT                           06200000
+         MVI   MSGCSACT,TRUE      ACTIVATE                              06210000
+                                                                        06220000
+         TM    MAJOPT,MAJOFF      CLASS DISABLE?                        06230000
+         BNO   *+8                SKIP IF NOT                           06240000
+         MVI   MSGCSACT,0         DEACTIVATE                            06250000
+                                                                        06260000
+*--------------------------------------------------------------         06270000
+*   ADVANCE TO NEXT CLASS CODE                                          06280000
+*--------------------------------------------------------------         06290000
+APPADV   DS    0H                                                       06300000
+         LA    R6,1(,R6)          NEXT STAGED CLASS CODE                06310000
+         BCT   R5,APPNEXT         PROCESS ALL CLASSES NAMED             06320000
+                                                                        06330000
+         $MSG  317                                                      06340000
+                                                                        06350000
+EAPPLY   DS    0H                                                       06360000
+                                                                        06370000
+         EJECT                                                          06380000
+***************************************************************         06390000
+*                                                                       06400000
+*   POST WORKUNIT UPDATES THROUGH TO TASK MANAGER                       06410000
+*                                                                       06420000
+***************************************************************         06430000
+         TM    TASKNAME,BF        WORKUNIT ORIENTED FUNCTION?           06440000
+         BZ    DISPLAY            BYPASS IF NOT                         06450000
+                                                                        06460000
+         TM    ACTNFLGS,ACTCHG+ACTREP                                   06470000
+         BZ    WU_POST            CLASS TABLE HAS NOT CHANGED           06480000
+         ICM   R1,15,WUDITASK     TASK CURRENTLY ACTIVE?                06490000
+         BZ    WU_POST            SKIP IF NOT                           06500000
+                                                                        06510000
+         L     R0,MSGTABP         REPLACMENT MESSAGE TABLE              06520000
+         @CALL ITSKMSGC,CTYPE=CVT ATTACH TO WORKUNIT                    06530000
+                                                                        06540000
+WU_POST  DS    0H                                                       06550000
+         TM    ACTNFLGS,ACTREP    REPLACE MSG CLASS TABLE?              06560000
+         BNO   WU_FIN             SKIP IF NOT                           06570000
+                                                                        06580000
+         $WULOC POST,             UPDATE WORKUNIT INFO                 X06590000
+               USERDATA=IWUENTUD, WORKAREA FOR SERVICE ROUTINE         X06600000
+               MSGCL=*MSGTABP,    NEW MESSAGE CLASS TABLE              X06610000
+               TSKNAME=TASKNAME,  DESIGNATED TASK NAME                 X06620000
+               MF=(E,MFE_LIST)                                          06630000
+                                                                        06640000
+*--------------------------------------------------------------         06650000
+*   DELETE OLD MODEL IF WORKUNIT REVERTS-TO-DEFAULTS                    06660000
+*--------------------------------------------------------------         06670000
+         ICM   R2,15,DELTABP      MESSAGE TABLE PENDING DELETE?         06680000
+         BZ    WU_FIN             SKIP IF NOT                           06690000
+                                                                        06700000
+         STGRETN ADDR=(R2),LEN=$$TABSIZ,QH=ICTSTGDL                     06710000
+                                                                        06720000
+*--------------------------------------------------------------         06730000
+*   END WORKUNIT PROCESSING - RELEASE DISP LOCK                         06740000
+*--------------------------------------------------------------         06750000
+WU_FIN   DS    0H                                                       06760000
+         BAS   R14,DISPUNLK       RELASE DISP LOCK                      06770000
+                                                                        06780000
+         EJECT                                                          06790000
+***************************************************************         06800000
+*                                                                       06810000
+*   DISPLAY MESSAGE TABLE                                               06820000
+*                                                                       06830000
+***************************************************************         06840000
+DISPLAY  DS    0H                                                       06850000
+         TM    DISPITEM,DISPEXPL  MESSAGE DISPLAY REQUESTED?            06860000
+         BNO   DMSGSKIP           SKIP SECTION IF NOT                   06870000
+                                                                        06880000
+         MVC   SCOPE,$SYSTEM      ASSUME SYSTEM SCOPE                   06890000
+         TM    TASKNAME,BF        TASKNAME PROVIDED?                    06900000
+         BZ    *+10               SKIP IF NOT                           06910000
+         MVC   SCOPE,$WU          IDENTIFY WORKUNIT                     06920000
+                                                                        06930000
+         ICM   R7,15,MSGTABP      MESSAGE CLASS LIST                    06940000
+         BZ    DMSGNONE           NOT AVAILABLE                         06950000
+         USING MSGCSENT,R7        MESSAGE CLASS TABLE ENTRY FORMAT      06960000
+         LA    R6,$$MAXCLS        NUMBER OF ENTRIES TO SCAN             06970000
+                                                                        06980000
+         $MSG  315,FIELDS=(SCOPE) MSG DISPLAY HDR LINE                  06990000
+                                                                        07000000
+*--------------------------------------------------------------         07010000
+*   ROLL THRU MESSAGE TABLE ECHOING ALL DEFINED CLASSES                 07020000
+*--------------------------------------------------------------         07030000
+DMSGNTRY DS    0H                                                       07040000
+         CLI   MSGCSCOD,0         CLASS ENTRY VALID?                    07050000
+         BE    DMSGADV            SKIP IF NOT                           07060000
+                                                                        07070000
+         MVC   MCLNAME,=CL12'*UNKNOWN*'                                 07080000
+         LA    R1,MSGCSCOD        MESSAGE CODE AS INPUT                 07090000
+         BAS   R14,CODTONAM       CONVERT CODE TO NAME                  07100000
+         BNZ   *+10               UNKNOWN (PROGRAM ERROR)               07110000
+         MVC   MCLNAME,0(R1)      ACCEPT RETURNED CLASS NAME            07120000
+                                                                        07130000
+         MVC   STATUS,$INACTIV    ASSUME MSG CLASS INACTIVE             07140000
+         CLI   MSGCSACT,0         ASSUMPTION CORRECT?                   07150000
+         BE    *+10               SKIP IF SO                            07160000
+         MVC   STATUS,$ACTIV      MSG CLASS ACTIVE                      07170000
+                                                                        07180000
+*--------------------------------------------------------------         07190000
+*   ATTACH DESTINATION LABELS                                           07200000
+*--------------------------------------------------------------         07210000
+         LA    R4,DSTLINE         DESTINATIONS SEGMENT                  07220000
+         MVI   DSTLINE,C' '       CLEAR THE SEGMENT                     07230000
+         MVC   DSTLINE+1(L'DSTLINE-1),DSTLINE                           07240000
+                                                                        07250000
+         SR    R2,R2              PREPARE FOR INSERT                    07260000
+         ICM   R2,1,MSGCSDST      ASSOCIATED DESTINATION MASK           07270000
+         BZ    LDSTEND            DONE IF NO DESTS                      07280000
+         LA    R14,DESTCDES       DESTINATION CODE / LABEL XREF TABLE   07290000
+         LA    R15,DESTCEND       END OF TABLE                          07300000
+                                                                        07310000
+LDSTNEXT DS    0H                 INSERT DESTINATION LABELS IN MSG LINE 07320000
+         SR    R1,R1              PREAPRE FOR INSERT                    07330000
+         IC    R1,#DESTCDE(R14)   FETCH DESTINATION BIT                 07340000
+         NR    R1,R2              DESTINATION SELECTED?                 07350000
+         BZ    LDSTADV            SKIP IF NOT                           07360000
+         MVC   0(L'#DESTNAM,R4),#DESTNAM(R14)                           07370000
+         LA    R4,L'#DESTNAM+1(,R4)                                     07380000
+         X     R1,=A(X'FF')       COMPLEMENT MASK                       07390000
+         NR    R2,R1              REMOVE ACCEPTED BIT                   07400000
+                                                                        07410000
+LDSTADV  DS    0H                 ADVANCE TO NEXT POTENTIAL DEST        07420000
+         LA    R14,L'DESTCDES(,R14)                                     07430000
+         CR    R14,R15            END OF TABLE REACHED?                 07440000
+         BL    LDSTNEXT           PROCESS NEXT DESTINATION OTHERWISE    07450000
+                                                                        07460000
+LDSTEND  DS    0H                                                       07470000
+         LA    R3,DSTLINE         DESTINATION SEGMENT ORIGIN            07480000
+         SR    R4,R3              LENGTH USED                           07490000
+         BNZ   LDSTFIN            DESTINATIONS ACCEPTED                 07500000
+         MVC   DSTLINE(L'$NONE),$NONE  ASSUME NO DESTINATIONS           07510000
+         LA    R4,L'$NONE         LENGTH OF 'NO DESTS' TOKEN            07520000
+                                                                        07530000
+LDSTFIN  DS    0H                                                       07540000
+                                                                        07550000
+*--------------------------------------------------------------         07560000
+*   DOCUMENT THIS MESSAGE CLASS AND ADVANCE TO NEXT                     07570000
+*--------------------------------------------------------------         07580000
+         $MSG  316,FIELDS=(MSGCSCOD,MCLNAME,STATUS,(DSTLINE,(R4)))      07590000
+                                                                        07600000
+DMSGADV  DS    0H                                                       07610000
+         LA    R7,MSGCSENT+MSGCSLN                                      07620000
+         BCT   R6,DMSGNTRY        NEXT MSG CLASS TABLE ENTRY            07630000
+         B     DMSGSKIP           DONE                                  07640000
+                                                                        07650000
+DMSGNONE DS    0H                                                       07660000
+         $MSG  319,FIELDS=(SCOPE) NO MESSAGE TABLE AVAILABLE            07670000
+                                                                        07680000
+DMSGSKIP DS    0H                                                       07690000
+         DROP  R7                 MSGCSENT                              07700000
+                                                                        07710000
+         EJECT ,                                                        07720000
+***************************************************************         07730000
+*                                                                       07740000
+*   WORKUNIT STATUS MESSAGE                                             07750000
+*                                                                       07760000
+***************************************************************         07770000
+         TM    DISPITEM,DISPNACT  WORKUNIT IS ACTIVE?                   07780000
+         BNO   EWUACT             SKIP IF SO                            07790000
+                                                                        07800000
+         $MSG  318,FIELDS=(TASKNAME)                                    07810000
+                                                                        07820000
+EWUACT   DS    0H                                                       07830000
+                                                                        07840000
+         EJECT ,                                                        07850000
+***************************************************************         07860000
+*                                                                       07870000
+*   RETURN COMPLETION STATUS TO REQUESTOR                               07880000
+*                                                                       07890000
+***************************************************************         07900000
+NORMRET  DS    0H                                                       07910000
+         LA    R15,CCODE_NORESP   NO ADDITIONAL RESPONSE REQUIRED       07920000
+         B     CMDRET                                                   07930000
+                                                                        07940000
+ERRSYNTX DS    0H                                                       07950000
+         LA    R15,CCODE_SYNTAX   SYNTAX ERROR                          07960000
+         B     CMDRET             DONE                                  07970000
+                                                                        07980000
+ERRAMBIG DS    0H                                                       07990000
+         LA    R15,CCODE_AMBIG    AMBIGUOUS REQUEST                     08000000
+         B     CMDRET             DONE                                  08010000
+                                                                        08020000
+ERRCNFLC DS    0H                                                       08030000
+         LA    R15,CCODE_CONFLICT CONFLICTING OPERANDS                  08040000
+         B     CMDRET             DONE                                  08050000
+                                                                        08060000
+ERREJECT DS    0H                                                       08070000
+         LA    R15,CCODE_REJECT   COMMAND REJECTED                      08080000
+         B     CMDRET             DONE                                  08090000
+                                                                        08100000
+CMDRET   DS    0H                                                       08110000
+         ST    R15,CMRQCOMP       POST COMPLETION CODE PER CONVENTION   08120000
+         BAS   R14,DISPUNLK       ENSURE LOCKS ARE RELEASED             08130000
+         L     R15,CMRQCOMP       RESTORE COMPLETION CODE               08140000
+                                                                        08150000
+         #EXIT ,                                                        08160000
+                                                                        08170000
+         EJECT ,                                                        08180000
+***************************************************************         08190000
+*                                                                       08200000
+*   CATASTROPHIC FAILURES                                               08210000
+*                                                                       08220000
+***************************************************************         08230000
+ABN_STG  DS    0H                                                       08240000
+         $ABEND ABE_STORAGE,DUMP=YES,                                  X08250000
+               TITLE='STORAGE MANAGEMENT FAILURE'                       08260000
+                                                                        08270000
+         EJECT ,                                                        08280000
+***************************************************************         08290000
+*                                                                       08300000
+* ROUTINE: NAMTOCOD - CONVERT MESSAGE CLASS NAME TO CLASS CODE          08310000
+*                                                                       08320000
+* ON ENTRY:                                                             08330000
+*                                                                       08340000
+*    R1 - ADDR OF MESSAGE CLASS NAME IN MSGCLNAM FORMAT                 08350000
+*                                                                       08360000
+*                                                                       08370000
+* ON EXIT:                                                              08380000
+*                                                                       08390000
+*    R15 CONTAINS ONE OF THE FOLLOWING RETURN CODES.                    08400000
+*        THE CONDITION CODE IS SET ACCORDINGLY.                         08410000
+*                                                                       08420000
+*        RC00 - CLASS CODE PTR RETURNED IN R1                           08430000
+*                                                                       08440000
+*        RC04 - INVALID CLASS NAME PROVIDED                             08450000
+*                                                                       08460000
+***************************************************************         08470000
+NAMTOCOD DS    0H                                                       08480000
+         STM   R0,R15,REGSAVE     SAVE MAINLINE REGS                    08490000
+                                                                        08500000
+         LA    R15,RC04           ASSUME FAILURE                        08510000
+         ICM   R2,15,#MSGCLAS     LOCATE MESSAGE CLASS TABLE            08520000
+         BZ    NAMTORET           SYSTEM FAILURE                        08530000
+         USING MSGCLASS,R2        ESTABLISH ADDRESSABILITY              08540000
+                                                                        08550000
+NAMTORDY DS    0H                                                       08560000
+         MVC   WK256(L'MSGCLNAM),MSGCLNAM                               08570000
+         OC    WK256(L'MSGCLNAM),BLANKS                                 08580000
+         CLC   WK256(L'MSGCLNAM),0(R1)                                  08590000
+         BE    NAMTOHIT           END SEARCH IF MATCHING CLASS NAMES    08600000
+         CLI   MSGCLCOD,C' '      AT TERMINATING DEFAULT ENTRY?         08610000
+         BE    CODTORET           FAIL IF SO                            08620000
+         LA    R2,MSGCLASS+MSGCLSLN   ELSE ADVANCE TO NEXT ENTRY        08630000
+         B     NAMTORDY           AGAIN                                 08640000
+                                                                        08650000
+NAMTOHIT DS    0H                                                       08660000
+         LA    R1,MSGCLCOD        RETURN JUSTIFIED, PADDED CLASS NAME   08670000
+         LA    R15,RC00           SUCCESS                               08680000
+                                                                        08690000
+NAMTORET DS    0H                                                       08700000
+         LM    R2,R14,REGSAVE+8   RESTORE REGS                          08710000
+         LTR   R15,R15            SET CC                                08720000
+         BR    R14                RETURN                                08730000
+         DROP  R2                 MSGCLASS                              08740000
+                                                                        08750000
+         EJECT ,                                                        08760000
+***************************************************************         08770000
+*                                                                       08780000
+* ROUTINE: CODTONAM - CONVERT MESSAGE CLASS CODE TO CLASS NAME          08790000
+*                                                                       08800000
+*                                                                       08810000
+* ON ENTRY:                                                             08820000
+*                                                                       08830000
+*    R1 - ADDR OF CANDIDATE MESSAGE CLASS CODE (CL1)                    08840000
+*                                                                       08850000
+*                                                                       08860000
+* ON EXIT:                                                              08870000
+*                                                                       08880000
+*    R15 CONTAINS ONE OF THE FOLLOWING RETURN CODES.                    08890000
+*        THE CONDITION CODE IS SET ACCORDINGLY.                         08900000
+*                                                                       08910000
+*        RC00 - MESSAGE CLASS NAME PTR IN R1 (MSGCLNAM FORMAT)          08920000
+*                                                                       08930000
+*        RC04 - MESSAGE CLASS NOT DEFINED                               08940000
+*                                                                       08950000
+***************************************************************         08960000
+CODTONAM DS    0H                                                       08970000
+         STM   R0,R15,REGSAVE     SAVE MAINLINE REGS                    08980000
+                                                                        08990000
+         LA    R15,RC04           ASSUME FAILURE                        09000000
+         ICM   R2,15,#MSGCLAS     LOCATE MESSAGE CLASS TABLE            09010000
+         BZ    CODTORET           SYSTEM FAILURE                        09020000
+         USING MSGCLASS,R2        ESTABLISH ADDRESSABILITY              09030000
+                                                                        09040000
+CODTORDY DS    0H                                                       09050000
+         CLC   MSGCLCOD,0(R1)     MATCHING CLASS CODES?                 09060000
+         BE    CODTOHIT           END SEARCH IF SO                      09070000
+         CLI   MSGCLCOD,C' '      AT TERMINATING DEFAULT ENTRY?         09080000
+         BE    CODTORET           FAIL IF SO                            09090000
+         LA    R2,MSGCLASS+MSGCLSLN   ELSE ADVANCE TO NEXT ENTRY        09100000
+         B     CODTORDY           AGAIN                                 09110000
+                                                                        09120000
+CODTOHIT DS    0H                                                       09130000
+         LA    R1,MSGCLNAM        RETURN JUSTIFIED, PADDED CLASS NAME   09140000
+         LA    R15,RC00           SUCCESS                               09150000
+                                                                        09160000
+CODTORET DS    0H                                                       09170000
+         LM    R2,R14,REGSAVE+8   RESTORE REGS                          09180000
+         LTR   R15,R15            SET CC                                09190000
+         BR    R14                RETURN                                09200000
+         DROP  R2                 MSGCLASS                              09210000
+                                                                        09220000
+         EJECT ,                                                        09230000
+***************************************************************         09240000
+*                                                                       09250000
+* ROUTINE: DESTNCOD - CONVERT DESTINATION NAME TO MASK BYTE             09260000
+*                                                                       09270000
+* ON ENTRY:                                                             09280000
+*                                                                       09290000
+*    R1 - ADDR OF DESTINATION NAME (CL8)                                09300000
+*                                                                       09310000
+* ON EXIT:                                                              09320000
+*                                                                       09330000
+*    R15 CONTAINS ONE OF THE FOLLOWING RETURN CODES.                    09340000
+*        THE CONDITION CODE IS SET ACCORDINGLY.                         09350000
+*                                                                       09360000
+*        RC00 - VALID DESTINATION NAME PROVIDED                         09370000
+*                                                                       09380000
+*               R0 CONTAINS DESTINATION MASK IN LOW ORDER BYTE          09390000
+*                                                                       09400000
+*        RC04 - INVALID DESTINATION NAME PROVIDED                       09410000
+*                                                                       09420000
+***************************************************************         09430000
+DESTNCOD DS    0H                                                       09440000
+         STM   R0,R15,REGSAVE     SAVE MAINLINE REGS                    09450000
+                                                                        09460000
+         LM    R3,R5,=A(DESTCDES,L'DESTCDES,DESTCEND-1)                 09470000
+         LA    R15,RC04           PRESUME FAILURE                       09480000
+         SR    R0,R0              DESTINATION MASK                      09490000
+                                                                        09500000
+DESTNSCN DS    0H                                                       09510000
+         CLC   #DESTNAM(,R3),0(R1)                                      09520000
+         BE    DESTNHIT           NAMES MATCHED                         09530000
+         BXLE  R3,R4,DESTNSCN     AGAIN OTHERWISE                       09540000
+         B     DESTNRET           FAIL                                  09550000
+                                                                        09560000
+DESTNHIT DS    0H                 DESTINATION NAMES MATCHED             09570000
+         IC    R0,#DESTCDE(,R3)   RETURN CORRESPONDING MASK BYTE        09580000
+         LA    R15,RC00           INDICATE SUCCESSFUL MATCH UP          09590000
+                                                                        09600000
+DESTNRET DS    0H                                                       09610000
+         LM    R1,R14,REGSAVE+4   RESTORE MAINLINE REGS                 09620000
+         LTR   R15,R15            SET CC ACCORDINGLY                    09630000
+         BR    R14                RETURN                                09640000
+                                                                        09650000
+         EJECT                                                          09660000
+***************************************************************         09670000
+*                                                                       09680000
+* ROUTINE: DISPLOCK - ACQUIRE DISP LOCK                                 09690000
+*                                                                       09700000
+***************************************************************         09710000
+DISPLOCK DS    0H                                                       09720000
+         STM   R0,R15,REGSAVE     PRESERVE MAINLINE REGS                09730000
+                                                                        09740000
+         $SER  OBTAIN,DISP        ACQUIRE DISP LOCK                     09750000
+                                                                        09760000
+         BNZ   *+8                BRANCH IF ALREADY OWNED               09770000
+         OI    ENVFLGS,ENVLOCK    ELSE INDICATE LOCK ACQUIRED           09780000
+                                                                        09790000
+         LM    R0,R14,REGSAVE     RESTORE MAINLINE REGS                 09800000
+         BR    R14                RETURN                                09810000
+                                                                        09820000
+         EJECT                                                          09830000
+***************************************************************         09840000
+*                                                                       09850000
+* ROUTINE: DISPUNLK - RELEASE DISP LOCK                                 09860000
+*                                                                       09870000
+***************************************************************         09880000
+DISPUNLK DS    0H                                                       09890000
+         STM   R0,R15,REGSAVE     PRESERVE MAINLINE REGS                09900000
+         SR    R15,R15            PRESUME SUCCESS                       09910000
+                                                                        09920000
+         TM    ENVFLGS,ENVLOCK    LOCK ACQUIRED?                        09930000
+         BNO   DISPUNX            NO RELEASE OTHERWISE                  09940000
+         NI    ENVFLGS,FF-ENVLOCK INDICATE LOCK NOT HELD                09950000
+                                                                        09960000
+         $SER  RELEASE,DISP       RELEASE DISP LOCK                     09970000
+                                                                        09980000
+DISPUNX  DS    0H                                                       09990000
+         LM    R0,R14,REGSAVE     RESTORE MAINLINE REGS                 10000000
+         BR    R14                RETURN                                10010000
+                                                                        10020000
+         EJECT ,                                                        10030000
+***************************************************************         10040000
+*                                                                       10050000
+*   LOCAL READ/ONLY DATA AREAS, ETC.                                    10060000
+*                                                                       10070000
+***************************************************************         10080000
+$NONE    DC    CL8'NONE    '                                            10090000
+$ACTIV   DC    CL8'active  '                                            10100000
+$INACTIV DC    CL8'inactive'                                            10110000
+$DISABLE DC    CL8'disabled'                                            10120000
+$SYSTEM  DC    CL8'system'                                              10130000
+$WU      DC    CL8'workunit'                                            10140000
+                                                                        10150000
+*--------------------------------------------------------------         10160000
+*   DESTINATION NAME / MASK BIT CROSS-REFERENCE                         10170000
+*--------------------------------------------------------------         10180000
+         DS    0F                                                       10190000
+#DESTCDE EQU   0,1                                                      10200000
+#DESTNAM EQU   4,8                                                      10210000
+                                                                        10220000
+DESTCDES EQU   *,1+3+8                                                  10230000
+         DC    AL1($SYSLOG,0,0,0),CL8'SYSLOG'                           10240000
+         DC    AL1($JOBLOG,0,0,0),CL8'JOBLOG'                           10250000
+         DC    AL1($CONSOLE,0,0,0),CL8'CONSOLE'                         10260000
+         DC    AL1($CONSOLE,0,0,0),CL8'CONS'                            10270000
+         DC    AL1($LOGFILE,0,0,0),CL8'LOGFILE'                         10280000
+         DC    AL1($LOGFILE,0,0,0),CL8'LOG'                             10290000
+         DC    AL1($HPUBLIC,0,0,0),CL8'HPUBLIC'                         10300000
+         DC    AL1($HPUBLIC,0,0,0),CL8'HPUB'                            10310000
+         DC    AL1($HPRIVAT,0,0,0),CL8'HPRIVATE'                        10320000
+         DC    AL1($HPRIVAT,0,0,0),CL8'HPRIV'                           10330000
+DESTCEND EQU   *                                                        10340000
+                                                                        10350000
+*--------------------------------------------------------------         10360000
+ALLCLASS DC    C' ABCDEFGHIJKLMNOPQRSTUVWXYZ'                           10370000
+BLANKS   DC    CL32' '                                                  10380000
+                                                                        10390000
+         LTORG ,                                                        10400000
+                                                                        10410000
+         PRINT NOGEN                                                    10420000
+         ICVT  ,                                                        10430000
+         ITASK ,                                                        10440000
+         IPCB  ,                                                        10450000
+         END   ,                                                        10460000

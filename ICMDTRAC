@@ -1,0 +1,949 @@
+ICMDTRAC TITLE '- TRACE OPTION UPDATE AND DISPLAY'                      00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE: ICMDTRAC - TRACE OPTION UPDATE AND DISPLAY                   00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This routine processes the various forms of the TRACE              00080000
+*    command which are used to update and/or display the status         00090000
+*    of the system trace, event classes enabled system-wide,            00100000
+*    and event classes enabled for specific workunits.                  00110000
+*                                                                       00120000
+*    The ON, OFF, and CLASSES() operands are used to change the         00130000
+*    operation of the trace facility either globally or for a           00140000
+*    specified workunit.  When ON or OFF is specified without           00150000
+*    CLASSES(), the trace facility itself is enabled or                 00160000
+*    disabled for the system or workunit.                               00170000
+*                                                                       00180000
+*    The DISPLAY option may be specified alone or in                    00190000
+*    combination with trace status change operands and/or the           00200000
+*    TASK() operand.  If TASK() is omitted the global active            00210000
+*    event classes are listed.  If TASK() is provided, the              00220000
+*    active event classes for the named workunit are listed.            00230000
+*    If DISPLAY is specified together with a status change              00240000
+*    operand, the display reflects the changes imposed by those         00250000
+*    operands.                                                          00260000
+*                                                                       00270000
+*    The CLASSES() operand contains a list of one or more event         00280000
+*    class names, each of which is enabled or disabled                  00290000
+*    depending on the inclusion of ON or OFF.  Optionally, the          00300000
+*    (*) wild card character may be used to designate all event         00310000
+*    classes.  The event class names / codes cross-reference            00320000
+*    resides in ITRCEVCL.                                               00330000
+*                                                                       00340000
+*                                                                       00350000
+* SYNTAX:                                                               00360000
+*                                                                       00370000
+*           DISPLAY                                                     00380000
+*    TRACE     D     /,TASK(...)/                                       00390000
+*           ON/OFF   /,TASK(...)/   /,CLASSES(classcommalist)/          00400000
+*           DEFAULTS                                                    00410000
+*                                                                       00420000
+* ON ENTRY:                                                             00430000
+*                                                                       00440000
+*    R1  contains the address of the command request block              00450000
+*        (CMDREQ) in local CMDPROC format                               00460000
+*                                                                       00470000
+**<DOC-OFF>****************************************************         00480000
+                                                                        00490000
+                                                                        00500000
+***************************************************************         00510000
+*                                                                       00520000
+* MAINTENANCE:                                                          00530000
+*                                                                       00540000
+*    05/19/93 R. Turgeon                                                00550000
+*             Initial version                                           00560000
+*                                                                       00570000
+*    11/19/93 R. Turgeon / Su-Fen Wu                                    00580000
+*             DEFAULTS, CL(*) interpretation for system and             00590000
+*             workunit enable/disable, and reformatted trace            00600000
+*             display line INTCMD287I.                                  00610000
+*                                                                       00620000
+***************************************************************         00630000
+                                                                        00640000
+         EJECT                                                          00650000
+         #WORK ,             BEGIN WORKAREA                             00660000
+STATUS   DS    CL4           ON or OFF                                  00670000
+                                                                        00680000
+MAJOPT   DS    X             MAJOR, STATUS-CHANGING OPERANDS            00690000
+MAJON    EQU   X'80'            ENABLE TRACE EVENT CLASSES              00700000
+MAJOFF   EQU   X'40'            DISABLE TRACE EVENT CLASSES             00710000
+MAJDFLT  EQU   X'20'            TRACE DEFAULTS                          00720000
+                                                                        00730000
+ECLOPT   DS    X             EVENT CLASS LIST PROVIDED (T/F)            00740000
+                                                                        00750000
+DISPITEM DS    X             COMPONENT LIST FOR FINAL DISPLAY           00760000
+DISPEXPL EQU   X'80'            EXPLICIT DISPLAY REQUEST                00770000
+DISPSYS  EQU   X'40'            SYSTEM TRACE STATUS                     00780000
+DISPEVC  EQU   X'20'            EVENT CLASS LIST                        00790000
+DISPNACT EQU   X'02'            DESIGNATED WORKUNIT IS NOT ACTIVE       00800000
+DISPACT  EQU   X'01'            AT LEAST ONE TRACE CLASS IS ENABLED     00810000
+                                                                        00820000
+ACTNFLGS DS    X             ECM ACTION FLAGS                           00830000
+ACTCHG   EQU   X'80'            EVENT MASK CHANGE POSTED                00840000
+ACTREP   EQU   X'40'            EVENT MASK REPLACEMENT REQUIRED         00850000
+ACTDUPL  EQU   X'20'            MULTIPLE USERS OF ECM                   00860000
+                                                                        00870000
+ENVFLGS  DS    X             ENVIRONMENTAL FLAGS                        00880000
+ENVLOCK  EQU   X'80'            DISP LOCK ACQUIRED                      00890000
+                                                                        00900000
+ECLORG   DS    A             ORIGIN OF EVENTS CLASS LIST (CCSVALS)      00910000
+ECLCOUNT DS    F             NUMBER OF EVENT CLASSES SPECIFIED          00920000
+TRACECM  DS    A             ADDR OF SYSTEM / WORKUNIT EVENT CLASS MASK 00930000
+DELECM   DS    A             ECM PENDING DEFERRED STGRETN               00940000
+CHKPT    DS    F             CODTONAM SERVICE ROUTINE CHECKPOINT WORD   00950000
+                                                                        00960000
+TASKNAME DS    CL8           TASK() DESIGNATION OR ZERO                 00970000
+SCOPE    DS    CL8           SYSTEM / WORKUNIT MSG TOKEN                00980000
+ACTION   DS    CL8           ENABLED / DISABLED MSG TOKEN               00990000
+EVCNAME  DS    CL16          EVENT CLASS NAME                           01000000
+                                                                        01010000
+LCLECM   DS    XL32          LOCAL COPY OF EVENT CLASS MASK             01020000
+LCLECON  DS    XL32          MASK OF EVENTS ENABLING                    01030000
+LCLECOFF DS    XL32          MASK OF EVENTS DISABLING                   01040000
+                                                                        01050000
+REGSAVE  DS    16F           LOCAL ROUTINE SAVEAREA                     01060000
+                                                                        01070000
+$MSGMFL  $MSG  FIELDS=(,,,,,),MF=L                                      01080000
+                                                                        01090000
+         EJECT ,                                                        01100000
+         IWUENTUD DSECT=NO   WORK UNIT LOCATOR USERDATA                 01110000
+                                                                        01120000
+         #ENDWORK ,          END OF WORKAREA                            01130000
+                                                                        01140000
+         EJECT                                                          01150000
+         CMDREQ  ,           COMMAND REQUEST BLOCK                      01160000
+                                                                        01170000
+         EJECT                                                          01180000
+         CCSUMRY ,           COMMAND OPERAND PREPARSE SUMMARY           01190000
+                                                                        01200000
+         EJECT                                                          01210000
+         TRACODES ,          COMMAND OPTION EQUATE                      01220000
+                                                                        01230000
+         EJECT                                                          01240000
+         $WULOC DSECT=YES    TASK / PROCESS LOCATOR SERVICE             01250000
+                                                                        01260000
+         EJECT                                                          01270000
+         KEYCODES COMMANDSET=TRACE                                      01280000
+                                                                        01290000
+         CMDCODES ,                                                     01300000
+                                                                        01310000
+         ABCODES ,                                                      01320000
+                                                                        01330000
+         EQUS  ,                                                        01340000
+                                                                        01350000
+         $MSGDFT PREFIX=ICTPID,COMPID='CMD',TABLE=*#MSGS,              X01360000
+               CONID=*CMRQCNID,CONNAME=CMRQCNAM,CART=CMRQCART,         X01370000
+               DESTADD=*CMRQDMSK,                                      X01380000
+               MSGQA=*CMRQMQA,STGQH=*CMRQSTGQ,                         X01390000
+               MF=(U,$MSGMFL),                                         X01400000
+               PRINT=NOGEN                                              01410000
+                                                                        01420000
+         EJECT                                                          01430000
+                                                                        01440000
+         EJECT ,                                                        01450000
+ICMDTRAC #ENTER PREG=R8                                                 01460000
+                                                                        01470000
+         USING ITASK,R10                                                01480000
+                                                                        01490000
+         EJECT ,                                                        01500000
+***************************************************************         01510000
+*                                                                       01520000
+*   Command parse                                                       01530000
+*                                                                       01540000
+***************************************************************         01550000
+                                                                        01560000
+         USING CMDREQ,R8          COMMAND REQUEST BLOCK                 01570000
+         $MSG  MF=(I,$MSGMFL)     MESSAGING CAPABILITY                  01580000
+                                                                        01590000
+         ICM   R7,15,CMRQSMRY     ASSOC COMMAND SUMMARY                 01600000
+         BZ    VALIDATE           ASSUME DEFAULTS                       01610000
+         USING CCSUMRY,R7         COMMAND OPERAND SUMMARY FORMAT        01620000
+                                                                        01630000
+         ICM   R5,15,CMRQSMR#     TOTAL NUMBER OF OPERAND ENTRIES       01640000
+         BZ    VALIDATE           ASSUME DEFAULTS                       01650000
+         L     R6,CMRQOPST        OPERAND STRING ORIGIN                 01660000
+                                                                        01670000
+*--------------------------------------------------------------         01680000
+*   Identify the operands provided and validate                         01690000
+*--------------------------------------------------------------         01700000
+                                                                        01710000
+PARSENXT DS    0H                                                       01720000
+         CLC   CCSID,=AL2(TR_DISPLAY)                                   01730000
+         BE    DISPKEY            DISPLAY OPTION                        01740000
+                                                                        01750000
+         CLC   CCSID,=AL2(TR_TASK)                                      01760000
+         BE    PTSKNM             SPECIFIC WORKUNIT REFERENCE           01770000
+                                                                        01780000
+         LA    R1,MAJON           EVENT CLASS ENABLE                    01790000
+         CLC   CCSID,=AL2(TR_ON)                                        01800000
+         BE    MAJKEY                                                   01810000
+                                                                        01820000
+         LA    R1,MAJOFF          EVENT CLASS DISABLE                   01830000
+         CLC   CCSID,=AL2(TR_OFF)                                       01840000
+         BE    MAJKEY                                                   01850000
+                                                                        01860000
+         LA    R1,MAJDFLT         EVENT CLASS DEFAULT                   01870000
+         CLC   CCSID,=AL2(TR_DEFAULT)                                   01880000
+         BE    MAJKEY                                                   01890000
+                                                                        01900000
+         CLC   CCSID,=AL2(TR_CLASSES)                                   01910000
+         BE    PEVCLAS            EVENTS CLASS LIST                     01920000
+         B     ERREJECT           REJECT OTHERWISE                      01930000
+                                                                        01940000
+*--------------------------------------------------------------         01950000
+*   Flag major functions & options:  on, off, and display               01960000
+*--------------------------------------------------------------         01970000
+                                                                        01980000
+MAJKEY   DS    0H                                                       01990000
+         CLI   MAJOPT,0           ONLY KEYWORD OF MAJOR GROUP?          02000000
+         BNE   ERRCNFLC           CONFLICTING OPERANDS OTHERWISE        02010000
+         STC   R1,MAJOPT          POST REQUEST TYPE                     02020000
+         B     ADVANCE            ADVANCE TO NEXT OPERAND               02030000
+                                                                        02040000
+DISPKEY  DS    0H                 DISPLAY KEYWORD                       02050000
+         OI    DISPITEM,DISPEXPL+DISPSYS+DISPEVC                        02060000
+         B     ADVANCE            ADVANCE TO NEXT OPERAND               02070000
+                                                                        02080000
+*--------------------------------------------------------------         02090000
+*   Workunit reference                                                  02100000
+*--------------------------------------------------------------         02110000
+                                                                        02120000
+PTSKNM   DS    0H                 TASK(<TASKNAME>)                      02130000
+         CLC   CCSVALCT,=H'1'     SINGLE VALUE?                         02140000
+         BNE   ERRSYNTX           SYNTAX PROBLEM OTHERWISE              02150000
+         LH    R2,CCSVLEN         FETCH VALUE LENGTH                    02160000
+         LTR   R2,R2              LENGTH OF STRING                      02170000
+         BNP   ERRSYNTX           SYNTAX ERROR                          02180000
+         CH    R2,=AL2(L'TASKNAME)   CORRECT LENGTH?                    02190000
+         BH    ERRSYNTX           ERROR IF NOT                          02200000
+                                                                        02210000
+         MVC   TASKNAME,BLANKS    BLANK PAD                             02220000
+         L     R3,CCSVDISP        OFFSET TO TASKNAME IN CMD LINE        02230000
+         AR    R3,R6              CONVERT OFFSET TO ADDRESS             02240000
+         BCTR  R2,0               PREPARE FOR EX                        02250000
+         EX    R2,*+4             LOCAL COPY OF TASKNAME                02260000
+         MVC   TASKNAME(*-*),0(R3)                                      02270000
+         B     ADVANCE            ADVANCE TO NEXT OPERAND               02280000
+                                                                        02290000
+*--------------------------------------------------------------         02300000
+*   Events class list                                                   02310000
+*--------------------------------------------------------------         02320000
+                                                                        02330000
+PEVCLAS  DS    0H                                                       02340000
+         MVI   ECLOPT,TRUE        EVENT CLASS LIST PROVIDED             02350000
+         LA    R0,CCSVALS         VALUE LIST ORIGIN                     02360000
+         ST    R0,ECLORG          DEFER SCAN                            02370000
+         LH    R0,CCSVALCT        NUMBER OF EVENT CLASS ENTRIES         02380000
+         ST    R0,ECLCOUNT        SIZE OF LIST                          02390000
+         B     ADVANCE            ADVANCE TO NEXT OPERAND               02400000
+                                                                        02410000
+*--------------------------------------------------------------         02420000
+*   Process all keywords, validate request completeness                 02430000
+*--------------------------------------------------------------         02440000
+                                                                        02450000
+ADVANCE  DS    0H                                                       02460000
+         LA    R15,CCSVSLN        LENGTH OF EACH VALUE ENTRY            02470000
+         MH    R15,CCSVALCT       TOTAL SIZE CONSUMED BY VALUES         02480000
+         LA    R7,CCSUMRY+CCSPFXL(R15)                                  02490000
+         BCT   R5,PARSENXT        EXAMINE ALL OPERANDS                  02500000
+         DROP  R7                 CCSUMRY                               02510000
+                                                                        02520000
+         EJECT                                                          02530000
+***************************************************************         02540000
+*                                                                       02550000
+*   Command validation                                                  02560000
+*                                                                       02570000
+***************************************************************         02580000
+                                                                        02590000
+VALIDATE DS    0H                                                       02600000
+         CLI   MAJOPT,0           ENABLE, DISABLE, or DEFAULTS?         02610000
+         BNE   VALMAJ             SKIP IF SO                            02620000
+         CLI   ECLOPT,0           CLASS LIST GIVEN?                     02630000
+         BNE   ERRAMBIG           NO INTERPRETATION                     02640000
+                                                                        02650000
+         OI    DISPITEM,DISPSYS+DISPEVC   DISPLAY TRACE STATUS          02660000
+                                                                        02670000
+*--------------------------------------------------------------         02680000
+*   Workunit trace enable/disable requires class list                   02690000
+*--------------------------------------------------------------         02700000
+                                                                        02710000
+VALMAJ   DS    0H                                                       02720000
+         TM    TASKNAME,BF        WORKUNIT IDENTIFIED?                  02730000
+         BZ    VALFIN             SYSTEM TRACE REQUEST IF NOT           02740000
+         TM    MAJOPT,MAJON+MAJOFF   ENABLING OR DISABLING?             02750000
+         BZ    VALFIN             SKIP IF NOT                           02760000
+                                                                        02770000
+         CLI   ECLOPT,0           CLASS LIST GIVEN?                     02780000
+         BE    ERRAMBIG           NO INTERPRETATION OTHERWISE           02790000
+                                                                        02800000
+VALFIN   DS    0H                 PRESUME SYSTEM-WIDE OPERATION         02810000
+         L     R0,ICTRTECM        SELECT SYSTEM WIDE EVENT CLASS MASK   02820000
+         ST    R0,TRACECM         SAVE EVENT CLASS MASK PTR             02830000
+                                                                        02840000
+         EJECT                                                          02850000
+***************************************************************         02860000
+*                                                                       02870000
+*   Turn system trace ON or OFF                                         02880000
+*                                                                       02890000
+***************************************************************         02900000
+                                                                        02910000
+         TM    TASKNAME,BF        TASK NAME PROVIDED?                   02920000
+         BNZ   NSYS               NOT A SYSTEM LEVEL COMMAND IF SO      02930000
+         TM    MAJOPT,MAJON+MAJOFF  CLASSES ENABLING/DISABLING?         02940000
+         BZ    NSYS               NOT A STATUS CHANGE IF NOT            02950000
+         CLI   ECLOPT,0           EVENTS LIST PROVIDED?                 02960000
+         BNE   NSYS               EVENT SPECIFIC REQUEST IF SO          02970000
+                                                                        02980000
+         TM    MAJOPT,MAJON       ENABLE?                               02990000
+         BNO   *+8                SKIP IF NOT                           03000000
+         OI    ICTSTAT2,ICT2$TRC  TRACE (RE)ENABLED                     03010000
+                                                                        03020000
+         TM    MAJOPT,MAJOFF      DISABLE?                              03030000
+         BNO   *+8                SKIP IF NOT                           03040000
+         NI    ICTSTAT2,FF-ICT2$TRC   TRACE DISABLED                    03050000
+                                                                        03060000
+         OI    DISPITEM,DISPSYS   DISPLAY TRACE SUMMARY                 03070000
+         B     DISPLAY                                                  03080000
+                                                                        03090000
+NSYS     DS    0H                                                       03100000
+                                                                        03110000
+         EJECT                                                          03120000
+***************************************************************         03130000
+*                                                                       03140000
+*   Parse event class list, apply to local ECM models that will         03150000
+*   later be posted against the indicated workunit.  System             03160000
+*   trace updates are performed directly.                               03170000
+*                                                                       03180000
+*   The wildcard character (*) designates all trace classes             03190000
+*   but must appear alone in the trace class list.                      03200000
+*                                                                       03210000
+***************************************************************         03220000
+                                                                        03230000
+         XC    LCLECON,LCLECON    NO EVENTS ENABLING                    03240000
+         MVI   LCLECOFF,FF        NO EVENTS DISABLING                   03250000
+         MVC   LCLECOFF+1(L'LCLECOFF-1),LCLECOFF                        03260000
+                                                                        03270000
+         CLI   ECLOPT,0           EVENT CLASS LIST PROVIDED?            03280000
+         BE    NOEVCLAS           SKIP IF NOT                           03290000
+         ICM   R5,15,ECLCOUNT     NUMBER OF EVENT CLASSES GIVEN         03300000
+         BNP   ERRSYNTX           INVALID SYNTAX IF NONE                03310000
+         L     R7,ECLORG          EVENT CLASS ENTRY ORIGIN              03320000
+         USING CCSVALS,R7         ENTRY ADDRESSABILITY                  03330000
+                                                                        03340000
+         MVC   SCOPE,$SYSTEM      ASSUME SCOPE OF SYSTEM                03350000
+         TM    TASKNAME,BF        WORKUNIT SCOPE?                       03360000
+         BZ    *+10               SKIP IF NOT                           03370000
+         MVC   SCOPE,$WU          SCOPE OF WORKUNIT                     03380000
+                                                                        03390000
+         MVC   ACTION,$DISABLE    ASSUME DISABLING                      03400000
+         TM    MAJOPT,MAJOFF      ASSUMPTION CORRECT?                   03410000
+         BO    ECLDISA            SKIP IF SO                            03420000
+                                                                        03430000
+         MVC   ACTION,$ENABLE     ASSUME EVENT CLASS ENABLED            03440000
+         TM    ICTSTAT2,ICT2$TRC  TRACE ACTIVE?                         03450000
+         BO    ECLDISA            STATUS SET IF SO                      03460000
+                                                                        03470000
+         MVC   ACTION,$PENDING    ENABLED PENDING ACTIVATION OF TRACE   03480000
+                                                                        03490000
+ECLDISA  DS    0H                                                       03500000
+                                                                        03510000
+*--------------------------------------------------------------         03520000
+*   Scan event list - extract and validate event class names            03530000
+*--------------------------------------------------------------         03540000
+                                                                        03550000
+ECLNEXT  DS    0H                 PROCESS NEXT ENTRY                    03560000
+         SR    R2,R2              PREPARE FOR INSERT                    03570000
+         ICM   R2,3,CCSVLEN       LENGTH OF VALUE                       03580000
+         BNP   ERRSYNTX           INVALID SYNTAX                        03590000
+         L     R3,CCSVDISP        OFFSET IN CMDLINE TO VALUE STRING     03600000
+         AR    R3,R6              CONVERT OFFSET TO ADDRESS             03610000
+                                                                        03620000
+         CH    R2,=AL2(L'EVCNAME) NAME LENGTH EXCESSIVE?                03630000
+         BH    ERRSYNTX           INVALID SYNTAX IF SO                  03640000
+         MVC   EVCNAME,BLANKS     EVENT CLASS NAME                      03650000
+         BCTR  R2,0               LENGTH CODE                           03660000
+         EX    R2,*+4             PADDED COPY OF EVENT CLASS NAME       03670000
+         MVC   EVCNAME(*-*),0(R3) EX OBJECT                             03680000
+                                                                        03690000
+*--------------------------------------------------------------         03700000
+*   Wild card event class refers to all classes                         03710000
+*--------------------------------------------------------------         03720000
+                                                                        03730000
+         LTR   R2,R2              SINGLE CHAR?                          03740000
+         BNZ   ECLMATCH           LOOKUP REQUIRED IF NOT                03750000
+         CLC   ECLCOUNT,=F'1'     SINGLE VALUE?                         03760000
+         BNE   ECLMATCH           LOOKUP REQUIRED IF NOT                03770000
+         CLC   =C'*',0(R3)        WILDCARD REFERENCE?                   03780000
+         BNE   ECLMATCH           ELSEWHERE IF NOT                      03790000
+         MVC   EVCNAME,=CL16'*ALL*'                                     03800000
+                                                                        03810000
+         TM    MAJOPT,MAJON       ENABLING ALL CLASSES?                 03820000
+         BO    ECENALL            ELSEWHERE IF SO                       03830000
+         MVC   LCLECOFF,LCLECON   RESET ALL EVENT CLASS BITS            03840000
+         TM    TASKNAME,BF        TASK SCOPE?                           03850000
+         BNZ   ECLOG              UPDATE PREPARED IF SO                 03860000
+         L     R4,ICTRTECM        ELSE UPDATE SYSTEM ECM DIRECTLY       03870000
+         XC    0(L'LCLECM,R4),0(R4)                                     03880000
+         B     ECLOG              DONE                                  03890000
+                                                                        03900000
+ECENALL  DS    0H                                                       03910000
+         MVC   LCLECON,LCLECOFF   ENABLE ALL EVENT CLASSES              03920000
+         TM    TASKNAME,BF        TASK SCOPE?                           03930000
+         BNZ   ECLOG              UPDATE PREPARED IF SO                 03940000
+         L     R4,ICTRTECM        ELSE UPDATE SYSTEM ECM DIRECTLY       03950000
+         MVI   0(R4),FF           ENABLE CLASSES DIRECTLY               03960000
+         MVC   1(L'LCLECM-1,R4),0(R4)                                   03970000
+         B     ECLOG              LOG THE UPDATE                        03980000
+                                                                        03990000
+*--------------------------------------------------------------         04000000
+*   Derive event class code from event class name and update            04010000
+*--------------------------------------------------------------         04020000
+                                                                        04030000
+ECLMATCH DS    0H                                                       04040000
+         LA    R1,EVCNAME         EVENT CLASS NAME AS PARM              04050000
+         BAS   R14,NAMTOCOD       CONVERT NAME TO CODE                  04060000
+         BZ    ECPOST             AND POST CLASS CODE RETURNED IN R0    04070000
+                                                                        04080000
+         $MSG  289,FIELDS=(EVCNAME)  NOT A VALID VALUE                  04090000
+                                                                        04100000
+         B     ECLADV             ONWARD                                04110000
+                                                                        04120000
+*--------------------------------------------------------------         04130000
+*   Enable/disable an event class                                       04140000
+*--------------------------------------------------------------         04150000
+                                                                        04160000
+ECPOST   DS    0H                                                       04170000
+         LR    R3,R0              EVENT CLASS CODE                      04180000
+         SLL   R3,8               IN $SETRACE CLASS-COMPONENT FORMAT    04190000
+                                                                        04200000
+         LA    R4,LCLECOFF        ASSUME DISABLING WORKUNIT EVENTS      04210000
+         SR    R2,R2              PREPARE FOR INSERT                    04220000
+         IC    R2,MAJOPT          ON / OFF FLAG                         04230000
+         N     R2,=A(MAJON)       NON-ZERO IF ENABLE                    04240000
+         BZ    *+8                SKIP IF DISABLE                       04250000
+         LA    R4,LCLECON         ASSUME ENABLING WORKUNIT EVENTS       04260000
+                                                                        04270000
+         TM    TASKNAME,BF        SCOPE OF WORKUNIT                     04280000
+         BNZ   *+8                SKIP IF SO                            04290000
+         L     R4,ICTRTECM        ELSE UPDATE SYSTEM ECM DIRECTLY       04300000
+                                                                        04310000
+         $SETRACE (R2),(R3),(R4)                                        04320000
+                                                                        04330000
+*--------------------------------------------------------------         04340000
+*   Advance to next class() entry                                       04350000
+*--------------------------------------------------------------         04360000
+                                                                        04370000
+ECLOG    DS    0H                                                       04380000
+         OI    ACTNFLGS,ACTCHG    ECM UPDATED                           04390000
+                                                                        04400000
+         $MSG  290,FIELDS=(SCOPE,ACTION,EVCNAME)                        04410000
+                                                                        04420000
+ECLADV   DS    0H                                                       04430000
+         LA    R7,CCSVALS+CCSVSLN ADVANCE TO NEXT EVENT CLASS ENTRY     04440000
+         BCT   R5,ECLNEXT         PROCESS ALL ENTRIES                   04450000
+         DROP  R7                 CCSVALS                               04460000
+                                                                        04470000
+NOEVCLAS DS    0H                                                       04480000
+                                                                        04490000
+         EJECT                                                          04500000
+***************************************************************         04510000
+*                                                                       04520000
+*   Locate task info including previously created model ECM.            04530000
+*   All workunit oriented updates are performed holding the             04540000
+*   DISP lock.                                                          04550000
+*                                                                       04560000
+***************************************************************         04570000
+                                                                        04580000
+         TM    MAJOPT,MAJDFLT     SETTING DEFAULTS FOR SYS OR WU?       04590000
+         BZ    PRTRACE            SKIP IF NOT                           04600000
+                                                                        04610000
+         TM    TASKNAME,BF        TASK SCOPE CHANGE?                    04620000
+         BZ    DFLTSYS            SYSTEM SCOPE OTHERWISE                04630000
+                                                                        04640000
+*--------------------------------------------------------------         04650000
+*   Set workunit defaults - all trace classes are disabled              04660000
+*--------------------------------------------------------------         04670000
+                                                                        04680000
+         OI    ACTNFLGS,ACTCHG    ECM UPDATED                           04690000
+         XC    LCLECON,LCLECON    NO TASK EVENTS ENABLING               04700000
+         XC    LCLECOFF,LCLECOFF  ALL TASK EVENTS DISABLING             04710000
+         OI    DISPITEM,DISPSYS   DISPLAY SYSTEM TRACE STATUS SUMMARY   04720000
+         B     PRTRACE                                                  04730000
+                                                                        04740000
+*--------------------------------------------------------------         04750000
+*   Set system defaults - reinitialize system trace ECM                 04760000
+*--------------------------------------------------------------         04770000
+                                                                        04780000
+DFLTSYS  DS    0H                                                       04790000
+         L     R1,ICTRTECM        R1 <== SYSTEM TRACE EVENT MASK        04800000
+                                                                        04810000
+         @CALL ITRCDFLT,CTYPE=CVT                                       04820000
+                                                                        04830000
+         OI    ICTSTAT2,ICT2$TRC  TRACE (RE)ENABLED                     04840000
+         OI    DISPITEM,DISPSYS   DISPLAY SYSTEM TRACE STATUS SUMMARY   04850000
+         B     DISPLAY                                                  04860000
+                                                                        04870000
+***************************************************************         04880000
+*                                                                       04890000
+*   Locate task info including previously created model ECM.            04900000
+*   All workunit oriented updates are performed holding the             04910000
+*   DISP lock.                                                          04920000
+*                                                                       04930000
+***************************************************************         04940000
+                                                                        04950000
+PRTRACE  DS    0H                                                       04960000
+         TM    TASKNAME,BF        SPECIFIC WORKUNIT INFO REQUESTED?     04970000
+         BZ    DISPLAY            SKIP IF NOT                           04980000
+                                                                        04990000
+         LA    R0,LCLECM          WORKUNIT ECM UPDATED IN LOCAL BUFFER  05000000
+         ST    R0,TRACECM         SAVE COMMON PTR                       05010000
+                                                                        05020000
+         BAS   R14,DISPLOCK       ACQUIRE DISPATCHER LOCK               05030000
+                                                                        05040000
+         $WULOC LOCATE,           LOCATE THE NAMED WORKUNIT            X05050000
+               USERDATA=IWUENTUD, RETURN PROCESS INFO                  X05060000
+               TSKNAME=TASKNAME,  DESIGNATED TASK NAME                 X05070000
+               MF=(E,MFE_LIST)    DUPLICATION FLAG RETURNED IN R0       05080000
+                                                                        05090000
+         BNZ   INACTIV            TASK IS NOT DEFINED                   05100000
+         ICM   R1,15,WUDITASK     TASK BLOCK CREATED?                   05110000
+         BNZ   ACTIV              TASK IS ACTIVE                        05120000
+                                                                        05130000
+INACTIV  DS    0H                                                       05140000
+         OI    DISPITEM,DISPNACT  CONVEY INACTIVE STATUS TO CALLER      05150000
+         SR    R0,R0              RESET $WULOC DUPLICATE INSTANCE FLAG  05160000
+                                                                        05170000
+ACTIV    DS    0H                                                       05180000
+         LTR   R0,R0              AMBIGUOUS WORKUNIT REFERENCE?         05190000
+         BZ    *+8                SKIP IF NOT                           05200000
+         OI    ACTNFLGS,ACTDUPL   NO ECM STORAGE MANAGEMENT             05210000
+                                                                        05220000
+         ICM   R2,15,WUDECM       ADDR PREV ALLOCATED WORKUNIT ECM      05230000
+         BZ    *+10               SKIP IF NOT YET ALLOCATED             05240000
+         MVC   LCLECM,0(R2)       LOCAL COPY OF WU ECM                  05250000
+         OC    LCLECM,LCLECON     ACCOUNT FOR NEWLY ENABLED CLASSES     05260000
+         NC    LCLECM,LCLECOFF    AND NEWLY DISABLED CLASSES            05270000
+                                                                        05280000
+*------------------------------------------- ------------------         05290000
+*   Update workunit ECM if model has changed                            05300000
+*--------------------------------------------------------------         05310000
+                                                                        05320000
+         TM    ACTNFLGS,ACTCHG    ECM CHANGED?                          05330000
+         BNO   WU_FIN             DONE IF NOT                           05340000
+                                                                        05350000
+         TM    ACTNFLGS,ACTDUPL   TASK UNIQUELY IDENTIFIED?             05360000
+         BNO   WU_UPDAT           SKIP IF SO                            05370000
+                                                                        05380000
+         BAS   R14,DISPUNLK       RELEASE DISP LOCK                     05390000
+                                                                        05400000
+         $MSG  070                AMBIGUOUS WORKUNIT REFERENCE          05410000
+                                                                        05420000
+         B     ERRAMBIG           BYPASS UPDATES                        05430000
+                                                                        05440000
+*--------------------------------------------------------------         05450000
+*   Allocate model ECM on first enable                                  05460000
+*--------------------------------------------------------------         05470000
+                                                                        05480000
+WU_UPDAT DS    0H                                                       05490000
+         ICM   R2,15,WUDECM       ECM PREVIOUSLY ALLOCATED?             05500000
+         BNZ   WU_MODL            SKIP IF NOT                           05510000
+         OC    LCLECM,LCLECM      ANY EVENTS (REMAIN) SELECTED?         05520000
+         BZ    WU_FIN             DONE IF NOT                           05530000
+                                                                        05540000
+         STGGET L'LCLECM,QH=ICTSTGDL                                    05550000
+         BNZ   ABN_STG                                                  05560000
+                                                                        05570000
+         LR    R2,R1              MODEL ECM                             05580000
+         OI    ACTNFLGS,ACTREP    INTRODUCING A NEW ECM                 05590000
+                                                                        05600000
+WU_MODL  DS    0H                                                       05610000
+         ST    R2,TRACECM         ASSOC ECM WITH WORKUNIT               05620000
+         MVC   0(L'LCLECM,R2),LCLECM  UPDATE ECM WITH LOCAL COPY        05630000
+                                                                        05640000
+*--------------------------------------------------------------         05650000
+*   Deallocate ECM when all event classes become disabled               05660000
+*--------------------------------------------------------------         05670000
+                                                                        05680000
+         OC    0(L'LCLECM,R2),LCLECM   EVENTS REMAIN ENABLED?           05690000
+         BNZ   WU_SAVE            RETAIN THE MODEL ECM IF SO            05700000
+         ST    R2,DELECM          ELSE DELETE THE MODEL ECM LATER       05710000
+         XC    TRACECM,TRACECM    RETRACT TASK MANAGER ECM              05720000
+         OI    ACTNFLGS,ACTREP    ECM PTR NOW ZEROED                    05730000
+                                                                        05740000
+WU_SAVE  DS    0H                                                       05750000
+                                                                        05760000
+*--------------------------------------------------------------         05770000
+*   Post updates through to task manager                                05780000
+*--------------------------------------------------------------         05790000
+                                                                        05800000
+         TM    ACTNFLGS,ACTCHG+ACTREP                                   05810000
+         BZ    WU_POST            ECM HAS NOT CHANGED                   05820000
+         ICM   R1,15,WUDITASK     TASK CURRENTLY ACTIVE?                05830000
+         BZ    WU_POST            SKIP IF NOT                           05840000
+         L     R0,TRACECM         ECM PTR OR ZERO                       05850000
+         @CALL ITSKECM,CTYPE=CVT  PROMOTE MODEL ECM INTO TARGET TASK    05860000
+                                                                        05870000
+WU_POST  DS    0H                                                       05880000
+         TM    ACTNFLGS,ACTREP    REPLACE ECM PTR?                      05890000
+         BNO   WU_FIN             SKIP IF NOT                           05900000
+                                                                        05910000
+         $WULOC POST,             UPDATE WORKUNIT INFO                 X05920000
+               USERDATA=IWUENTUD, WORKAREA FOR SERVICE ROUTINE         X05930000
+               ECM=*TRACECM,      NEW ECM                              X05940000
+               TSKNAME=TASKNAME,  DESIGNATED TASK NAME                 X05950000
+               MF=(E,MFE_LIST)                                          05960000
+                                                                        05970000
+*--------------------------------------------------------------         05980000
+*   Release ECM if no longer needed (all events disabled)               05990000
+*--------------------------------------------------------------         06000000
+                                                                        06010000
+         ICM   R2,15,DELECM       ECM PENDING DELETED?                  06020000
+         BZ    WU_FIN             SKIP IF NOT                           06030000
+                                                                        06040000
+         STGRETN ADDR=(R2),LEN=L'LCLECM,QH=ICTSTGDL                     06050000
+                                                                        06060000
+*--------------------------------------------------------------         06070000
+*   End workunit processing - release DISP lock                         06080000
+*--------------------------------------------------------------         06090000
+                                                                        06100000
+WU_FIN   DS    0H                                                       06110000
+         BAS   R14,DISPUNLK       RELASE DISP LOCK                      06120000
+                                                                        06130000
+         EJECT                                                          06140000
+***************************************************************         06150000
+*                                                                       06160000
+*   Display current trace status                                        06170000
+*                                                                       06180000
+***************************************************************         06190000
+                                                                        06200000
+DISPLAY  DS    0H                                                       06210000
+         TM    DISPITEM,DISPSYS   DISPLAY SUMMARY?                      06220000
+         BNO   ESMRYDSP           SKIP IF NOT                           06230000
+                                                                        06240000
+         MVC   DWORD,$ENABLE      ASSUME TRACE IS ENABLED               06250000
+         TM    ICTSTAT2,ICT2$TRC  ASSUMPTION CORRECT?                   06260000
+         BO    *+10               SKIP IF SO                            06270000
+         MVC   DWORD,$DISABLE     TRACE IS DISABLED                     06280000
+                                                                        06290000
+         $MSG  285,FIELDS=(DWORD)                                       06300000
+                                                                        06310000
+ESMRYDSP DS    0H                                                       06320000
+                                                                        06330000
+         EJECT                                                          06340000
+***************************************************************         06350000
+*                                                                       06360000
+*   Display enabled event classes                                       06370000
+*                                                                       06380000
+***************************************************************         06390000
+                                                                        06400000
+         TM    DISPITEM,DISPEVC   DISPLAY ENABLED EVENT CLASSES?        06410000
+         BNO   DMSKEND            SKIP SECTION IF NOT                   06420000
+                                                                        06430000
+         MVC   SCOPE,$SYSTEM      ASSUME SYSTEM SCOPE                   06440000
+         TM    TASKNAME,BF        TASKNAME PROVIDED?                    06450000
+         BZ    *+10               SKIP IF NOT                           06460000
+         MVC   SCOPE,TASKNAME     IDENTIFY WORKUNIT                     06470000
+                                                                        06480000
+         ICM   R7,15,TRACECM      EVENT CLASS MASK                      06490000
+         BZ    DMSKNONE           NOT AVAILABLE                         06500000
+         SR    R5,R5              CURRENT EVENT CLASS CODE              06510000
+                                                                        06520000
+         XC    CHKPT,CHKPT        CODTONAM CHECKPOINT AREA              06530000
+                                                                        06540000
+*--------------------------------------------------------------         06550000
+*   Roll thru mask byte searching for enabled classes                   06560000
+*--------------------------------------------------------------         06570000
+                                                                        06580000
+         $MSG  286,FIELDS=(SCOPE)                                       06590000
+                                                                        06600000
+DMSKBYTE DS    0H                                                       06610000
+         SR    R3,R3              HIGH ORDER BYTE USED ONLY             06620000
+         SR    R4,R4              HIGH ORDER BYTE USED ONLY             06630000
+         ICM   R3,8,=X'FF'        SET COUNTER                           06640000
+         ICM   R4,8,0(R7)         FETCH EVENT CLASS BIT RANGE           06650000
+         LR    R6,R5              INITIAL CLASS CODE                    06660000
+                                                                        06670000
+DMSKBITX DS    0H                                                       06680000
+         LTR   R3,R3              EVENT CLASS BIT HIGH?                 06690000
+         BZ    DMSKADV            NO BITS LEFT                          06700000
+                                                                        06710000
+         LR    R1,R6              R1 <== CANDIDATE EVENT CLASS CODE     06720000
+         L     R0,CHKPT           R0 <== SERVICE ROUTINE CHKPT WORD     06730000
+         BAS   R14,CODTONAM       ACQUIRE CLASS NAME                    06740000
+         ST    R0,CHKPT           MAINTAIN CHKPT WORD                   06750000
+         BNZ   DMSKBITA           SKIP IF NO CORR EVENT CLASS           06760000
+                                                                        06770000
+         MVC   EVCNAME,0(R1)      ELSE RETAIN LOCAL COPY                06780000
+         TM    DISPITEM,DISPACT   EVENT CLASS LIST IN PROGRESS?         06790000
+         BO    DMSKBITY           ONWARD IF SO                          06800000
+                                                                        06810000
+DMSKBITY DS    0H                                                       06820000
+         MVC   STATUS,$OFF        ASSUME TRACE CLASS DISABLED           06830000
+         LTR   R4,R4              EVENT CLASS BIT SET?                  06840000
+         BNM   DMSKBMSG           ASSUMPTION CORRECT IF NOT             06850000
+         MVC   STATUS,$ON         ELSE EVENT CLASS ENABLED              06860000
+         OI    DISPITEM,DISPACT   ACTIVE CLASS FOUND                    06870000
+                                                                        06880000
+DMSKBMSG DS    0H                                                       06890000
+         $MSG  287,FIELDS=(STATUS,EVCNAME)                              06900000
+                                                                        06910000
+DMSKBITA DS    0H                                                       06920000
+         SLL   R3,1               DECREASE COUNTER                      06930000
+         SLL   R4,1               POSITION CLASS BIT FOR TEST           06940000
+         LA    R6,1(,R6)          NEXT CLASS CODE                       06950000
+         B     DMSKBITX           CYCLE THROUGH MASK BYTE               06960000
+                                                                        06970000
+*--------------------------------------------------------------         06980000
+*   Advance to next mask byte, summarize at end of list                 06990000
+*--------------------------------------------------------------         07000000
+                                                                        07010000
+DMSKADV  DS    0H                                                       07020000
+         LA    R7,1(,R7)          ADVANCE TO NEXT BYTE                  07030000
+         LA    R5,8(,R5)          BUMP EVENT CLASS CODE BY BYTE         07040000
+         CH    R5,=H'256'         ENTIRE MASK PROCESSED?                07050000
+         BL    DMSKBYTE           AGAIN IF NOT                          07060000
+                                                                        07070000
+         TM    DISPITEM,DISPACT   CLASS LISTED?                         07080000
+         BO    DMSKEND            COMPLETE IF SO                        07090000
+                                                                        07100000
+DMSKNONE DS    0H                                                       07110000
+         $MSG  288,FIELDS=(SCOPE) NO ACTIVE CLASSES                     07120000
+                                                                        07130000
+DMSKEND  DS    0H                                                       07140000
+                                                                        07150000
+         EJECT ,                                                        07160000
+***************************************************************         07170000
+*                                                                       07180000
+*   Workunit status message                                             07190000
+*                                                                       07200000
+***************************************************************         07210000
+                                                                        07220000
+         TM    DISPITEM,DISPNACT  WORKUNIT IS ACTIVE?                   07230000
+         BNO   EWUACT             SKIP IF SO                            07240000
+                                                                        07250000
+         $MSG  291,FIELDS=(TASKNAME)                                    07260000
+                                                                        07270000
+EWUACT   DS    0H                                                       07280000
+                                                                        07290000
+         EJECT ,                                                        07300000
+***************************************************************         07310000
+*                                                                       07320000
+*   Return completion status to requester                               07330000
+*                                                                       07340000
+***************************************************************         07350000
+                                                                        07360000
+NORMRET  DS    0H                                                       07370000
+         LA    R15,CCODE_NORESP   NO ADDITIONAL RESPONSE REQUIRED       07380000
+         B     CMDRET                                                   07390000
+                                                                        07400000
+ERRSYNTX DS    0H                                                       07410000
+         LA    R15,CCODE_SYNTAX   SYNTAX ERROR                          07420000
+         B     CMDRET             DONE                                  07430000
+                                                                        07440000
+ERRAMBIG DS    0H                                                       07450000
+         LA    R15,CCODE_AMBIG    AMBIGUOUS REQUEST                     07460000
+         B     CMDRET             DONE                                  07470000
+                                                                        07480000
+ERRCNFLC DS    0H                                                       07490000
+         LA    R15,CCODE_CONFLICT CONFLICTING OPERANDS                  07500000
+         B     CMDRET             DONE                                  07510000
+                                                                        07520000
+ERREJECT DS    0H                                                       07530000
+         LA    R15,CCODE_REJECT   COMMAND REJECTED                      07540000
+         B     CMDRET             DONE                                  07550000
+                                                                        07560000
+*--------------------------------------------------------------         07570000
+*   Cleanup and return to requester                                     07580000
+*--------------------------------------------------------------         07590000
+                                                                        07600000
+CMDRET   DS    0H                                                       07610000
+         ST    R15,CMRQCOMP       POST COMPLETION CODE PER CONVENTION   07620000
+         BAS   R14,DISPUNLK       ENSURE LOCKS ARE RELEASED             07630000
+         L     R15,CMRQCOMP       RESTORE COMPLETION CODE               07640000
+                                                                        07650000
+         #EXIT ,                                                        07660000
+                                                                        07670000
+         EJECT ,                                                        07680000
+***************************************************************         07690000
+*                                                                       07700000
+*   Catastrophic failures                                               07710000
+*                                                                       07720000
+***************************************************************         07730000
+                                                                        07740000
+ABN_STG  DS    0H                                                       07750000
+         $ABEND ABE_STORAGE,DUMP=YES,                                  X07760000
+               TITLE='STORAGE MANAGEMENT FAILURE'                       07770000
+                                                                        07780000
+         EJECT ,                                                        07790000
+***************************************************************         07800000
+*                                                                       07810000
+* ROUTINE: NAMTOCOD - Convert trace class name to class code            07820000
+*                                                                       07830000
+* ON ENTRY:                                                             07840000
+*                                                                       07850000
+*    R1 - addr of trace class name (CL16)                               07860000
+*                                                                       07870000
+* ON EXIT:                                                              07880000
+*                                                                       07890000
+*    R15 contains one of the following return codes.                    07900000
+*        The condition code is set accordingly.                         07910000
+*                                                                       07920000
+*        RC00 - class code returned in R0                               07930000
+*                                                                       07940000
+*        RC04 - invalid class name provided                             07950000
+*                                                                       07960000
+***************************************************************         07970000
+                                                                        07980000
+NAMTOCOD DS    0H                                                       07990000
+         STM   R0,R15,REGSAVE     SAVE MAINLINE REGS                    08000000
+                                                                        08010000
+         LA    R15,RC04           ASSUME FAILURE                        08020000
+         ICM   R2,15,#TRCEVCL     TRACE EVENT CLASS LIST                08030000
+         BZ    NAMTORET           NOT PROVIDED (TESTING)                08040000
+                                                                        08050000
+NAMTOC1  DS    0H                                                       08060000
+         ICM   R0,15,16(R2)       END OF LIST?                          08070000
+         BZ    NAMTORET           FAIL IF SO                            08080000
+         CLC   0(16,R1),0(R2)     MATCHES?                              08090000
+         BE    NAMTOHIT           DONE IF SO                            08100000
+         LA    R2,16+4(,R2)       ADVANCE TO NEXT ENTRY                 08110000
+         B     NAMTOC1            AGAIN                                 08120000
+                                                                        08130000
+NAMTOHIT DS    0H                                                       08140000
+         SRL   R0,8               REMOVE IDENTIFIER LEAVING CLASS CODE  08150000
+         LA    R15,RC00           SUCCESS                               08160000
+                                                                        08170000
+NAMTORET DS    0H                                                       08180000
+         LM    R1,R14,REGSAVE+4   RESTORE REGS                          08190000
+         LTR   R15,R15            SET CC                                08200000
+         BR    R14                                                      08210000
+                                                                        08220000
+         EJECT                                                          08230000
+***************************************************************         08240000
+*                                                                       08250000
+* ROUTINE: CODTONAM - Convert trace class code to class name            08260000
+*                                                                       08270000
+* DESCRIPTION:                                                          08280000
+*                                                                       08290000
+*    Convert the candidate trace class code to the associated           08300000
+*    class name.  A checkpoint value is passed and returned via         08310000
+*    R0 to eliminate repeated searching from  the beginning of          08320000
+*    the class name/code table which is ordered by class code.          08330000
+*                                                                       08340000
+*                                                                       08350000
+* ON ENTRY:                                                             08360000
+*                                                                       08370000
+*    R1 - candidate trace class code (0-255)                            08380000
+*    R0 - checkpoint value maintained by this rtn, initially 0          08390000
+*                                                                       08400000
+*                                                                       08410000
+* ON EXIT:                                                              08420000
+*                                                                       08430000
+*    R15 contains one of the following return codes.                    08440000
+*        The condition code is set accordingly.                         08450000
+*                                                                       08460000
+*        RC00 - CL16 event class name returned via R1                   08470000
+*                                                                       08480000
+*        RC04 - event class not defined                                 08490000
+*                                                                       08500000
+*    R0  contains the checkpoint value which can be returned            08510000
+*        to this routine on the subsequent call                         08520000
+*                                                                       08530000
+***************************************************************         08540000
+                                                                        08550000
+CODTONAM DS    0H                                                       08560000
+         STM   R0,R15,REGSAVE     SAVE MAINLINE REGS                    08570000
+                                                                        08580000
+         LA    R15,RC04           ASSUME FAILURE                        08590000
+         LTR   R2,R0              CHECKPOINT INITIALIZED?               08600000
+         BNZ   CODTORDY           CONTINUE FROM LOCATION IF SO          08610000
+         ICM   R2,15,#TRCEVCL     TRACE EVENT CLASS LIST                08620000
+         BZ    CODTORET           NOT PROVIDED (TESTING)                08630000
+                                                                        08640000
+CODTORDY DS    0H                                                       08650000
+         ICM   R0,15,16(R2)       END OF TABLE REACHED?                 08660000
+         BZ    CODTORET           NO CHANCE OF MATCH                    08670000
+         SRL   R0,8               REMOVE IDENTIFIER LEAVING CLASS CODE  08680000
+         CLR   R1,R0              TABLE IS ORDERED                      08690000
+         BE    CODTOHIT           MATCHING ENTRY FOUND                  08700000
+         BL    CODTORET           CANDIDATE IS NOT DEFINED              08710000
+         LA    R2,16+4(,R2)       ADVANCE TO NEXT ENTRY                 08720000
+         B     CODTORDY           AGAIN                                 08730000
+                                                                        08740000
+CODTOHIT DS    0H                                                       08750000
+         LA    R1,0(,R2)          RETURN JUSTIFIED, PADDED CLASS NAME   08760000
+         LA    R15,RC00           SUCCESS                               08770000
+                                                                        08780000
+CODTORET DS    0H                                                       08790000
+         LR    R0,R2              CHECKPOINT CURRENT POSITION           08800000
+         LM    R2,R14,REGSAVE+8   RESTORE REGS                          08810000
+         LTR   R15,R15            SET CC                                08820000
+         BR    R14                                                      08830000
+                                                                        08840000
+         EJECT                                                          08850000
+***************************************************************         08860000
+*                                                                       08870000
+* ROUTINE: DISPLOCK - Acquire DISP lock                                 08880000
+*                                                                       08890000
+***************************************************************         08900000
+                                                                        08910000
+DISPLOCK DS    0H                                                       08920000
+         STM   R0,R15,REGSAVE     PRESERVE MAINLINE REGS                08930000
+                                                                        08940000
+         $SER  OBTAIN,DISP        ACQUIRE DISP LOCK                     08950000
+                                                                        08960000
+         BNZ   *+8                BRANCH IF ALREADY OWNED               08970000
+         OI    ENVFLGS,ENVLOCK    ELSE INDICATE LOCK ACQUIRED           08980000
+                                                                        08990000
+         LM    R0,R14,REGSAVE     RESTORE MAINLINE REGS                 09000000
+         BR    R14                RETURN                                09010000
+                                                                        09020000
+         EJECT                                                          09030000
+***************************************************************         09040000
+*                                                                       09050000
+* ROUTINE: DISPUNLK - Release DISP lock                                 09060000
+*                                                                       09070000
+***************************************************************         09080000
+                                                                        09090000
+DISPUNLK DS    0H                                                       09100000
+         STM   R0,R15,REGSAVE     PRESERVE MAINLINE REGS                09110000
+         SR    R15,R15            PRESUME SUCCESS                       09120000
+                                                                        09130000
+         TM    ENVFLGS,ENVLOCK    LOCK ACQUIRED?                        09140000
+         BNO   DISPUNX            NO RELEASE OTHERWISE                  09150000
+         NI    ENVFLGS,FF-ENVLOCK INDICATE LOCK NOT HELD                09160000
+                                                                        09170000
+         $SER  RELEASE,DISP       RELEASE DISP LOCK                     09180000
+                                                                        09190000
+DISPUNX  DS    0H                                                       09200000
+         LM    R0,R14,REGSAVE     RESTORE MAINLINE REGS                 09210000
+         BR    R14                RETURN                                09220000
+                                                                        09230000
+         EJECT                                                          09240000
+***************************************************************         09250000
+*                                                                       09260000
+*   Local read/only data areas, etc.                                    09270000
+*                                                                       09280000
+***************************************************************         09290000
+                                                                        09300000
+$ENABLE  DC    CL8'enabled'                                             09310000
+$PENDING DC    CL8'pending'                                             09320000
+$DISABLE DC    CL8'disabled'                                            09330000
+                                                                        09340000
+$SYSTEM  DC    CL8'System'                                              09350000
+$WU      DC    CL8'Workunit'                                            09360000
+                                                                        09370000
+$ON      DC    Cl4'On'                                                  09380000
+$OFF     DC    Cl4'Off'                                                 09390000
+                                                                        09400000
+BLANKS   DC    CL32' '                                                  09410000
+                                                                        09420000
+         LTORG ,                                                        09430000
+                                                                        09440000
+         PRINT NOGEN                                                    09450000
+         ICVT  ,                                                        09460000
+         ITASK ,                                                        09470000
+         IPCB  ,                                                        09480000
+         END   ,                                                        09490000

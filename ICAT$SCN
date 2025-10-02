@@ -1,0 +1,242 @@
+ICAT$SCN TITLE '- CATALOG SCAN DRIVER'                                  00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE: ICAT$SCN - Catalog scan driver                               00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This routine provides a mechanism for scanning the catalog         00080000
+*    tables resident in an object space. Upon receipt of the            00090000
+*    first request, a conversation workarea is constructed in           00100000
+*    the checkpoint area provided by the caller. SYSDICTIONARY          00110000
+*    is opened and on each call one entry is returned together          00120000
+*    with its associated space component table (SCTDEF) entry,          00130000
+*    if any.  At end-of-table, SYSDICTIONARY is closed and the          00140000
+*    conversation workarea is cleared.                                  00150000
+*                                                                       00160000
+*                                                                       00170000
+* ON ENTRY:                                                             00180000
+*                                                                       00190000
+*    R1  contains the address of a parameter list constructed           00200000
+*        as follows:                                                    00210000
+*                                                                       00220000
+*        +00 - Address of the object space token                        00230000
+*                                                                       00240000
+*        +04 - Address of a doubleword used a checkpoint area.          00250000
+*              The area must be zeroed on the first call and            00260000
+*              is returned zeroed upon end-of-table (RC04).             00270000
+*                                                                       00280000
+*        +08 - SYSDICTIONARY entry return area as mapped by             00290000
+*              DDENTRY, with space for one VARCHARX extension           00300000
+*              of up to 256 bytes                                       00310000
+*                                                                       00320000
+*                                                                       00330000
+* ON EXIT:                                                              00340000
+*                                                                       00350000
+*    R15 contains one of the following return codes                     00360000
+*                                                                       00370000
+*        RC00 - DDENTRY returned                                        00380000
+*                                                                       00390000
+*               R0 - address of the object space content (OSC)          00400000
+*                    block or zero if space type not registered         00410000
+*                                                                       00420000
+*               R1 - address of the associated SCTDEF entry if          00430000
+*                    available or zero                                  00440000
+*                                                                       00450000
+*        RC04 - End of SYSDICTIONARY reached                            00460000
+*                                                                       00470000
+*        RCnn - Space or TABLE services error - R0 and R1               00480000
+*               contain a reason and info code, respectively            00490000
+*                                                                       00500000
+**<DOC-OFF>****************************************************         00510000
+                                                                        00520000
+         EJECT                                                          00530000
+***************************************************************         00540000
+*                                                                       00550000
+*  MAINTENANCE:                                                         00560000
+*                                                                       00570000
+*    01/25/95  R. Turgeon    virtual catalog support                    00580000
+*              Initial version                                          00590000
+*                                                                       00600000
+***************************************************************         00610000
+                                                                        00620000
+         EJECT                                                          00630000
+         #WORK ,                                                        00640000
+                                                                        00650000
+CONFIGW  DS    F             OBJECT SPACE CONFIG WORD                   00660000
+RETREGS  DS    3F            R15-R1 STAGED FOR RETURN                   00670000
+                                                                        00680000
+         #ENDWORK                                                       00690000
+                                                                        00700000
+         EJECT                                                          00710000
+         SPACETYP DSECT=YES  OBJECT SPACE CONTENT BLOCK                 00720000
+                                                                        00730000
+         EJECT                                                          00740000
+         SCTDEF DSECT=YES    SPACE COMPONENT TABLE DEFINITION           00750000
+                                                                        00760000
+         EJECT                                                          00770000
+         DDENTRY ,           DATA DICTIONARY ROW FORMAT                 00780000
+                                                                        00790000
+         EJECT                                                          00800000
+         TBSERVIS OPEN,CLOSE,GET                                        00810000
+                                                                        00820000
+         EJECT                                                          00830000
+         EQUS  ,                                                        00840000
+                                                                        00850000
+         EJECT                                                          00860000
+***************************************************************         00870000
+*                                                                       00880000
+* PRIVATE MAPPING: CHKPT - Conversation checkpoint                      00890000
+*                                                                       00900000
+***************************************************************         00910000
+CHKPT    DSECT                                                          00920000
+CHKTHNDL DS    F                  SYSDICTIONARY TABLE HANDLE            00930000
+CHKOSC   DS    A                  OBJECT SPACE CONTENT BLOCK ADDRESS    00940000
+CHKPTLN  EQU   *-CHKPT            CHECKPOINT AREA LENGTH                00950000
+                                                                        00960000
+         EJECT                                                          00970000
+ICAT$SCN #ENTER PREG=R8                                                 00980000
+                                                                        00990000
+         EJECT                                                          01000000
+***************************************************************         01010000
+*                                                                       01020000
+*   Fetch passed parameters.  Acquire the object space content          01030000
+*   (OSC) block and open SYSDICTIONARY on the first call.               01040000
+*                                                                       01050000
+***************************************************************         01060000
+                                                                        01070000
+         LM    R5,R7,0(R8)        FETCH PASSED PARMS                    01080000
+*                                 R5 <== $SPACE TOKEN ADDRESS           01090000
+         USING CHKPT,R6           R6 <== CHECKPOINT AREA                01100000
+         USING DDENTRY,R7         R7 <== SYSDICTIONARY ROW RETURN AREA  01110000
+                                                                        01120000
+         ICM   R3,15,CHKTHNDL     SYSDICTIONARY OPENED?                 01130000
+         BNZ   READY              CONTINUE SCAN IF SO                   01140000
+                                                                        01150000
+*--------------------------------------------------------------         01160000
+*   Identify space type                                                 01170000
+*--------------------------------------------------------------         01180000
+                                                                        01190000
+         $SPACE CONFIG,EXTRACT,   ACQUIRE SPACE CONFIG DATA            X01200000
+               WORD=TBSERV_CFGWORD,                                    X01210000
+               DATA=CONFIGW,                                           X01220000
+               TOKEN=(R5),                                             X01230000
+               MF=(E,MFE_LIST)                                          01240000
+                                                                        01250000
+         LTR   R15,R15            SUCCESSFUL COMPLETION                 01260000
+         BNZ   ERR_SERV           TERMINATE IF NOT                      01270000
+                                                                        01280000
+*--------------------------------------------------------------         01290000
+*   Locate associated object space content (OSC) block                  01300000
+*--------------------------------------------------------------         01310000
+                                                                        01320000
+         SPACETYP LOCATE,                                              X01330000
+               ID=CONFIGW+SPACE_TYPE                                    01340000
+                                                                        01350000
+         LTR   R15,R15            CATALOG FORMALLY DEFINED?             01360000
+         BZ    *+6                RETAIN OSC ADDRESS IF SO              01370000
+         SR    R1,R1              ELSE CLEAR OSC POINTER                01380000
+         ST    R1,CHKOSC                                                01390000
+                                                                        01400000
+*--------------------------------------------------------------         01410000
+*   Open the data dictionary                                            01420000
+*--------------------------------------------------------------         01430000
+                                                                        01440000
+         TBOPEN 'SYSDICTIONARY',  OPEN DATA DICTIONARY                 X01450000
+               STOKEN=(R5),                                            X01460000
+               TTOKEN=CHKTHNDL,                                        X01470000
+               MF=(E,MFE_LIST)                                          01480000
+                                                                        01490000
+         LTR   R15,R15            OPEN COMPLETED WITHOUT ERROR?         01500000
+         BNZ   EOT                TREAT AS END OF TABLE IF NOT          01510000
+                                                                        01520000
+         EJECT                                                          01530000
+***************************************************************         01540000
+*                                                                       01550000
+*   Acquire the next entry from SYSDICTIONARY.  Then, scan the          01560000
+*   SCTDEF table for a matching table name.  Upon end-of-table          01570000
+*   close SYSDICTIONARY and clear the checkpoint area.                  01580000
+*                                                                       01590000
+***************************************************************         01600000
+READY    DS    0H                                                       01610000
+                                                                        01620000
+         TBGET DDENTRY,DDELN,     ACQUIRE NEXT SYSDICTIONARY ENTRY     X01630000
+               POS=NEXT,                                               X01640000
+               TTOKEN=CHKTHNDL,                                        X01650000
+               MF=(E,MFE_LIST)                                          01660000
+                                                                        01670000
+         CH    R15,=AL2(RC04)     ANALYZE STATUS                        01680000
+         BE    EOT                END OF TABLE                          01690000
+         BH    ERR_SERV           TABLE SERVICES ERROR                  01700000
+                                                                        01710000
+*--------------------------------------------------------------         01720000
+*   Locate matching SCTDEF                                              01730000
+*--------------------------------------------------------------         01740000
+                                                                        01750000
+         SR    R4,R4              ASSUME NO MATCHING SCTDEF             01760000
+         ICM   R9,15,CHKOSC       OBJECT SPACE CONTENTS REGISTERED?     01770000
+         BZ    SCANFIN            DONE IF NOT                           01780000
+         USING OSC,R9                                                   01790000
+                                                                        01800000
+         LH    R3,OSCSCTN         SCTDEF ENTRY COUNT                    01810000
+         L     R4,OSCSCTA         SCTDEF LIST ORIGIN                    01820000
+         USING SCTDEF,R4          PREPARE FOR SCTDEF SCAN               01830000
+                                                                        01840000
+SCANSCT  DS    0H                                                       01850000
+         CLC   DDETABNM,SCT_TABLE_NAME                                  01860000
+         BE    SCANFIN            MATCHING TABLE NAMES                  01870000
+         A     R4,OSCSCTL         ELSE ADVANCE TO NEXT ENTRY            01880000
+         BCT   R3,SCANSCT         AGAIN                                 01890000
+         SR    R4,R4              NO MATCHING SCTDEF                    01900000
+                                                                        01910000
+SCANFIN  DS    0H                 R4 CONTAINS SCTDEF PTR OR ZERO        01920000
+                                                                        01930000
+***************************************************************         01940000
+*                                                                       01950000
+*   Return DDENTRY, SCTDEF, and completion status to caller             01960000
+*                                                                       01970000
+***************************************************************         01980000
+         LA    R15,RC00           INDICATE SUCCESS                      01990000
+         LA    R0,OSC             RETURN THE OSC BLOCK DEFINING SPACE   02000000
+         LA    R1,SCTDEF          RETURN THE TABLE SCTDEF ENTRY         02010000
+         B     EXIT                                                     02020000
+                                                                        02030000
+EOT      DS    0H                                                       02040000
+         LA    R15,RC04           INDICATE END OF TABLE                 02050000
+         SR    R0,R0                                                    02060000
+         SR    R1,R1                                                    02070000
+                                                                        02080000
+*--------------------------------------------------------------         02090000
+*   Close SYSDICTIONARY, etc. upon error or end of table                02100000
+*--------------------------------------------------------------         02110000
+                                                                        02120000
+ERR_SERV DS    0H                 RELEASE RESOURCES                     02130000
+         STM   R15,R1,RETREGS     SAVE RETURN REGS                      02140000
+         ICM   R0,15,CHKTHNDL     TABLE IS OPEN?                        02150000
+         BZ    CLOSED             SKIP IF NOT                           02160000
+                                                                        02170000
+         TBCLOSE TTOKEN=CHKTHNDL,      CLOSE TABLE                     X02180000
+               MF=(E,MFE_LIST)                                          02190000
+                                                                        02200000
+CLOSED   DS    0H                                                       02210000
+         XC    CHKPT(CHKPTLN),CHKPT                                     02220000
+         LM    R15,R1,RETREGS     RESTORE RETURN REGS                   02230000
+                                                                        02240000
+*--------------------------------------------------------------         02250000
+*   Return to requester                                                 02260000
+*--------------------------------------------------------------         02270000
+                                                                        02280000
+EXIT     DS    0H                                                       02290000
+         #EXIT                                                          02300000
+                                                                        02310000
+         EJECT                                                          02320000
+***************************************************************         02330000
+*                                                                       02340000
+*   Local read-only working storage                                     02350000
+*                                                                       02360000
+***************************************************************         02370000
+         LTORG ,                                                        02380000
+                                                                        02390000
+         PRINT NOGEN                                                    02400000
+         ICVT ,                                                         02410000
+         END   ,                                                        02420000

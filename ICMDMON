@@ -1,0 +1,821 @@
+ICMDMON  TITLE '- AUTOMATED COMMAND SUBMISSION AND RESPONSE ROUTING'    00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE: ICMDMON - AUTOMATED CMD SUBMISSION AND RESPONSE ROUTING      00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This command process (CMDPROC) implements the ISSUE                00080000
+*    (formerly MONITOR) command which is used to define command         00090000
+*    strings that are to be submitted for execution at regular          00100000
+*    time intervals, and to display information about monitors          00110000
+*    previously defined.                                                00120000
+*                                                                       00130000
+*    This routine is established as a non-terminating process           00140000
+*    that, at intervals designated by the EVERY() operand,              00150000
+*    submits one or more console commands to $CONTASK via               00160000
+*    $TSEND.  All of the information describing the ISSUEr is           00170000
+*    passed through with each submitted command string.  Thus,          00180000
+*    each command is executed under the authority of the                00190000
+*    ISSUEr.  Furthermore, output produced by the submitted             00200000
+*    command is collected and routed back to the original               00210000
+*    ISSUEr.  If the original requester should terminate, the           00220000
+*    ISSUE process is also eventually terminated.                       00230000
+*                                                                       00240000
+*    The DISPLAY function is used to describe all of the active         00250000
+*    monitors, or a specific ISSUE class identified by the ID()         00260000
+*    operand.                                                           00270000
+*                                                                       00280000
+*                                                                       00290000
+* NOTES:                                                                00300000
+*                                                                       00310000
+*    Once the command scheduler has been posted that ISSUE has          00320000
+*    been accepted, messages can no longer be posted to the             00330000
+*    message collection area designated by CMRQMCA and CMRQSTGQ         00340000
+*    because the response is immediately delivered to a remote          00350000
+*    $COMMAND requester.  Any failure messages, etc. can be             00360000
+*    sent to logfile, etc.                                              00370000
+*                                                                       00380000
+*                                                                       00390000
+* BASIC SYNTAX:                                                         00400000
+*                                                                       00410000
+*    ISSUE    DISPLAY / D                                               00420000
+*             ID( <name> )                                              00430000
+*                                                                       00440000
+*    IS       EVERY( <nn> )                                             00450000
+*             FOR  ( <mm> ) /  FOREVER                                  00460000
+*             SECONDS / MINUTES / HOURS                                 00470000
+*             ID( <name> )                                              00480000
+*             COMMANDS( <cmd1>, <cmd2>, ... )                           00490000
+*                                                                       00500000
+*    EVERY and FOR accept an optional time unit of SECONDS (SECS),      00510000
+*    MINUTES (MINS), and HOURS (HRS).  Singular and plural forms        00520000
+*    are accepted for both the long and short forms but no              00530000
+*    significance is assumed for either form.  MINUTES is assumed       00540000
+*    by default.                                                        00550000
+*                                                                       00560000
+*    <nn> is a decimal number which, with respect to the the            00570000
+*    given time unit, may not designate an interval beyond              00580000
+*    24 hours.  1 minute is assumed by default.                         00590000
+*                                                                       00600000
+*    <mm> is a decimal number which designates a time in which          00610000
+*    the ISSUE proc is to automatically terminate.  FOREVER,            00620000
+*    the default, indicates that ISSUE is to run until                  00630000
+*    explicitly terminated.                                             00640000
+*                                                                       00650000
+*    <name>, if provided, is an ISSUE class name. ISSUE class           00660000
+*    identifiers are used to refer to specific command groups           00670000
+*    in ISSUE DISPLAY and ISSUEND commands.                             00680000
+*                                                                       00690000
+*    <cmd#> is a command string that will be submitted at               00700000
+*    regular intervals determined by the EVERY() operand.  If           00710000
+*    the command string contains blanks or special characters           00720000
+*    enclose it in quotes ("cmd string").  Up to eight command          00730000
+*    strings may be specified in a single ISSUE command.                00740000
+*                                                                       00750000
+*                                                                       00760000
+* ON ENTRY:                                                             00770000
+*                                                                       00780000
+*    R1  contains the address of the command request block              00790000
+*        (CMDREQ) in local CMDPROC format                               00800000
+*                                                                       00810000
+**<DOC-OFF>****************************************************         00820000
+                                                                        00830000
+                                                                        00840000
+***************************************************************         00850000
+*                                                                       00860000
+* MAINTENANCE:                                                          00870000
+*                                                                       00880000
+*    09/30/94 R. Turgeon                                                00890000
+*             Initial version                                           00900000
+*                                                                       00910000
+*    05/11/95 R. Colmone              PAR #187851                       00920000
+*             Added Monitor ID number to uniquely identify              00930000
+*             a command monitor process.  Cancelled message             00940000
+*             queuing after initial acceptance of the command.          00950000
+*                                                                       00960000
+***************************************************************         00970000
+         EJECT                                                          00980000
+         #WORK ,             BEGIN WORKAREA                             00990000
+                                                                        01000000
+MAJOPT   DS    X             MAJOR FUNCTION                             01010000
+MAJDISP  EQU   X'80'            DISPLAY MONITORS                        01020000
+MAJCMD   EQU   X'40'            ESTABLISH NEW ISSUE COMMAND GROUP       01030000
+                                                                        01040000
+TIMEUNIT DS    F             TIME UNIT IF SPECIFIED.  WHEN NON-ZERO,    01050000
+*                            A MULTIPLIER THAT CONVERTS A GIVEN UNIT    01060000
+*                            COUNT INTO SECONDS                         01070000
+                                                                        01080000
+$EVERY   DS    F             SUBMISSION INTERVAL.  IF OMITTED (ZERO)    01090000
+*                            AN INTERVAL OF ONE (1) UNIT IS SELECTED    01100000
+                                                                        01110000
+$FOR     DS    F             LIMIT EXPRESSED AS DELTA FROM REQUEST      01120000
+*                            ARRIVAL TIME.  IF OMITTED NO LIMIT IS      01130000
+*                            IMPOSED                                    01140000
+                                                                        01150000
+$MONID   DS    CL8           ISSUE CLASS IDENTIFIER FROM ID() OPERAND   01160000
+@AMNREC  DS    A             ADDR OF LOCALLY ACQUIRED AMNREC            01170000
+                                                                        01180000
+INTERVAL DS    F             $TIMER READY INTERVAL SIZE (MILLISECS)     01190000
+TIMERID  DS    XL8           ID OF ACTIVE $TIMER REQUEST                01200000
+                                                                        01210000
+OPTWORD1 DS    F             $COMMAND OPTION WORD 1                     01220000
+OPTWORD2 DS    F             $COMMAND OPTION WORD 2                     01230000
+OPTWORD3 DS    F             $COMMAND OPTION WORD 3                     01240000
+OPTWORD4 DS    F             $COMMAND OPTION WORD 4                     01250000
+                                                                        01260000
+$STOPMON @EPB  TYPE=BLOCK    POSTED WHEN ISSUE PROCESS IS STOPPED       01270000
+                                                                        01280000
+$COMMFL  $COMMAND MF=L       $COMMAND PLIST CONSTRUCTION AREA           01290000
+$TASKMFL $TASK MF=L          $TASK PLIST CONSTRUCTION AREA              01300000
+TIMERMFL $TIMER TERM,MF=L    $TIMER PLIST CONSTRUCTION AREA             01310000
+$MSGMFL  $MSG  MF=L,FIELDS=(,,,,)                                       01320000
+                                                                        01330000
+REGSAVE  DS    16F           LOCAL ROUTINE SAVEAREA                     01340000
+                                                                        01350000
+         CMDREQ DSECT=NO     PRIVATE COPY OF CMDREQ                     01360000
+                                                                        01370000
+         #ENDWORK ,          END OF WORKAREA                            01380000
+                                                                        01390000
+         EJECT                                                          01400000
+         CCSUMRY ,           COMMAND OPERAND PREPARSE SUMMARY           01410000
+                                                                        01420000
+         EJECT                                                          01430000
+         AMNREC ,            AUTOMATED COMMAND ISSUER RECORD            01440000
+                                                                        01450000
+         EJECT                                                          01460000
+         $TIMER DSECT=YES    TIMING SERVICES                            01470000
+                                                                        01480000
+         EJECT                                                          01490000
+         $COMMAND DSECT=YES  $COMMAND SERVICES                          01500000
+                                                                        01510000
+         EJECT                                                          01520000
+         KEYCODES COMMANDSET=ISSUE                                      01530000
+                                                                        01540000
+         EVCODES ,                                                      01550000
+                                                                        01560000
+         CMDCODES ,                                                     01570000
+                                                                        01580000
+         ABCODES ,                                                      01590000
+                                                                        01600000
+         EQUS  ,                                                        01610000
+                                                                        01620000
+         $MSGDFT PREFIX=ICTPID,COMPID='CMD',TABLE=*#MSGS,              X01630000
+               CONID=*CMRQCNID,CONNAME=CMRQCNAM,CART=CMRQCART,         X01640000
+               DESTADD=*CMRQDMSK,                                      X01650000
+               MSGQA=*CMRQMQA,STGQH=*CMRQSTGQ,                         X01660000
+               MF=(E,$MSGMFL),                                         X01670000
+               PRINT=NOGEN                                              01680000
+                                                                        01690000
+         EJECT                                                          01700000
+                                                                        01710000
+         EJECT                                                          01720000
+ICMDMON  #ENTER PREG=R8                                                 01730000
+                                                                        01740000
+         USING ITASK,R10          STDENV                                01750000
+         L     R9,TSKPCBC                                               01760000
+         USING IPCB,R9            PROCESS MODE                          01770000
+                                                                        01780000
+         EJECT                                                          01790000
+***************************************************************         01800000
+*                                                                       01810000
+*    COMMAND PARSE                                                      01820000
+*                                                                       01830000
+***************************************************************         01840000
+         MVC   CMDREQ(CMRQLN),0(R8)   PRIVATE COPY OF CMD REQ BLOCK     01850000
+         ICM   R7,15,CMRQSMRY     ASSOC COMMAND SUMMARY                 01860000
+         BZ    VALIDATE           ASSUME DEFAULTS                       01870000
+         USING CCSUMRY,R7         COMMAND OPERAND SUMMARY FORMAT        01880000
+         ICM   R5,15,CMRQSMR#     TOTAL NUMBER OF OPERAND ENTRIES       01890000
+         BZ    VALIDATE           ASSUME DEFAULTS                       01900000
+         L     R6,CMRQOPST        OPERAND STRING ORIGIN                 01910000
+                                                                        01920000
+*--------------------------------------------------------------         01930000
+*   IDENTIFY THE OPERANDS PROVIDED AND VALIDATE                         01940000
+*--------------------------------------------------------------         01950000
+PARSENXT DS    0H                                                       01960000
+         LA    R1,MAJDISP         ASSUME MAJOR FUNCTION: DISPLAY        01970000
+         CLC   CCSID,=AL2(ISS_DISPLAY)                                  01980000
+         BE    FUNCDISP                                                 01990000
+                                                                        02000000
+         CLC   CCSID,=AL2(ISS_ID)                                       02010000
+         BE    MONID                                                    02020000
+                                                                        02030000
+         LA    R1,$EVERY          EVERY() VALUE LOCATION                02040000
+         CLC   CCSID,=AL2(ISS_EVERY)                                    02050000
+         BE    INTVL                                                    02060000
+                                                                        02070000
+         LA    R1,$FOR            FOR() VALUE LOCATION                  02080000
+         CLC   CCSID,=AL2(ISS_FOR)                                      02090000
+         BE    INTVL                                                    02100000
+                                                                        02110000
+         CLC   CCSID,=AL2(ISS_FOREVER)                                  02120000
+         BE    ADVANCE                                                  02130000
+                                                                        02140000
+         LA    R1,1               INTERVAL UNIT FOR EVERY() AND FOR()   02150000
+         CLC   CCSID,=AL2(ISS_SECS)                                     02160000
+         BE    INTUNIT                                                  02170000
+                                                                        02180000
+         LA    R1,60                                                    02190000
+         CLC   CCSID,=AL2(ISS_MINS)                                     02200000
+         BE    INTUNIT                                                  02210000
+                                                                        02220000
+         LA    R1,60*60                                                 02230000
+         CLC   CCSID,=AL2(ISS_HRS)                                      02240000
+         BE    INTUNIT                                                  02250000
+                                                                        02260000
+         CLC   CCSID,=AL2(ISS_CMDS)                                     02270000
+         BE    COMMANDS                                                 02280000
+         B     ERREJECT           REJECT OTHERWISE                      02290000
+                                                                        02300000
+         EJECT                                                          02310000
+***************************************************************         02320000
+*                                                                       02330000
+*   MAJOR REQUEST FUNCTION                                              02340000
+*                                                                       02350000
+***************************************************************         02360000
+FUNCDISP DS    0H                                                       02370000
+         CLI   MAJOPT,0           ONLY KEYWORD OF MAJOR GROUP?          02380000
+         BNE   ERRCNFLC           CONFLICTING OPERANDS OTHERWISE        02390000
+         STC   R1,MAJOPT          POST REQUEST TYPE                     02400000
+         B     ADVANCE            ADVANCE TO NEXT OPERAND               02410000
+                                                                        02420000
+***************************************************************         02430000
+*                                                                       02440000
+*   ISSUE CLASS IDENTIFIER                                              02450000
+*                                                                       02460000
+***************************************************************         02470000
+MONID    DS    0H                                                       02480000
+         TM    $MONID,BF          PREVIOUSLY SPECIFIED?                 02490000
+         BNZ   ERRCNFLC           ERROR IF SO                           02500000
+                                                                        02510000
+         LH    R2,CCSVLEN         LENGTH OF VALUE                       02520000
+         BCTR  R2,0               PREPARE FOR EX                        02530000
+         CL    R2,=A(L'$MONID)    VALID VALUE LENGTH?                   02540000
+         BNL   ERRSYNTX           SYNTAX ERROR OTHERWISE                02550000
+                                                                        02560000
+         L     R3,CCSVDISP        OFFSET TO VALUE ORIGIN                02570000
+         AR    R3,R6              ADDR OF ID() VALUE IN COMMAND LINE    02580000
+         MVC   $MONID,BLANKS      APPROPRIATE VALUE PAD                 02590000
+         EX    R2,*+4             RETAIN IDENTIFIER                     02600000
+         MVC   $MONID(*-*),0(R3)  EX OBJECT                             02610000
+         B     ADVANCE            ADVANCE TO NEXT OPERAND               02620000
+                                                                        02630000
+***************************************************************         02640000
+*                                                                       02650000
+*   SELECT TIME INTERVAL COUNT                                          02660000
+*                                                                       02670000
+***************************************************************         02680000
+INTVL    DS    0H                 R1 <== ADDR OF OPERAND RETENTION WORD 02690000
+         OI    MAJOPT,MAJCMD      OPERAND FOR ISSUE CMD GROUPS ONLY     02700000
+                                                                        02710000
+         ICM   R0,15,0(R1)        PREVIOUSLY SPECIFIED?                 02720000
+         BNZ   ERRCNFLC           ERROR IF SO                           02730000
+                                                                        02740000
+         LH    R2,CCSVLEN         LENGTH OF VALUE                       02750000
+         BCTR  R2,0               PREPARE FOR EX                        02760000
+         CL    R2,=A(5)           VALID VALUE LENGTH?                   02770000
+         BH    ERRVSIZE           SYNTAX ERROR OTHERWISE                02780000
+                                                                        02790000
+         L     R3,CCSVDISP        OFFSET TO VALUE ORIGIN                02800000
+         AR    R3,R6              ORIGIN OF DEC DIGIT STRING            02810000
+         EX    R2,PACKDEC         CONVERT STRING TO PACKED FORM         02820000
+         CVB   R3,DWORD           ACQUIRE BINARY REPRESENTATION         02830000
+         ST    R3,0(,R1)          RETAIN COUNT                          02840000
+         B     ADVANCE            ADVANCE TO NEXT OPERAND               02850000
+                                                                        02860000
+PACKDEC  PACK  DWORD,0(*-*,R3)    EX OBJECT                             02870000
+                                                                        02880000
+***************************************************************         02890000
+*                                                                       02900000
+*   SELECT TIME INTERVAL UNITS                                          02910000
+*                                                                       02920000
+***************************************************************         02930000
+INTUNIT  DS    0H                                                       02940000
+         OI    MAJOPT,MAJCMD      OPERAND FOR ISSUE CMD GROUPS ONLY     02950000
+                                                                        02960000
+         ICM   R0,15,TIMEUNIT     ONLY KEYWORD OF MINOR GROUP?          02970000
+         BNZ   ERRCNFLC           CONFLICTING OPERANDS OTHERWISE        02980000
+         ST    R1,TIMEUNIT        POST INTERVAL UNIT CONVERSION FACTOR  02990000
+         B     ADVANCE            ADVANCE TO NEXT OPERAND               03000000
+                                                                        03010000
+         EJECT                                                          03020000
+***************************************************************         03030000
+*                                                                       03040000
+*   EXTRACT COMMAND STRINGS AND MAKE LOCAL COPY.  FIRST, A PASS         03050000
+*   IS MADE THROUGH ALL OF THE COMMAND STRINGS TO DETERMINE THE         03060000
+*   TOTAL STORAGE REQUIREMENT FOR THE AMNREC THAT WILL                  03070000
+*   REPRESENT THIS ISSUE PROCESS AND ITS COMMAND STRINGS.               03080000
+*                                                                       03090000
+***************************************************************         03100000
+COMMANDS DS    0H                                                       03110000
+         OI    MAJOPT,MAJCMD      FUNCTION: ESTABLISH ISSUE CMD GROUP   03120000
+         SR    R2,R2              TOTAL AMNREC CMD STRING LENGTH RQMT   03130000
+                                                                        03140000
+         LH    R3,CCSVALCT        NUMBER OF COMMAND STRINGS PROVIDED    03150000
+         LA    R4,CCSVALS         VALUE LIST ORIGIN                     03160000
+V        USING CCSVALS,R4                                               03170000
+                                                                        03180000
+COMMSIZE DS    0H                                                       03190000
+         LA    R2,2(,R2)          LENGTH PREFIX                         03200000
+         AH    R2,V.CCSVLEN       COMMAND STRING LENGTH                 03210000
+         LA    R4,CCSVSLN(,R4)    ADVANCE TO NEXT VALUE                 03220000
+         BCT   R3,COMMSIZE        SCAN ALL COMMAND STRINGS              03230000
+                                                                        03240000
+*--------------------------------------------------------------         03250000
+*   ACQUIRE AMNREC AND INSERT COMMAND STRINGS                           03260000
+*--------------------------------------------------------------         03270000
+         $GETSTOR AMNRECLN(,R2),OWNER=ITASK                             03280000
+                                                                        03290000
+         ST    R1,@AMNREC         SAVE PTR TO ACQUIRED DATA AREA        03300000
+         LR    R2,R1              PREPARE FOR AMNREC FORMATTING         03310000
+         USING AMNREC,R2                                                03320000
+                                                                        03330000
+*--------------------------------------------------------------         03340000
+*   ACQUIRE AMNREC AND FORMAT                                           03350000
+*--------------------------------------------------------------         03360000
+         LH    R3,CCSVALCT        NUMBER OF COMMANDS PROVIDED           03370000
+         LA    R4,CCSVALS         VALUE LIST ORIGIN                     03380000
+V        USING CCSVALS,R4                                               03390000
+                                                                        03400000
+         STH   R3,AMNCMDCT        NUMBER OF COMMAND STRINGS             03410000
+         LA    R2,AMNCMD          COMMAND STRING ENTRY SECTION          03420000
+         USING AMNCMD,R2          CHOKE UP ON ADDRESSABILITY            03430000
+                                                                        03440000
+COMMNEXT DS    0H                                                       03450000
+         L     R0,V.CCSVDISP      OFFSET TO COMMAND STRING ORIGIN       03460000
+         AR    R0,R6              ADDRESS OF COMMAND STRING             03470000
+         LH    R1,V.CCSVLEN       LENGTH  OF COMMAND STRING             03480000
+         STCM  R1,3,AMNCMDLN      RETAIN LENGTH AS CMD STRING PREFIX    03490000
+         LA    R14,AMNCMDST       COMMAND STRING ENTRY AREA             03500000
+         LR    R15,R1             SOURCE LENGTH = TARGET LENGTH         03510000
+         MVCL  R14,R0             CREATE LOCAL COPY                     03520000
+                                                                        03530000
+         LR    R2,R14             NEW COMMAND STRING INSERTION AREA     03540000
+         LA    R4,CCSVSLN(,R4)    ADVANCE TO NEXT VALUE                 03550000
+         BCT   R3,COMMNEXT        EXAMINE ALL COMMAND STRINGS           03560000
+         B     ADVANCE            ADVANCE TO NEXT OPERAND               03570000
+         DROP  V,R2               CCSVALS, AMNREC.AMNCMD                03580000
+                                                                        03590000
+         EJECT                                                          03600000
+***************************************************************         03610000
+*                                                                       03620000
+*   PROCESS ALL COMMAND KEYWORDS                                        03630000
+*                                                                       03640000
+***************************************************************         03650000
+ADVANCE  DS    0H                                                       03660000
+         LA    R15,CCSVSLN        LENGTH OF EACH VALUE ENTRY            03670000
+         MH    R15,CCSVALCT       TOTAL SIZE CONSUMED BY VALUES         03680000
+         LA    R7,CCSUMRY+CCSPFXL(R15)                                  03690000
+         BCT   R5,PARSENXT        EXAMINE ALL OPERANDS                  03700000
+         DROP  R7                 CCSUMRY                               03710000
+                                                                        03720000
+         EJECT                                                          03730000
+***************************************************************         03740000
+*                                                                       03750000
+*    COMMAND VALIDATION - ENSURE REQUEST COMPLETENESS                   03760000
+*                                                                       03770000
+***************************************************************         03780000
+VALIDATE DS    0H                                                       03790000
+         TM    MAJOPT,MAJCMD+MAJDISP                                    03800000
+         BO    ERRCNFLC           SET / DISPLAY CONFLICT                03810000
+         TM    MAJOPT,MAJCMD      ESTABLISHING NEW ISSUE CMD GROUP?     03820000
+         BNO   VALDISP            DEFAULT IS DISPLAY                    03830000
+         ICM   R0,15,@AMNREC      COMMAND STRINGS ACCEPTED?             03840000
+         BZ    ERRAMBIG           AMBIGUOUS REQUEST OTHERWISE           03850000
+                                                                        03860000
+*--------------------------------------------------------------         03870000
+*   COMMANDS() OPERAND REQUEST VALIDATION AND DEFAULTS                  03880000
+*--------------------------------------------------------------         03890000
+         ICM   R2,15,TIMEUNIT     TIME UNITS EXPLICITLY PROVIDED?       03900000
+         BNZ   *+12               ONWARD IF SO                          03910000
+         LA    R2,60              DEFAULT UNIT IS MINUTES               03920000
+         ST    R2,TIMEUNIT        POST DEFAULT VALUE                    03930000
+                                                                        03940000
+         ICM   R1,15,$EVERY       INTERVAL LENGTH EXPLICITLY GIVEN?     03950000
+         BNZ   *+8                ONWARD IF SO                          03960000
+         LA    R1,1               DEFAULT INTERVAL SIZE IS ONE UNIT     03970000
+                                                                        03980000
+         MR    R0,R2              CONVERT INTERVAL TO SECONDS           03990000
+         LTR   R0,R0              VALUE TOO LARGE?                      04000000
+         BNZ   ERRMAXTM           REJECT IT IF SO                       04010000
+         CL    R1,MAXINTVL        EXCEEDS MAXIMUM?                      04020000
+         BH    ERRMAXTM           REJECT IT IF SO                       04030000
+         ST    R1,$EVERY          INTERVAL SIZE IN SECONDS              04040000
+                                                                        04050000
+         L     R1,$FOR            DURATION                              04060000
+         MR    R0,R2              CONVERT TO SECONDS                    04070000
+         LTR   R0,R0              VALUE TOO LARGE?                      04080000
+         BNZ   ERRMAXTM           REJECT IT IF SO                       04090000
+         CL    R1,MAXINTVL        EXCEEDS MAXIMUM?                      04100000
+         BH    ERRMAXTM           REJECT IT IF SO                       04110000
+         ST    R1,$FOR            INTERVAL SIZE IN SECONDS              04120000
+                                                                        04130000
+         TM    CMRQAMNM,BF        ISSUE PROCESS SUBMITTING ISSUE CMD?   04140000
+         BNZ   ERRECURS           RECURSION IS DEADLY                   04150000
+                                                                        04160000
+         TM    $MONID,BF          ISSUE CLASS ID PROVIDED?              04170000
+         BNZ   *+10               SKIP IF SO                            04180000
+         MVC   $MONID,=CL8'ISSDFT'                                      04190000
+                                                                        04200000
+*--------------------------------------------------------------         04210000
+*   ISSUE COMMANDS() GROUP ACCEPTED, INFORM COMMAND SCHEDULER           04220000
+*--------------------------------------------------------------         04230000
+         LA    R1,CCODE_STDCOMP   ACCEPT COMMAND, STANDARD COMPLETION   04240000
+         BAS   R14,POSTCREQ       ANALYSIS COMPLETE                     04250000
+         B     VALFIN             ONWARD                                04260000
+                                                                        04270000
+*--------------------------------------------------------------         04280000
+*   ISSUE DISPLAY, PRODUCE RESULT AND INFORM CMD SCHEDULER              04290000
+*--------------------------------------------------------------         04300000
+VALDISP  DS    0H                                                       04310000
+         OI    MAJOPT,MAJDISP     DISPLAY REQUEST BY DEFAULT            04320000
+                                                                        04330000
+         @CALL ICMDMOND,(CMDREQ,$MONID),  CMD COMPLETION CODE IS ...   X04340000
+               MF=(E,MFE_LIST)    RETURNED IN R15                       04350000
+                                                                        04360000
+         LR    R1,R15             REQUEST/SUPPRESS ADDITIONAL RESPONSES 04370000
+         BAS   R14,POSTCREQ       ANALYSIS COMPLETE                     04380000
+         B     NORMRET            DONE                                  04390000
+                                                                        04400000
+***************************************************************         04410000
+*                                                                       04420000
+*   MESSAGE QUEUING IS NOT AVAILABLE AFTER COMMAND IS ACCEPTED          04430000
+*                                                                       04440000
+***************************************************************         04450000
+VALFIN   DS    0H                                                       04460000
+         XC    CMRQMQA,CMRQMQA    MESSAGE QUEUE                         04470000
+         XC    CMRQSTGQ,CMRQSTGQ  MESSAGE QUEUE STORAGE POOL            04480000
+                                                                        04490000
+         EJECT                                                          04500000
+***************************************************************         04510000
+*                                                                       04520000
+*   ISSUE COMMANDS() REQUEST - COMPLETE AND ENQUEUE AMNREC              04530000
+*                                                                       04540000
+***************************************************************         04550000
+         $TASK SETEPB,            DECLARE CMDPROC TERMINATION EPB      X04560000
+               EPB=$STOPMON,      POSTED WHEN ISSUE PROC IS TO STOP    X04570000
+               ECODE=EC$STOP,     REQUESTS PROCESS TERMINATION         X04580000
+               SCOPE=LOCAL,       LOCAL TASK EVENT                     X04590000
+               MF=(E,$TASKMFL)                                          04600000
+                                                                        04610000
+         L     R3,@AMNREC         LOCATE INCOMPLETE ISSUER RECORD       04620000
+         USING AMNREC,R3          STANDARD ADDRESSABILITY               04630000
+         MVC   AMNCBID,=CL8'AMNREC'                                     04640000
+         MVC   AMNMONID,$MONID    ISSUE CLASS IDENTIFIER                04650000
+         MVC   AMNMNID#,PCBNAME+4 UNIQUE MONITOR ID NUMBER              04660000
+         MVC   AMNPCB,PCBNAME     ISSUE PROCESS NAME                    04670000
+         MVC   AMNOTASK,CMRQITSK  REQUESTING ITASK                      04680000
+         MVC   AMNOPCB,CMRQPROC   REQUESTING PROCESS                    04690000
+         MVC   AMNOUSER,CMRQUSER  REQUESTING USERID                     04700000
+         MVC   AMNOCNAM,CMRQCNAM  MCS CONSOLE NAME                      04710000
+         MVC   AMNOCNID,CMRQCNID  MCS CONSOLE ID                        04720000
+         MVC   AMNINTVL,$EVERY    COMMAND SUBMISSION INTERVAL           04730000
+         MVC   AMNLIMIT,$FOR      COMMAND SUBMISSION DURATION           04740000
+         LA    R0,$STOPMON        ISSUEND EPB                           04750000
+         ST    R0,AMNEPB                                                04760000
+                                                                        04770000
+         LR    R1,R3              R1 <== CANDIDATE AMNREC               04780000
+         BAS   R14,ADDAMN         ADD TO COMMAND SCHEDULER QUEUE        04790000
+         DROP  R3                 AMNREC                                04800000
+                                                                        04810000
+         EJECT                                                          04820000
+***************************************************************         04830000
+*                                                                       04840000
+*   Enter the wait-and-submit cycle proceeding as follows               04850000
+*                                                                       04860000
+*   1)  Set interval to next issuance                                   04870000
+*                                                                       04880000
+*   2)  Wait for end of interval or stop request. A stop of             04890000
+*       any kind terminates the process                                 04900000
+*                                                                       04910000
+*   3)  Issue all associated commands acting as a proxy for             04920000
+*       the original requester                                          04930000
+*                                                                       04940000
+*   4)  If a duration FOR() value was coded, subtract the               04950000
+*       submission interval from the time remaining terminating         04960000
+*       the process when the duration is exhausted                      04970000
+*                                                                       04980000
+***************************************************************         04990000
+         L     R1,$EVERY          SUBMISSION INTERVAL IN SECONDS        05000000
+         MH    R1,=H'1000'        CONVERT TO MILLISECONDS               05010000
+         ST    R1,INTERVAL        SAVE $TIMER READY INTERVAL            05020000
+                                                                        05030000
+         L     R3,@AMNREC         ACTIVE ISSUER RECORD                  05040000
+         USING AMNREC,R3          STANDARD ADDRESSABILITY               05050000
+                                                                        05060000
+*--------------------------------------------------------------         05070000
+*   ESTABLISH EVENT INTERVAL                                            05080000
+*--------------------------------------------------------------         05090000
+SETTIME  DS    0H                                                       05100000
+         $TIMER SET,TID=TIMERID,INTVL=*INTERVAL,NOTIFY=EPB,            +05110000
+               MF=(E,TIMERMFL)                                          05120000
+                                                                        05130000
+         LTR   R5,R15             $TIMER FAILURE?                       05140000
+         BZ    AWAIT              TIMER ESTABLISHED                     05150000
+                                                                        05160000
+         $MSG  388,FIELDS=(((R5)))                                      05170000
+                                                                        05180000
+         B     STOPMON                                                  05190000
+                                                                        05200000
+*--------------------------------------------------------------         05210000
+*   AWAIT TIMER EXPIRATION OR STOP REQUEST                              05220000
+*--------------------------------------------------------------         05230000
+AWAIT    DS    0H                                                       05240000
+         $TASK WAIT,MF=(E,$TASKMFL)                                     05250000
+                                                                        05260000
+         CH    R15,=AL2(EC$STOP)  A STOP?                               05270000
+         BE    STOPMON                                                  05280000
+                                                                        05290000
+         CH    R15,=AL2(EC$TIMER) TIMER EXPIRATION                      05300000
+         BNE   AWAIT                                                    05310000
+                                                                        05320000
+*--------------------------------------------------------------         05330000
+*   TIMER EXPIRATION, ISSUE COMMANDS                                    05340000
+*--------------------------------------------------------------         05350000
+         XC    TIMERID,TIMERID    TIMER NOT RUNNING                     05360000
+                                                                        05370000
+         LR    R1,R3              R1 <== ACTIVE ISSUER RECORD           05380000
+         BAS   R14,ISSUE          ISSUE CAPTURED COMMANDS               05390000
+         LTR   R5,R15             $COMMAND FAILURE?                     05400000
+         BZ    DURATION           ONWARD IF NOT                         05410000
+                                                                        05420000
+         $MSG  389,FIELDS=(((R5)))                                      05430000
+                                                                        05440000
+         B     STOPMON                                                  05450000
+                                                                        05460000
+*--------------------------------------------------------------         05470000
+*   COUNT DOWN DURATION IF LIMIT IMPOSED                                05480000
+*--------------------------------------------------------------         05490000
+DURATION DS    0H                                                       05500000
+         ICM   R4,15,AMNLIMIT     DURATION SPECIFIED?                   05510000
+         BZ    SETTIME            FOREVER OTHERWISE                     05520000
+         S     R4,AMNINTVL        ACCOUNT FOR THIS INTERVAL             05530000
+         ST    R4,AMNLIMIT        SAVE UPDATED VALUE                    05540000
+         BP    SETTIME            AGAIN IF EXECS REMAIN                 05550000
+                                                                        05560000
+         EJECT                                                          05570000
+***************************************************************         05580000
+*                                                                       05590000
+*   STOP THE ISSUE PROCESS, INFORM REQUESTER, AND EXIT                  05600000
+*                                                                       05610000
+***************************************************************         05620000
+STOPMON  DS    0H                                                       05630000
+         $MSG  391,FIELDS=(AMNMONID)                                    05640000
+                                                                        05650000
+         LR    R1,R3              R1 <== TERMINATING AMNREC             05660000
+         BAS   R14,REMAMN         REMOVE THE AMNREC                     05670000
+                                                                        05680000
+*--------------------------------------------------------------         05690000
+*   IF A TIMER IS ACITVE, CANCEL IT                                     05700000
+*--------------------------------------------------------------         05710000
+         OC    TIMERID,TIMERID    TIMER RUNNING?                        05720000
+         BZ    STOPTIME           SKIP IF NOT                           05730000
+                                                                        05740000
+         $TIMER CANCEL,TID=TIMERID,MF=(E,TIMERMFL)                      05750000
+                                                                        05760000
+STOPTIME DS    0H                                                       05770000
+         B     NORMRET            COMPLETE                              05780000
+         DROP  R3                 AMNREC                                05790000
+                                                                        05800000
+         EJECT                                                          05810000
+***************************************************************         05820000
+*                                                                       05830000
+*   RETURN COMPLETION STATUS TO REQUESTOR                               05840000
+*                                                                       05850000
+***************************************************************         05860000
+ERRMAXTM DS    0H                 TIME VALUE EXCEEDS 24 HOURS           05870000
+         $MSG  382                                                      05880000
+         B     ERREJECT           REQUEST REJECTED                      05890000
+                                                                        05900000
+ERRVSIZE DS    0H                 TIME VALUE EXCEEDS 5 DIGITS           05910000
+         $MSG  383                                                      05920000
+         B     ERRSYNTX           REQUEST REJECTED                      05930000
+                                                                        05940000
+ERRECURS DS    0H                 COMMAND RECURSION                     05950000
+         $MSG  384                                                      05960000
+         B     ERREJECT           REQUEST REJECTED                      05970000
+                                                                        05980000
+*--------------------------------------------------------------         05990000
+*   ASSIGN STANDARD COMMAND PROCESS COMPLETION CODE                     06000000
+*--------------------------------------------------------------         06010000
+NORMRET  DS    0H                                                       06020000
+         LA    R15,CCODE_STDCOMP  STANDARD RESPONSE                     06030000
+         B     CMDEXIT                                                  06040000
+                                                                        06050000
+ERRSYNTX DS    0H                                                       06060000
+         LA    R15,CCODE_SYNTAX   SYNTAX ERROR                          06070000
+         B     CMDPOST            DONE                                  06080000
+                                                                        06090000
+ERRAMBIG DS    0H                                                       06100000
+         LA    R15,CCODE_AMBIG    AMBIGUOUS REQUEST                     06110000
+         B     CMDPOST            DONE                                  06120000
+                                                                        06130000
+ERRCNFLC DS    0H                                                       06140000
+         LA    R15,CCODE_CONFLICT CONFLICTING OPERANDS                  06150000
+         B     CMDPOST            DONE                                  06160000
+                                                                        06170000
+ERREJECT DS    0H                                                       06180000
+         LA    R15,CCODE_REJECT   COMMAND REJECTED                      06190000
+         B     CMDPOST            DONE                                  06200000
+                                                                        06210000
+*--------------------------------------------------------------         06220000
+*   NOTIFY COMMAND SCHEDULER OF ERROR                                   06230000
+*--------------------------------------------------------------         06240000
+CMDPOST  DS    0H                                                       06250000
+         LR    R1,R15             COMPLETION CODE AS PARM               06260000
+         BAS   R14,POSTCREQ       REQUEST IS REJECTED, R15 PRESERVED    06270000
+                                                                        06280000
+*--------------------------------------------------------------         06290000
+*   PROCESS TERMINATION                                                 06300000
+*--------------------------------------------------------------         06310000
+CMDEXIT  DS    0H                                                       06320000
+         ICM   R3,15,@AMNREC      INCOMPLETE AMNREC REQUIRES CLEANUP?   06330000
+         BZ    CMDRET             SKIP IF NOT, ELSE DELETE IT           06340000
+                                                                        06350000
+         $RETSTOR (R3),OWNER=ITASK                                      06360000
+                                                                        06370000
+CMDRET   DS    0H                                                       06380000
+         #EXIT ,                                                        06390000
+                                                                        06400000
+         EJECT                                                          06410000
+***************************************************************         06420000
+*                                                                       06430000
+* ROUTINE: POSTCREQ - ACKNOWLEDGE RECEIPT OF COMMAND                    06440000
+*                                                                       06450000
+* DESCRIPTION:                                                          06460000
+*                                                                       06470000
+*    NON-TERMINATING COMMAND PROCESSES ARE OBLIGATED TO INFORM          06480000
+*    THE COMMAND SCHEDULER THAT EITHER THE COMMAND HAS BEEN             06490000
+*    ACCEPTED, OR THAT IT HAS BEEN REJECTED DUE TO SOME                 06500000
+*    ERROR.  NOTIFICATION IS VIA POST OF THE 'CMD ACCEPTANCE            06510000
+*    EPB' PROVIDED IN CMDREQ.  THE POST CODE IS A STANDARD              06520000
+*    COMMAND PROCESS RETURN CODE PROVIDED BY THE CALLER.                06530000
+*                                                                       06540000
+* ON ENTRY:                                                             06550000
+*                                                                       06560000
+*    R1  CONTAINS A STANDARD COMMAND PROCESS RETURN CODE                06570000
+*                                                                       06580000
+***************************************************************         06590000
+POSTCREQ DS    0H                                                       06600000
+         STM   R0,R15,REGSAVE     SAVE MAINLINE REGS                    06610000
+         LR    R2,R1              STANDARD COMMAND PROC COMPLETION CODE 06620000
+                                                                        06630000
+         ICM   R3,15,CMRQAEPB     COMMAND ACCEPTANCE EPB                06640000
+         BZ    POSTCRET           DONE IF NOT PROVIDED                  06650000
+                                                                        06660000
+         $TASK POST,EPB=(R3),     NOTIFY COMMAND SCHEDULER OF INTENT   X06670000
+               PCODE=(R2),                                             X06680000
+               MF=(E,$TASKMFL)                                          06690000
+                                                                        06700000
+POSTCRET DS    0H                                                       06710000
+         LM    R0,R15,REGSAVE     RESTORE MAINLINE REGS                 06720000
+         BR    R14                                                      06730000
+                                                                        06740000
+         EJECT                                                          06750000
+***************************************************************         06760000
+*                                                                       06770000
+* ROUTINE: ISSUE - ISSUE COMMANDS                                       06780000
+*                                                                       06790000
+* ON ENTRY:                                                             06800000
+*                                                                       06810000
+*    R1 - ADDR OF THE ACTIVE ISSUER RECORD                              06820000
+*                                                                       06830000
+* ON EXIT:                                                              06840000
+*                                                                       06850000
+*    R15 CONTAINS ZERO OR THE RETURN CODE PRESENTED BY THE              06860000
+*        $COMMAND SERVICE INDICATING THAT A REQUEST WAS REJECTED        06870000
+*                                                                       06880000
+***************************************************************         06890000
+ISSUE    DS    0H                                                       06900000
+         STM   R0,R15,REGSAVE     SAVE MAINLINE REGS                    06910000
+         LR    R3,R1              ACCEPT CANDIDATE AMNREC               06920000
+         USING AMNREC,R3          CANDIDATE RECORD                      06930000
+                                                                        06940000
+         MVC   OPTWORD1(1),CMRQOPTN                                     06950000
+         MVC   OPTWORD2(1),CMRQOPTN                                     06960000
+         MVC   OPTWORD3(1),CMRQOPTN                                     06970000
+         NI    OPTWORD1,CMRQO_SCOPE                                     06980000
+         NI    OPTWORD2,CMRQO_MSGRET                                    06990000
+         NI    OPTWORD3,CMRQO_AUTHTEST                                  07000000
+                                                                        07010000
+*--------------------------------------------------------------         07020000
+*   ISSUE BUFFERED COMMANDS                                             07030000
+*--------------------------------------------------------------         07040000
+         LH    R4,AMNCMDCT        NUMBER OF COMMAND STRINGS             07050000
+         LA    R5,AMNCMD          COMMAND STRING ENTRY SECTION          07060000
+         USING AMNCMD,R5          CHOKE UP ON ADDRESSABILITY            07070000
+                                                                        07080000
+ISSNEXT  DS    0H                                                       07090000
+         LH    R6,AMNCMDLN        COMMAND STRING LENGTH                 07100000
+                                                                        07110000
+         $COMMAND AMNCMDST,(R6),                                       X07120000
+               SCOPE=*OPTWORD1,                                        X07130000
+               RETMSG=*OPTWORD2,                                       X07140000
+               SECURE=*OPTWORD3,                                       X07150000
+               MONIDNUM=*PCBNAME+4,                              187851X07160000
+               MONITORID=$MONID,                                       X07170000
+               TASKNAME=CMRQITSK,                                      X07180000
+               PROCNAME=CMRQPROC,                                      X07190000
+               USERID=CMRQUSER,                                        X07200000
+               WUTOKEN=CMRQETKN,                                       X07210000
+               CONSNAME=CMRQCNAM,                                      X07220000
+               CONSID=CMRQCNID,                                        X07230000
+               CART=CMRQCART,                                          X07240000
+               MF=(E,$COMMFL)                                           07250000
+                                                                        07260000
+         BNZ   ISSEXIT            $COMMAND SERVICE ERROR                07270000
+         LH    R2,AMNCMDLN        LENGTH OF COMMAND STRING              07280000
+         LA    R5,2(R2,R5)        ADVANCE TO NEXT COMMAND ENTRY         07290000
+         BCT   R4,ISSNEXT         ISSUE ALL COMMANDS                    07300000
+                                                                        07310000
+*--------------------------------------------------------------         07320000
+*   PROCESS TERMINATION                                                 07330000
+*--------------------------------------------------------------         07340000
+ISSEXIT  DS    0H                                                       07350000
+         LM    R0,R14,REGSAVE     RESTORE MAINLINE REGS                 07360000
+         LTR   R15,R15            REFLECT COMPLETION STATUS VIA CC      07370000
+         BR    R14                DONE                                  07380000
+         DROP  R5,R3              AMNCMD, AMNREC                        07390000
+                                                                        07400000
+         EJECT                                                          07410000
+***************************************************************         07420000
+*                                                                       07430000
+* ROUTINE: ADDAMN  - INSERT AMNREC IN COMMAND SCHEDULER QUEUE           07440000
+*                                                                       07450000
+***************************************************************         07460000
+ADDAMN   DS    0H                                                       07470000
+         STM   R0,R15,REGSAVE     PRESERVE MAINLINE REGS                07480000
+         LR    R3,R1              ACCEPT CANDIDATE AMNREC               07490000
+C        USING AMNREC,R3          CANDIDATE RECORD                      07500000
+                                                                        07510000
+         L     R4,CMRQAMNQ        AMNREC QUEUE ANCHOR ADDRESS           07520000
+         SH    R4,=AL2(AMNNEXT-AMNREC)   CAST ANCHOR AS AMNREC ENTRY    07530000
+P        USING AMNREC,R4          P (PREV) RECORD                       07540000
+Q        USING AMNREC,R5          Q (CURR) RECORD                       07550000
+                                                                        07560000
+ADDASCAN DS    0H                 LOCATE CANDIDATE INSERTION LOCATION   07570000
+         ICM   R5,15,P.AMNNEXT    ADVANCE THE CURRENT RECORD            07580000
+         BZ    ADDAISRT           ADD CANDIDATE AT END                  07590000
+         CLC   C.AMNMONID,Q.AMNMONID                                    07600000
+         BNH   ADDAISRT           QUEUE ORDERED BY ISSUE CLASS ID       07610000
+         LR    R4,R5              ELSE INCH ALONG THE LIST              07620000
+         B     ADDASCAN           LOCATE INSERTION LOC                  07630000
+                                                                        07640000
+ADDAISRT DS    0H                 INSERT CANDIDATE AFTER PREV RECORD    07650000
+         MVC   C.AMNNEXT,P.AMNNEXT                                      07660000
+         ST    R3,P.AMNNEXT                                             07670000
+                                                                        07680000
+         LM    R0,R14,REGSAVE     RESTORE MAINLINE REGS                 07690000
+         SR    R15,R15            RETURN CODES NOT DEFINED              07700000
+         BR    R14                DONE                                  07710000
+         DROP  C,P,Q              CANDIDATE, PREV, CURR AMNREC'S        07720000
+                                                                        07730000
+         EJECT                                                          07740000
+***************************************************************         07750000
+*                                                                       07760000
+* ROUTINE: REMAMN  - REMOVE AMNREC FROM COMMAND SCHEDULER QUEUE         07770000
+*                                                                       07780000
+***************************************************************         07790000
+REMAMN   DS    0H                                                       07800000
+         STM   R0,R15,REGSAVE     PRESERVE MAINLINE REGS                07810000
+         LR    R3,R1              ACCEPT CANDIDATE AMNREC               07820000
+C        USING AMNREC,R3          CANDIDATE RECORD                      07830000
+                                                                        07840000
+         L     R4,CMRQAMNQ        AMNREC QUEUE ANCHOR ADDRESS           07850000
+         SH    R4,=AL2(AMNNEXT-AMNREC)   CAST ANCHOR AS AMNREC ENTRY    07860000
+P        USING AMNREC,R4          P (PREV) RECORD                       07870000
+                                                                        07880000
+REMASCAN DS    0H                 LOCATE DELETABLE AMNREC               07890000
+         C     R3,P.AMNNEXT       TARGET AMNREC FOUND?                  07900000
+         BE    REMADEQ            ADD CANDIDATE AT END                  07910000
+         ICM   R4,15,P.AMNNEXT    ELSE INCH ALONG THE LIST              07920000
+         BNZ   REMASCAN           LOCATE INSERTION LOC                  07930000
+         EX    R0,*               ASSERT SUCCESSFUL COMPLETION          07940000
+                                                                        07950000
+REMADEQ  DS    0H                 INSERT CANDIDATE AFTER PREV RECORD    07960000
+         MVC   P.AMNNEXT,C.AMNNEXT                                      07970000
+                                                                        07980000
+REMARET  DS    0H                 INSERT CANDIDATE AFTER PREV RECORD    07990000
+         LM    R0,R14,REGSAVE     RESTORE MAINLINE REGS                 08000000
+         SR    R15,R15            RETURN CODES NOT DEFINED              08010000
+         BR    R14                DONE                                  08020000
+         DROP  C,P                CANDIDATE, PREV AMNREC'S              08030000
+                                                                        08040000
+         EJECT                                                          08050000
+***************************************************************         08060000
+*                                                                       08070000
+*   LOCAL READ ONLY DATA AREAS, ETC.                                    08080000
+*                                                                       08090000
+***************************************************************         08100000
+MAXINTVL DC    A(60*60*24)        SECONDS PER DAY                       08110000
+BLANKS   DC    CL8' '                                                   08120000
+                                                                        08130000
+         LTORG ,                                                        08140000
+                                                                        08150000
+         PRINT NOGEN                                                    08160000
+         ICVT  ,                                                        08170000
+         ITASK ,                                                        08180000
+         IPCB  ,                                                        08190000
+         $TASK DSECT=YES     $TASK REQUEST PLIST                        08200000
+         END   ,                                                        08210000

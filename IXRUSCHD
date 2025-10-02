@@ -1,0 +1,824 @@
+IXRUSCHD TITLE '- TRANSACTION RU SCHEDULER'                             00010000
+**<DOC-ON>******************************************************        00020000
+*                                                                       00030000
+* ROUTINE: IXRUSCHD - Transaction RU Scheduler                          00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    The function of this routine is to format the RU processor         00080000
+*    parameter list and call the associated RU processor                00090000
+*    routine.  The RU entry is located in the RU table (IXRUTAB).       00100000
+*    This entry is used to determine and validate the RU                00110000
+*    length and routine address.  If the WORKPAGE option is             00120000
+*    specified,  a page aligned workarea will be managed by             00130000
+*    the transaction scheduler.                                         00140000
+*                                                                       00150000
+*    Inbound requests normally consist of a single request              00160000
+*    represented by a single function / subfunction code pair.          00170000
+*    Optionally, the request may contain a list of function /           00180000
+*    subfunction pairs, each intended to be executed in a               00190000
+*    serial manner.  This is called a "stacked" request.                00200000
+*                                                                       00210000
+*    Requests normally run as subroutines of the schduler and,          00220000
+*    thus, under the USER00nn process representing the coop             00230000
+*    LU.  The $RU NEWPCB option specifies that the transaction          00240000
+*    is to run synchronously under its own PCB.  This provides          00250000
+*    for additional levels of resource managment in the event           00260000
+*    of a failure.                                                      00270000
+*                                                                       00280000
+*    A request can also initiate a CONVERSATION between the             00290000
+*    coop LU and a long running process constructed upon                00300000
+*    receipt of the first "request segment".  The conversational        00310000
+*    transaction logic resides largely in IXRUCONV.                     00320000
+*                                                                       00330000
+*    XPMANAGE may be specified for all transaction types.  When         00340000
+*    either NEWPCB or CONVERSATIONAL are specified, the TXP             00350000
+*    buffer is actually owned by this process (USER00nn) but can        00360000
+*    still be accessed by standard $XPBUFR ISRT requests.               00370000
+*                                                                       00380000
+*                                                                       00390000
+* ON ENTRY:                                                             00400000
+*                                                                       00410000
+*    Upon entry to this routine R1 and R0 contain the following         00420000
+*    values.                                                            00430000
+*                                                                       00440000
+*        R1 - Address of RU                                             00450000
+*        R0 - Requestor's Session Handle                                00460000
+*                                                                       00470000
+*                                                                       00480000
+* ON EXIT:                                                              00490000
+*                                                                       00500000
+*    Upon exit from this routine R15 will contain one of the            00510000
+*    following return codes.                                            00520000
+*                                                                       00530000
+*        RC00 - RU PROCESSING COMPLETED SUCCESSFULLY                    00540000
+*                                                                       00550000
+*        RC08 - RU PROCESSING FAILED                                    00560000
+*                                                                       00570000
+*        RC12 - SERVICE ERROR                                           00580000
+*                                                                       00590000
+*               RSN04 - RU ENTRY NOT FOUND IN TABLE                     00600000
+*               RSN08 - INVALID RU LENGTH                               00610000
+*               RSN12 - RU PROCESSING ROUTINE NOT AVAIL                 00620000
+*                                                                       00630000
+*        RC16 - INVALID RU                                              00640000
+*                                                                       00650000
+*        RC20 - SIGNON REQUIREMENT NOT SATISFIED                        00660000
+*                                                                       00670000
+**<DOC-OFF>*****************************************************        00680000
+                                                                        00690000
+         EJECT                                                          00700000
+****************************************************************        00710000
+*                                                                       00720000
+* MAINTENANCE:                                                          00730000
+*                                                                       00740000
+*   08/01/93 RON COLMONE                                                00750000
+*            INITIAL VERSION                                            00760000
+*                                                                       00770000
+*   08/18/93 R. Turgeon                                                 00780000
+*            Implement stacked requests                                 00790000
+*                                                                       00800000
+*   04/18/94 R. Turgeon                                                 00810000
+*            Implement CONVERSATIONAL requests                          00820000
+*                                                                       00830000
+****************************************************************        00840000
+         EJECT                                                          00850000
+         $RU   TYPE=DSECT         RU TABLE MAPPINGS                     00860000
+                                                                        00870000
+         EJECT                                                          00880000
+         @XH   ,                  RU HEADER MAPPING (INTERNAL)          00890000
+                                                                        00900000
+         EJECT                                                          00910000
+         TXPHDR ,                                                       00920000
+                                                                        00930000
+         EJECT                                                          00940000
+         PSESS ,                  PRIMARY SESSION BLOCK                 00950000
+                                                                        00960000
+         EJECT                                                          00970000
+         XPORTHDR HDRTYPE=COMMON  XPORT HEADER (COMMON FORMAT)          00980000
+                                                                        00990000
+         EJECT                                                          01000000
+         REQHDR ,                 RU HEADER MAPPING (TRANSMISSION)      01010000
+                                                                        01020000
+         EJECT                                                          01030000
+         IUSER  ,                 USER INSTANCE                         01040000
+                                                                        01050000
+         EJECT                                                          01060000
+         $TASK DSECT=YES          $TASK SERVICES                        01070000
+                                                                        01080000
+         EJECT                                                          01090000
+         $PROC DSECT=YES          $PROC SERVICES                        01100000
+                                                                        01110000
+         EJECT                                                          01120000
+         $RESMGR DSECT=YES        $RESMGR SERVICES                      01130000
+                                                                        01140000
+         EJECT                                                          01150000
+         $MSGDFT PREFIX=ICTPID,COMPID='XRU',TABLE=*#MSGS,              +01160000
+               PRINT=NOGEN,CONID=*ICTCONID,CONNAME=ICTCONNM,           +01170000
+               MF=(E,$MSGMFL)                                           01180000
+                                                                        01190000
+         EJECT                                                          01200000
+         #WORK ,                  READ/WRITE WORKAREA                   01210000
+                                                                        01220000
+FLAGS    DS    X                  CONTROL FLAGS                         01230000
+PAGEALOC EQU   X'80'                PCB PAGE ALLOCATED                  01240000
+MANAGTXP EQU   X'40'                MANAGING TXP BUFFER FOR RU PROC     01250000
+STACKREQ EQU   X'20'                STACKED (MULTI-FUNCTION) REQUEST    01260000
+IGNORERR EQU   X'10'                PROCESS ALL RU'S REGARDLESS OF ERR  01270000
+CALLEDRU EQU   X'08'                AT LEAST ONE XACT WAS SCHEDULED     01280000
+CNVNORSP EQU   X'04'                CONVERSATIONAL XACT SUPPRESSED RESP 01290000
+                                                                        01300000
+$LSESH   DS    F                  LOGICAL SESSION HANDLE                01310000
+$FUNC    DS    F                  RU FUNCTION CODE                      01320000
+$SUBFUNC DS    F                  RU SUBFUNC  CODE                      01330000
+$RTN     DS    A                  ENTRY ADDR OF PROCESS RTN             01340000
+$TXPS    DS    F                  RECOMMENDED TXP BULK DATA BUFFER SIZE 01350000
+                                                                        01360000
+PROCNAME DS    CL8                PCB NAME CONSTRUCTION AREA            01370000
+                                                                        01380000
+FUNC#    DS    F                  NUMBER OF STACKED REQUESTS OR 1       01390000
+FUNCURR  DS    A                  CURRENT / DUMMY FUNCTION STACK PTR    01400000
+FUNCRULN DS    F                  LENGTH OF CURRENT RU                  01410000
+                                                                        01420000
+RCRSN    DS    0F                 RETURN/REASON CODES                   01430000
+RETCODE  DS    F                  RETURN CODE                           01440000
+RSNCODE  DS    F                  REASON CODE                           01450000
+                                                                        01460000
+LCLTSFHD DS    XL(TSFHDRLN)       TXP BUFFER DUMMY FUNCTION ARRAY ENTRY 01470000
+                                                                        01480000
+RETREGS  DS    3F                 R15-R1 COMPLETION STATUS              01490000
+REGSAVE  DS    16F                REGISTER SAVE AREA                    01500000
+                                                                        01510000
+ERUPROC  @EPB  TYPE=BLOCK         RU TERMINATION EPB                    01520000
+                                                                        01530000
+$TASKMFL $TASK MF=(L,*)           $TASK PLIST CONSTRUCTION AREA         01540000
+$PROCMFL $PROC MF=(L,*)           $PROC PLIST CONSTRUCTION AREA         01550000
+$MSGMFL  $MSG  MF=(L,*),FIELDS=(,,,,)                                   01560000
+                                                                        01570000
+         @XH   TYPE=D,PREFIX=MXH  STANDARD TRANSACTION PLIST HDR        01580000
+                                                                        01590000
+         #ENDWORK                 END OF WORKAREA                       01600000
+                                                                        01610000
+         EJECT                                                          01620000
+         EVCODES PRINT=NOGEN                                            01630000
+                                                                        01640000
+         ABCODES PRINT=NOGEN                                            01650000
+                                                                        01660000
+         TRACODES PRINT=NOGEN                                           01670000
+                                                                        01680000
+         EQUS  ,                  GENERAL EQUATES                       01690000
+                                                                        01700000
+         EJECT                                                          01710000
+IXRUSCHD #ENTER BASE=R12,         ENTRY LINKAGE                        +01720000
+               PREG=(R8,R7)                                             01730000
+                                                                        01740000
+         USING ITASK,R10          ADDRESSABILITY                        01750000
+         L     R9,TSKPCBC         ADDR OF CURRENT PCB                   01760000
+         USING IPCB,R9            ADDRESSABILITY                        01770000
+                                                                        01780000
+         ST    R7,$LSESH          SAVE LOGICAL SESSION HANDLE           01790000
+                                                                        01800000
+         USING REQHDR,R8          RU ADDRESSABILITY                     01810000
+                                                                        01820000
+         EJECT                                                          01830000
+****************************************************************        01840000
+*                                                                       01850000
+*  OBTAIN MAJOR FUNC/SUBFUNC AND PREPARE FOR TABLE SCAN                 01860000
+*                                                                       01870000
+****************************************************************        01880000
+         @CALL IXRURSIZ,CTYPE=CVT ACQUIRE RESPONSE BUFR RECOMMENDATIONS 01890000
+         ST    R1,$TXPS           SAVE RECOMMENDATION                   01900000
+                                                                        01910000
+         SR    R2,R2              PREPARE FOR INSERT                    01920000
+         IC    R2,REQHFUNC        GET FUNCTION CODE                     01930000
+         ST    R2,$FUNC           SAVE FUNCTION CODE                    01940000
+         SR    R3,R3              PREPARE FOR INSERT                    01950000
+         IC    R3,REQHSFNC        GET SUBFUNC CODE                      01960000
+         ST    R3,$SUBFUNC        SAVE SUBFUNC CODE                     01970000
+                                                                        01980000
+         LR    R1,R2              FUNCTION                              01990000
+         LR    R0,R3              SUBFUNCTION                           02000000
+         BAS   R14,RULOC          LOCATE RU ENTRY                       02010000
+         BNZ   ERR_NF             INVALID REQUEST                       02020000
+         LR    R6,R1              ADDR OF MATCHING ENTRY                02030000
+         USING RUENTRY,R6         ADDRESSABILITY                        02040000
+                                                                        02050000
+         MVC   MXHFUNC,$FUNC      @XH FORMAT FUNCTION CODE              02060000
+         MVC   MXHSFNC,$SUBFUNC   @XH FORMAT SUBFUNCTION CODE           02070000
+         MVC   MXHSESH,$LSESH     @XH FORMAT SESSION HANDLE             02080000
+         MVC   MXHTXPS,$TXPS      TXP BULK DATA BUFFER SIZE             02090000
+                                                                        02100000
+*---------------------------------------------------------------        02110000
+*  COMMON INITIALIZATION FOR STACKED / NON-STACKED REQUESTS             02120000
+*---------------------------------------------------------------        02130000
+         TM    REQOPTNS,REQOSTAK  STACKED (MULTI-FUNC) REQUEST?         02140000
+         BNO   STDREQ             STANDARD REQUEST OTHERWISE            02150000
+         OI    FLAGS,STACKREQ     INDICATE STACKED REQUEST              02160000
+         ICM   R15,15,REQHDATA    FETCH FUNCTION COUNT                  02170000
+         BNP   ERR_STK            INVALID STACKED REQUEST               02180000
+                                                                        02190000
+         ST    R15,FUNC#          RETAIN NUMBER OF FUNCTIONS            02200000
+         LA    R15,REQHDATA+4     TOP OF REQUEST ARRAY                  02210000
+         ST    R15,FUNCURR        RETAIN CURRENT FUNCTION ENTRY PTR     02220000
+         TM    RUEOPTNS,RUEOEIGN  PROCESS ALL RU'S REGARDLESS OF ERROR? 02230000
+         BNO   *+8                ELSE ERROR TERMINATES PROCESSING      02240000
+         OI    FLAGS,IGNORERR     RETAIN OPTION LOCALLY                 02250000
+         B     ESTKREQ            DONE                                  02260000
+                                                                        02270000
+STDREQ   DS    0H                 STANDARD (NON-STACKED) REQUEST        02280000
+         LH    R0,REQHLEN         LENGTH OF ONLY RU                     02290000
+         ST    R0,FUNCRULN        RETAIN FOR RU PROCESSOR               02300000
+         LA    R0,1               SINGLE FUNCTION                       02310000
+         ST    R0,FUNC#           RETAIN IN COMMON FORMAT               02320000
+         LA    R1,LCLTSFHD        DUMMY FUNCTION ARRAY ENTRY            02330000
+         ST    R1,FUNCURR         COALLESCES LOGIC                      02340000
+         USING TSFHDR,R1          STACKED REQ FUNCTION ARRAY ENTRY FMT  02350000
+         MVC   TSFFUNC,MXHFUNC+2  FUNCTION                              02360000
+         MVC   TSFSUBF,MXHSFNC+2  SUB FUNCTION                          02370000
+         XC    TSFDISPL,TSFDISPL  BULK STG AREA IS NOT PREFIXED         02380000
+         DROP  R1                 TSFHDR                                02390000
+                                                                        02400000
+ESTKREQ  DS    0H                                                       02410000
+                                                                        02420000
+*---------------------------------------------------------------        02430000
+*  ALLOCATE TXP BUFFER IF TXPMANGE IS SPECIFIED AT MAJOR ENTRY          02440000
+*---------------------------------------------------------------        02450000
+         TM    RUEOPTNS,RUEOTXP   TXP BUFFER MGMT REQUESTED?            02460000
+         BNO   ETXPMNG            SKIP IF NOT                           02470000
+                                                                        02480000
+         SR    R2,R2              ASSUME NON-STACKED REQUEST            02490000
+         TM    FLAGS,STACKREQ     CORRECT?                              02500000
+         BNO   *+8                SKIP IF SO                            02510000
+         L     R2,FUNC#           ELSE GET MAX # FUNCTIONS              02520000
+                                                                        02530000
+         ICM   R3,15,RUETXPLN     TXP BUFFER REQUIREMENTS               02540000
+         BNM   *+8                EITHER 'STD' OR LENGTH GIVEN          02550000
+         L     R3,MXHTXPS         SIZE RECOMENDATION FOR 'BULK' BUFFER  02560000
+                                                                        02570000
+         $XPBUFR INIT,            CREATE A TXP BUFFER                  +02580000
+               SIZE=(R3),         USERDATA SIZE                        +02590000
+               XH=MXH,            MODEL TRANSACTION REQUEST            +02600000
+               FUNCSTACK=(R2),    FUNCTION ARRAY SIZE OR ZERO          +02610000
+               MF=(E,MFE_LIST)                                          02620000
+                                                                        02630000
+         BNZ   ABE_TXP            FAIL IF NOT                           02640000
+         OI    FLAGS,MANAGTXP     PERFORMING TXP BUFFER SERVICES        02650000
+                                                                        02660000
+ETXPMNG  DS    0H                                                       02670000
+                                                                        02680000
+         EJECT                                                          02690000
+****************************************************************        02700000
+*                                                                       02710000
+*  PROCESS RU STACK - NON-STACKED REQUEST APPEARS AS ONE ENTRY          02720000
+*                                                                       02730000
+****************************************************************        02740000
+         L     R4,FUNC#           STACKED FUNCTION COUNT                02750000
+         L     R5,FUNCURR         CURRENT / FIRST FUNCTION ENTRY        02760000
+         USING TSFHDR,R5          REQUEST ARRAY ENTRY FORMAT            02770000
+         TM    FLAGS,STACKREQ     TRUE REQUEST STACK?                   02780000
+         BNO   PROCESS            RU ENTRY CURRENTLY ADDRESSABLE IF SO  02790000
+                                                                        02800000
+*---------------------------------------------------------------        02810000
+*   LOCATE NEXT RU PLIST AND ITS DEFINITION - CALC RU PLIST LEN         02820000
+*---------------------------------------------------------------        02830000
+NXTSTACK DS    0H                 LOCATE RU ENTRY                       02840000
+         LH    R1,TSFFUNC         FUNCTION                              02850000
+         ST    R1,$FUNC                                                 02860000
+         LH    R0,TSFSUBF         SUBFUNCTION                           02870000
+         ST    R0,$SUBFUNC                                              02880000
+         BAS   R14,RULOC          LOCATE RU ENTRY                       02890000
+         BNZ   ERR_NF             INVALID RU                            02900000
+         LR    R6,R1              RETAIN RU ENTRY                       02910000
+         USING RUENTRY,R6         ADDRESSABILITY REDECLARATION          02920000
+                                                                        02930000
+         LH    R15,REQHLEN        LEN OF UNPREFIXED PACKET AS OFFSET    02940000
+         CH    R4,=H'1'           PROCESSING LAST STACKED REQ?          02950000
+         BE    *+8                SKIP IF SO                            02960000
+         L     R15,TSFNEXT+(TSFDISPL-TSFHDR) GET OFFSET TO NEXT REQ     02970000
+         S     R15,TSFDISPL       LENGTH OF THIS REQ                    02980000
+         ST    R15,FUNCRULN       RETAIN PLIST                          02990000
+                                                                        03000000
+*---------------------------------------------------------------        03010000
+*   TRACE TRANSACTION ENTRY AND INVOKE IT                               03020000
+*---------------------------------------------------------------        03030000
+PROCESS  DS    0H                 PROCESS RU                            03040000
+         LA    R0,RUENTRY         RU DEFINITION ENTRY ADDR AS PARM      03050000
+         LA    R1,REQHDATA        UNPREFIXED PACKET ORIGIN              03060000
+         AL    R1,TSFDISPL        LOCATE PARAMETER LIST IN STACK        03070000
+         L     R2,FUNCRULN        INBOUND RU LENGTH                     03080000
+         STM   R0,R2,MFE_LIST     CONSTRUCT PLIST                       03090000
+                                                                        03100000
+         $TRACE *=A(TRC_RU_CALL),4*4                                    03110000
+         BNZ   PNTRAC1            REQUEST FAILED                        03120000
+                                                                        03130000
+         MVC   0(4,R1),$FUNC      FUNCTION                              03140000
+         MVC   4(4,R1),$SUBFUNC   SUBFUNCTION                           03150000
+         MVC   8(4,R1),$LSESH     REQUESTORS HANDLE                     03160000
+                                                                        03170000
+PNTRAC1  DS    0H                                                       03180000
+         TM    RUEOPTNS,RUEONSEC  SIGNED-ON USER REQUIRED?              03190000
+         BO    NSECREQ            SKIP IF NOT, RU IS NOT SECURED        03200000
+         L     R1,PCBUSER         LOCATE IUSER                          03210000
+         TM    USRSGNON-IUSER(R1),USRSGN   SIGNON COMPLETE/ACCEPTED?    03220000
+         BNO   ERR_VIO            SECVIO OTHERWISE                      03230000
+                                                                        03240000
+NSECREQ  DS    0H                                                       03250000
+         LA    R1,MFE_LIST        PARAMETER LIST                        03260000
+         BAS   R14,PROCRU         SCHEDULE THE TRANSACTION              03270000
+         STM   R15,R1,RETREGS     PRESERVE COMPLETION STATUS            03280000
+         OI    FLAGS,CALLEDRU     TRANSACTION RAN                       03290000
+                                                                        03300000
+*---------------------------------------------------------------        03310000
+*   ANALYZE RESPONSE REQUIREMENTS FOR CONVERSATIONAL RU'S               03320000
+*---------------------------------------------------------------        03330000
+         LTR   R15,R15            NORMAL COMPLETION?                    03340000
+         BNZ   PROCCONT           RESPONSE REQUIRED IF NOT              03350000
+         TM    RUEOPTNS,RUEOCONV  CONVERSATIONAL TRANSACTION?           03360000
+         BNO   PROCCONT                                                 03370000
+         CLC   RETREGS+4,=A(RSN04)   SUPPRESSION?                       03380000
+         BNE   PROCCONT           RESPONSE REQUESTED                    03390000
+         OI    FLAGS,CNVNORSP     ELSE SUPPRESS TXP XMIT                03400000
+                                                                        03410000
+*---------------------------------------------------------------        03420000
+*   TRACE TRANSACTION COMPLETION STATUS                                 03430000
+*---------------------------------------------------------------        03440000
+PROCCONT DS    0H                                                       03450000
+         $TRACE *=A(TRC_RU_RETURN),8*4                                  03460000
+         BNZ   PNTRAC2            REQUEST FAILED                        03470000
+                                                                        03480000
+         MVC   0(4,R1),$FUNC      FUNCTION                              03490000
+         MVC   4(4,R1),$SUBFUNC   SUBFUNCTION                           03500000
+         MVC   8(4,R1),$LSESH     REQUESTORS HANDLE                     03510000
+         MVC   16(3*4,R1),RETREGS COMPLETION STATUS                     03520000
+PNTRAC2  DS    0H                                                       03530000
+                                                                        03540000
+*---------------------------------------------------------------        03550000
+*   ANALYZE COMPLETION - PROCESS NEXT STACKED REQUEST                   03560000
+*---------------------------------------------------------------        03570000
+         L     R15,RETREGS        RESTORE RU RETURN CODE                03580000
+         B     *+4(R15)           ANALYZE COMPLETION                    03590000
+         B     ADVANCE               RC00 - NORMAL COMPLETION           03600000
+         B     CONTOPS               RC04 - XACTION FAILED              03610000
+         B     ERR_RTN               RC08 - INVALID ROUTINE             03620000
+         B     ERR_LEN               RC12 - INVALID LENGTH              03630000
+                                                                        03640000
+CONTOPS  DS    0H                 CONTINUATION OPTIONS                  03650000
+         TM    FLAGS,IGNORERR     PROCESS ALL RU'S REGARDLESS?          03660000
+         BNO   ERR_RU             RAISE ERROR NOW IF NOT                03670000
+                                                                        03680000
+ADVANCE  DS    0H                                                       03690000
+         LA    R5,TSFNEXT         ADVANCE TO NEXT FUNCTION ARRAY ENTRY  03700000
+         ST    R5,FUNCURR         USEFUL DIAGNOSTIC                     03710000
+         BCT   R4,NXTSTACK        PROCESS RU                            03720000
+         B     NORMRET            COMPLETE                              03730000
+         DROP  R5,R6              TSFHDR, RUENTRY                       03740000
+                                                                        03750000
+         EJECT                                                          03760000
+****************************************************************        03770000
+*                                                                       03780000
+*  NORMAL AND ABNORMAL COMPLETION / CLEANUP                             03790000
+*                                                                       03800000
+****************************************************************        03810000
+NORMRET  DS    0H                                                       03820000
+         SR    R0,R0              REASON CODE NOT DEFINED               03830000
+         LA    R15,RC00           NORMAL COMPLETION                     03840000
+         B     RETURN             RETURN                                03850000
+                                                                        03860000
+ERR_NF   DS    0H                                                       03870000
+         LA    R1,001             RU ENTRY NOT FOUND IN TABLE           03880000
+         BAS   R14,ISSUEMSG       ISSUE MESSAGE                         03890000
+         LA    R0,RSN04           RU ENTRY NOT FOUND                    03900000
+         LA    R15,RC12           SERVICE ERROR                         03910000
+         B     RETURN             RETURN                                03920000
+                                                                        03930000
+ERR_LEN  DS    0H                                                       03940000
+         LA    R1,002             INVALID RU LENGTH                     03950000
+         BAS   R14,ISSUEMSG       ISSUE MESSAGE                         03960000
+         LA    R0,RSN08           INVALID RU LENGTH                     03970000
+         LA    R15,RC12           SERVICE ERROR                         03980000
+         B     RETURN             RETURN                                03990000
+                                                                        04000000
+ERR_RTN  DS    0H                                                       04010000
+         LA    R1,003             ROUTINE NOT AVAILABLE                 04020000
+         BAS   R14,ISSUEMSG       ISSUE MESSAGE                         04030000
+         LA    R0,RSN12           ROUTINE NOT AVAILABLE                 04040000
+         LA    R15,RC12           SERVICE ERROR                         04050000
+         B     RETURN             RETURN                                04060000
+                                                                        04070000
+ERR_RU   DS    0H                                                       04080000
+         LA    R1,004             RU PROCESS ERROR                      04090000
+         BAS   R14,ISSUEMSG       ISSUE MESSAGE                         04100000
+         LA    R15,RC08           RU FAILURE                            04110000
+         B     RETURN             RETURN                                04120000
+                                                                        04130000
+ERR_STK  DS    0H                                                       04140000
+         LA    R1,005             INVALID REQUEST STACK - BAD RU        04150000
+         BAS   R14,ISSUEMSG       ISSUE MESSAGE                         04160000
+         LA    R15,RC16           RU FAILURE                            04170000
+         B     RETURN             RETURN                                04180000
+                                                                        04190000
+ERR_VIO  DS    0H                                                       04200000
+         LA    R1,006             SIGNON REQUIRED                       04210000
+         BAS   R14,ISSUEMSG       ISSUE MESSAGE                         04220000
+         LA    R15,RC20           RU FAILURE                            04230000
+         B     RETURN             RETURN                                04240000
+                                                                        04250000
+RETURN   DS    0H                                                       04260000
+         STM   R15,R1,RETREGS     SAVE COMPLETION STATUS FOR RETURN     04270000
+                                                                        04280000
+*---------------------------------------------------------------        04290000
+*  TRANSMIT AND FREE LOCALLY MANAGED TXP BUFFER                         04300000
+*---------------------------------------------------------------        04310000
+         TM    FLAGS,MANAGTXP+CALLEDRU                                  04320000
+         BNO   EXPXMIT                                                  04330000
+         TM    FLAGS,CNVNORSP     CONVERSATIONAL XACT SUPPRESSED RESP?  04340000
+         BO    EXPXMIT            SKIP RESPONSE IF NOT                  04350000
+                                                                        04360000
+         $XPBUFR XMIT                                                   04370000
+         BNZ   ABE_TXP                                                  04380000
+                                                                        04390000
+EXPXMIT  DS    0H                                                       04400000
+                                                                        04410000
+         TM    FLAGS,MANAGTXP                                           04420000
+         BNO   EXPFREE                                                  04430000
+                                                                        04440000
+         $XPBUFR FREE                                                   04450000
+         BNZ   ABE_TXP                                                  04460000
+                                                                        04470000
+EXPFREE  DS    0H                                                       04480000
+                                                                        04490000
+*---------------------------------------------------------------        04500000
+*  FREE PAGE ALIGNED WORKAREA ADDRESS IF PREVIOUSLY ALLOCATED           04510000
+*---------------------------------------------------------------        04520000
+         TM    FLAGS,PAGEALOC     WORKPAGE ALLOCATED?                   04530000
+         BZ    WPAGEFRE           NO, FREE RU PLIST                     04540000
+         ICM   R1,15,PCBPAGE      STILL ALLOCATED?                      04550000
+         BZ    WPAGEFRE           NO, FREE RU PLIST                     04560000
+                                                                        04570000
+         STORAGE RELEASE,LENGTH=4096,ADDR=(R1)                          04580000
+                                                                        04590000
+         XC    PCBPAGE,PCBPAGE    CLEAR WORKAREA ADDRESS                04600000
+                                                                        04610000
+WPAGEFRE DS    0H                                                       04620000
+                                                                        04630000
+         EJECT                                                          04640000
+****************************************************************        04650000
+*                                                                       04660000
+*  APPLY DELTA TO DISPATCHING PRIORITY.  WORKBENCH USERS ARE            04670000
+*  NOT AFFECTED.  RUNTIME USERS MOVE BETWEEN TWO PRIORITIES,            04680000
+*  THE 'HIGH' PRIORITY AND THE 'LOW' PRIORITY WITH THE OBJECTIVE        04690000
+*  OF EVENLY DISTRIBUTING RESOURCES TO ALL REQUESTORS.                  04700000
+*                                                                       04710000
+****************************************************************        04720000
+         ICM   R6,15,PCBUSER      IUSER ESTABLISHED?                    04730000
+         BZ    EPRIO              DONE HERE IF NOT                      04740000
+         USING IUSER,R6                                                 04750000
+                                                                        04760000
+         CLI   USRTYPE,USRTY_RT   RUN-TIME ACCESS?                      04770000
+         BNE   EPRIO              DONE HERE IF NOT                      04780000
+                                                                        04790000
+         L     R2,TSKDPMOD        IDENTIFY DIRECTION OF LAST CHANGE     04800000
+         LTR   R2,R2              PREPARE FOR INSERT                    04810000
+         BNZ   *+8                FIRST REQUEST, REDUCE PRIO            04820000
+         LA    R2,1               ASSUME INITIAL DISPATCH               04830000
+         LCR   R2,R2              FLIP/FLOP                             04840000
+         ST    R2,TSKDPMOD        SAVE CURRENT STATUS                   04850000
+                                                                        04860000
+         $TASK CHAP,              CHANGE TASK DISPATCHING PRIORITY     +04870000
+               DPMOD=(R2),                                             +04880000
+               MF=(E,$TASKMFL)                                          04890000
+                                                                        04900000
+EPRIO    DS    0H                                                       04910000
+         DROP  R6                 IUSER                                 04920000
+                                                                        04930000
+*---------------------------------------------------------------        04940000
+*  RETURN COMPLETION STATUS TO CALLER                                   04950000
+*---------------------------------------------------------------        04960000
+         LM    R15,R1,RETREGS     RESTORE COMPLETION REGS               04970000
+                                                                        04980000
+         #EXIT ,                  RETURN                                04990000
+                                                                        05000000
+         EJECT                                                          05010000
+***************************************************************         05020000
+*                                                                       05030000
+* CATASTROPIC ERRORS                                                    05040000
+*                                                                       05050000
+***************************************************************         05060000
+ABE_TXP  DS    0H                                                       05070000
+         $ABEND ABE_TXPSERV,DUMP=YES,                                  X05080000
+               TITLE='TXP BUFFER SERVICE FAILURE'                       05090000
+                                                                        05100000
+         EJECT                                                          05110000
+****************************************************************        05120000
+*                                                                       05130000
+* ROUTINE: PROCRU - SCHEDULE TRANSACTION ON BEHALF OF GIVEN RU          05140000
+*                                                                       05150000
+* ON ENTRY:                                                             05160000
+*                                                                       05170000
+*    R1 CONTAINS THE ADDR OF A PLIST CONSTRUCTED AS FOLLOWS             05180000
+*                                                                       05190000
+*       +00 - ADDR OF RU DEFINITION ENTRY                               05200000
+*       +04 - ADDR OF REQUEST PLIST                                     05210000
+*       +08 - LENG OF REQUEST PLIST                                     05220000
+*                                                                       05230000
+*                                                                       05240000
+* ON EXIT:                                                              05250000
+*                                                                       05260000
+*    RC00 - NORMAL COMPLETION                                           05270000
+*                                                                       05280000
+*           RC00 - ISSUE RESPONSE                                       05290000
+*           RC04 - SUPPRESS RESPONSE (CONVERSATIONAL RU'S ONLY)         05300000
+*                                                                       05310000
+*    RC04 - TRANSACTION PROGRAM FAILED                                  05320000
+*                                                                       05330000
+*           R1 - TRANSACTION PGM RETURN CODE                            05340000
+*           R0 - TRANSACTION PGM REASON CODE                            05350000
+*                                                                       05360000
+*    RC08 - MISSING OR INVALID TRANSACTION ROUTINE                      05370000
+*                                                                       05380000
+*    RC12 - INVALID RU STORAGE LENGTH                                   05390000
+*                                                                       05400000
+****************************************************************        05410000
+PROCRU   DS    0H                                                       05420000
+         STM   R0,R15,REGSAVE     SAVE MAINLINE REGS                    05430000
+         L     R6,0(,R1)          RU ENTRY                              05440000
+         USING RUENTRY,R6         LIFE OF FUNCTION ADDRESSABILITY       05450000
+         L     R3,4(,R1)          REQ PLIST ADDR                        05460000
+         L     R4,8(,R1)          REQ PLIST LENG                        05470000
+                                                                        05480000
+         ICM   R1,15,RUERTN       ROUTINE OFFSET SUPPLIED               05490000
+         BZ    PROCRC08           PROCESS RTN NOT AVAIL                 05500000
+         LA    R1,ICTMODTB(R1)    ADDRESS OF ROUTINE ENTRY POINT        05510000
+         ICM   R1,15,0(R1)        PROCESS RTN ADDRESS                   05520000
+         BZ    PROCRC08           PROCESS RTN NOT AVAIL                 05530000
+         ST    R1,$RTN            SAVE PROCESS ROUTINE ENTRY ADDR       05540000
+                                                                        05550000
+*---------------------------------------------------------------        05560000
+*  DETERMINE REQUIRED RU LENGTH AND VALIDATE LENGTHS                    05570000
+*---------------------------------------------------------------        05580000
+         LA    R2,@XHXHLN(,R4)    REQ PLIST LEN PLUS XACT HDR LEN       05590000
+                                                                        05600000
+         ICM   R0,15,RUEMINL      MINIMUM LENGTH SPECIFIED              05610000
+         BZ    RU_MAXLN           NO VALIDATE MAX LENGTH                05620000
+         CR    R2,R0              MINIMUM LENGTH REQUIREMENT MET        05630000
+         BNL   RU_MAXLN           YES, CONTINUE                         05640000
+         LR    R2,R0              ADJUST FOR REQUIRED LENGTH            05650000
+                                                                        05660000
+RU_MAXLN DS    0H                                                       05670000
+         ICM   R0,15,RUEMAXL      MAXIMUM LENGTH REQUIREMENT            05680000
+         BZ    RU_ALLOC           NO,  ALLOC RU STORAGE                 05690000
+         CR    R2,R0              EXCEEDS MAXIMUM LENGTH                05700000
+         BH    PROCRC12           ERROR IF SO                           05710000
+                                                                        05720000
+*---------------------------------------------------------------        05730000
+*  ALLOCATE AND FORMAT RU PLIST                                         05740000
+*---------------------------------------------------------------        05750000
+RU_ALLOC DS    0H                                                       05760000
+         $GETSTOR (R2),OWNER=IPCB ALLOC RU STORAGE                      05770000
+                                                                        05780000
+         LR    R5,R1              ADDRESS OF RU STORAGE                 05790000
+         USING @XH,R5             ADDRESSABILITY                        05800000
+                                                                        05810000
+         MVC   @XHFUNC,$FUNC      SET FUNCTION CODE                     05820000
+         MVC   @XHSFNC,$SUBFUNC   SET SUBFUNC  CODE                     05830000
+         MVC   @XHSESH,$LSESH     SET SESSION HANDLE                    05840000
+         MVC   @XHTXPS,$TXPS      TXP BULK BUFFER SIZE RECOMMENDATION   05850000
+         ST    R2,@XHPLEN         TOTAL LENGTH OF RU W/ HEADER          05860000
+                                                                        05870000
+         TM    FLAGS,MANAGTXP     MANAGING THE TXP BUFFER LOCALLY?      05880000
+         BNO   *+8                SKIP IF NOT                           05890000
+         OI    @XHFLG0,@XHF0TXP   ELSE CONVEY TO TRANSACTION PGM        05900000
+                                                                        05910000
+         LA    R0,@XH+@XHXHLN     RU DATA TARGET                        05920000
+         LR    R1,R4              RU DATA LENGTH                        05930000
+         LR    R14,R3             RU DATA SOURCE                        05940000
+         LR    R15,R1             RU DATA LENGTH                        05950000
+         MVCL  R0,R14             COPY RU DATA TO PLIST                 05960000
+                                                                        05970000
+*---------------------------------------------------------------        05980000
+*  ALLOCATE PAGE ALIGNED WORK AREA IF SPECIFIED BY RU ENTRY             05990000
+*---------------------------------------------------------------        06000000
+         TM    RUEOPTNS,RUEOPAGE  WORKPAGE ALLOCATION REQUIRED?         06010000
+         BNO   RU_CALL            NO,  CALL PROCESS RTN                 06020000
+         ICM   R0,15,PCBPAGE      IS WORKPAGE ALREADY AVAIL?            06030000
+         BNZ   RU_CALL            YES, BYPASS ALLOCATION                06040000
+                                                                        06050000
+         STORAGE OBTAIN,LENGTH=4096,BNDRY=PAGE                          06060000
+                                                                        06070000
+         ST    R1,PCBPAGE         SAVE PAGE ALIGNED WORKAREA            06080000
+         OI    FLAGS,PAGEALOC     INDICATE WORKAREA ALLOCATED           06090000
+                                                                        06100000
+*---------------------------------------------------------------        06110000
+*  CALL TRANSACTION PROCESSOR UNDER CURRENT RU                          06120000
+*---------------------------------------------------------------        06130000
+RU_CALL  DS    0H                                                       06140000
+         TM    RUEOPTNS,RUEOCONV  CONVERSATION TRANSACTION INIT/CONT?   06150000
+         BO    RU_VCON            ELSEWHERE IF SO                       06160000
+         TM    RUEOPTNS,RUEONPCB  NEW PCB REQUIRED?                     06170000
+         BO    RU_CPCB            ELSEWHERE IF SO                       06180000
+                                                                        06190000
+RU_VCON  DS    0H                                                       06200000
+         LA    R0,RUENTRY         ADDR OF RU DEFINITION                 06210000
+         LA    R1,@XH             ADDR OF PLIST                         06220000
+         L     R15,$RTN           PROCESSING RTN ADDRESS                06230000
+         TM    RUEOPTNS,RUEOCONV  CONVERSATIONAL TRANSACTION?           06240000
+         BNO   *+8                SKIP IF NOT                           06250000
+         L     R15,=V(IXRUCONV)   CONVERSATIONAL TRANSACTION MANAGER    06260000
+         BASR  R14,R15            CALL PROCESSING ROUTINE               06270000
+         B     RU_FREE            REJOIN                                06280000
+                                                                        06290000
+*---------------------------------------------------------------        06300000
+*  DISPATCH THE RU UNDER INDEPENDENT PCB - GENERATE PCB NAME            06310000
+*---------------------------------------------------------------        06320000
+RU_CPCB  DS    0H                                                       06330000
+         MVC   PROCNAME,PCBNAME   HOST PROCESS IN THE FORM USER####     06340000
+         MVC   PROCNAME(4),=C'0000'                                     06350000
+                                                                        06360000
+         LA    R3,RUEPFXNM        PCB PREFIX GIVEN IN $RU               06370000
+         LH    R2,RUEPFXL         FETCH PCB PREFIX LENGTH               06380000
+         LTR   R2,R2              PCB PREFIX GIVEN?                     06390000
+         BNZ   *+12               SKIP IF SO                            06400000
+         LA    R3,$$NEWPCB        ELSE SELECT DEFAULT NAME              06410000
+         LA    R2,L'$$NEWPCB      AND DEFAULT LENGTH                    06420000
+         BCTR  R2,0               PREPARE FOR COPY                      06430000
+         EX    R2,*+4             OVERLAY PREFIX                        06440000
+         MVC   PROCNAME(*-*),0(R3)                                      06450000
+                                                                        06460000
+*---------------------------------------------------------------        06470000
+*  SYNC EXECUTION OF THE NEW PROCESS                                    06480000
+*---------------------------------------------------------------        06490000
+         $TASK SETEPB,            DECLARE RU TERMINATION EPB           X06500000
+               EPB=ERUPROC,       FOR USE WITH INDEPENDENT RU          X06510000
+               ECODE=EC$TERM_PROC,   PROCESS TERMINATION               X06520000
+               SCOPE=LOCAL,       LOCAL TASK EVENT                     X06530000
+               MF=(E,$TASKMFL)                                          06540000
+                                                                        06550000
+         $PROC CREATE,            CREATE NEW PROCESS                   X06560000
+               EP=*$RTN,          ENTRY POINT PREV IDENTIFIED          X06570000
+               PARM=@XH,          RU PARMS                             X06580000
+               NAME=PROCNAME,     DERIVED PROCESS NAME                 X06590000
+               TERMEPB=ERUPROC,   SIGNAL COMPLETION                    X06600000
+               MF=(E,$PROCMFL)    WORKAREA                              06610000
+                                                                        06620000
+         LR    R3,R1              PRESERVE NEW PCB ADDR                 06630000
+NEW      USING IPCB,R3            ESTABLISH ADDRESSABILITY              06640000
+         ICM   R2,15,PCBPAGE      WORKAREA ESTABLISHED FOR RU PCB?      06650000
+         BZ    RU_SYNC            SKIP IF NOT                           06660000
+         ST    R2,NEW.PCBPAGE     ELSE ASSOCIATE IT WITH THE NEW PCB    06670000
+         XC    PCBPAGE,PCBPAGE    TRANSFER OF AREA OWNERSHIP            06680000
+                                                                        06690000
+         $RESMGR ADD,                                                  X06700000
+               ROUTINE=*#RMXPAGE,                                      X06710000
+               OWNER=(R3),                                             X06720000
+               TOKEN=NEW.PCBRMPAG,                                     X06730000
+               MF=(E,MFE_LIST)                                          06740000
+                                                                        06750000
+RU_SYNC  DS    0H                                                       06760000
+         $TASK WAIT,              AWAIT RU COMPLETION                  X06770000
+               EPB=ERUPROC,       RETURN COMPLETION CODE IN R0         X06780000
+               MF=(E,$TASKMFL)                                          06790000
+                                                                        06800000
+         LR    R15,R0             SAVE RETURN CODE                      06810000
+         SR    R0,R0              REASON CODE IS LOST                   06820000
+         DROP  NEW                IPCB                                  06830000
+                                                                        06840000
+*---------------------------------------------------------------        06850000
+*  FREE RU PLIST STORAGE                                                06860000
+*---------------------------------------------------------------        06870000
+RU_FREE  DS    0H                                                       06880000
+         STM   R15,R0,RCRSN       SAVE RETURN/REASON CODES              06890000
+                                                                        06900000
+         $RETSTOR @XH,OWNER=IPCB  RELEASE RU STORAGE                    06910000
+                                                                        06920000
+         ICM   R15,15,RETCODE     GET RU PROCESS RETURN CODE            06930000
+         BNZ   PROCRC04           ERROR PROCESSING RU                   06940000
+                                                                        06950000
+*---------------------------------------------------------------        06960000
+*  FREE RU PLIST STORAGE                                                06970000
+*---------------------------------------------------------------        06980000
+         LA    R15,RC00           NORMAL COMPLETION                     06990000
+         LA    R15,RSN00          NOT NORMALLY DEFINED                  07000000
+         TM    RUEOPTNS,RUEOCONV  CONVERSATIONAL TRANSACTION?           07010000
+         BNO   PROCX              SKIP IF NOT                           07020000
+         L     R0,RSNCODE         REASON CODE CONVEYS TXP XMIT REQ      07030000
+         B     PROCX                                                    07040000
+                                                                        07050000
+PROCRC04 DS    0H                                                       07060000
+         LA    R15,RC04           TRANSACTION PROGRAM FAILED            07070000
+         L     R1,RETCODE         RETURN CODE                           07080000
+         L     R0,RSNCODE         REASON CODE                           07090000
+         B     PROCX                                                    07100000
+                                                                        07110000
+PROCRC08 DS    0H                                                       07120000
+         LA    R15,RC08           MISSING OR INVALID XACT ROUTINE       07130000
+         B     PROCX                                                    07140000
+                                                                        07150000
+PROCRC12 DS    0H                                                       07160000
+         LA    R15,RC12           INVALID RU STORAGE LENGTH             07170000
+         B     PROCX                                                    07180000
+                                                                        07190000
+PROCX    DS    0H                                                       07200000
+         LM    R2,R14,REGSAVE+8   RESTORE MAINLINE REGS                 07210000
+         LTR   R15,R15                                                  07220000
+         BR    R14                RETURN                                07230000
+                                                                        07240000
+         EJECT                                                          07250000
+****************************************************************        07260000
+*                                                                       07270000
+* ROUTINE:  RULOC - LOCATE RU ENTRY                                     07280000
+*                                                                       07290000
+* DESCRIPTION:                                                          07300000
+*                                                                       07310000
+*    THIS ROUTINE IS USED TO LOCATE THE FIRST RU DEFINITION             07320000
+*    ASSOCIATED WITH A FUNCTION AND SUBFUNCTION CODE PROVIDED           07330000
+*    BY THE CALLER.  AN RU ENTRY CONTAINING A SUBFUNCTION CODE          07340000
+*    OF ZERO MATCHES SUBFUNCTION CODE PROVIDED.                         07350000
+*                                                                       07360000
+* ON ENTRY:                                                             07370000
+*                                                                       07380000
+*    R1  - FUNCTION CODE                                                07390000
+*    R0  - SUBFUNCTION CODE                                             07400000
+*                                                                       07410000
+* ON EXIT:                                                              07420000
+*                                                                       07430000
+*    R15 CONTAINS ONE OF THE FOLLOWING RETURN CODES                     07440000
+*                                                                       07450000
+*        RC00 - MATCHING RU ENTRY RETURNED VIA R1                       07460000
+*                                                                       07470000
+*        RC04 - MATCHING RU ENTRY NOT FOUND                             07480000
+*                                                                       07490000
+****************************************************************        07500000
+RULOC    DS    0H                                                       07510000
+         STM   R0,R15,REGSAVE     SAVE MAINLINE REGS                    07520000
+         LA    R15,RC04           ASSUME ENTRY NOT VALID                07530000
+                                                                        07540000
+         L     R5,=V(IXRUTAB)     ADDR OF RU TABLE HEADER               07550000
+         USING RUHDR,R5           ADDRESSABILITY                        07560000
+         L     R6,RUHENT@         ADDR OF FIRST ENTRY                   07570000
+         USING RUENTRY,R6         ADDRESSABILITY                        07580000
+         ICM   R4,15,RUHENTC      COUNT OF ENTRIES                      07590000
+         BZ    RULOCRET           RU ENTRY NOT FOUND                    07600000
+                                                                        07610000
+*---------------------------------------------------------------        07620000
+*  SCAN RU TABLE ENTRIES TO LOCATE REQUEST RU ENTRY                     07630000
+*---------------------------------------------------------------        07640000
+RULOCNXT DS    0H                 LOCATE MATCHING FUNC/SFUNC            07650000
+         C     R1,RUEFUNC         FUNCTION CODE MATCH                   07660000
+         BNE   RULOCADV           NO, NEXT ENTRY                        07670000
+         ICM   R14,15,RUESFNC     SUBFUNCTION SPECIFIED?                07680000
+         BZ    RULOCHIT           NO,  ENTRY FOUND                      07690000
+         CR    R14,R0             SUBFUNC  CODE MATCH                   07700000
+         BE    RULOCHIT           YES, ENTRY FOUND                      07710000
+                                                                        07720000
+RULOCADV DS    0H                 ADVANCE TO NEXT CANDIDATE ENTRY       07730000
+         A     R6,RUHENTL         ADDR OF NEXT ENTRY                    07740000
+         BCT   R4,RULOCNXT        LOCATE RU ENTRY                       07750000
+         B     RULOCRET           NOT FOUND                             07760000
+                                                                        07770000
+RULOCHIT DS    0H                 MATCHING ENTRY LOCATED                07780000
+         LA    R1,RUENTRY         RETURN FIRST MATCHING ENTRY           07790000
+         LA    R15,RC00           INDICATE SUCCESS                      07800000
+         DROP  R5                 RUHDR                                 07810000
+                                                                        07820000
+*---------------------------------------------------------------        07830000
+*  RETURN TO CALLER                                                     07840000
+*---------------------------------------------------------------        07850000
+RULOCRET DS    0H                 RETURN TO REQUESTOR                   07860000
+         LM    R2,R14,REGSAVE+8   RESTORE MAINLINE REGS                 07870000
+         LTR   R15,R15            CC REFLECTS COMPLETION STATUS         07880000
+         BR    R14                RETURN                                07890000
+                                                                        07900000
+         EJECT                                                          07910000
+****************************************************************        07920000
+*                                                                       07930000
+*   RTN: ISSUEMSG - ISSUE DIAGNOSTIC MESSAGE                            07940000
+*                                                                       07950000
+*   ENTRY: R1 CONTAINS MESSAGE ID                                       07960000
+*                                                                       07970000
+****************************************************************        07980000
+ISSUEMSG DS    0H                                                       07990000
+         STM   R0,R15,REGSAVE     SAVE CALLER'S REGISTERS               08000000
+                                                                        08010000
+         LR    R2,R1              GET MESSAGE ID                        08020000
+         $MSG  (R2),FIELDS=($FUNC,$SUBFUNC,RETCODE,RSNCODE)             08030000
+                                                                        08040000
+         LM    R0,R15,REGSAVE     RESTORE CALLER'S REGISTERS            08050000
+         BR    R14                RETURN                                08060000
+                                                                        08070000
+         EJECT                                                          08080000
+****************************************************************        08090000
+*                                                                       08100000
+*  CONSTANTS AND LITERALS                                               08110000
+*                                                                       08120000
+****************************************************************        08130000
+$$NEWPCB DC    C'RUPROC'                                                08140000
+                                                                        08150000
+         LTORG ,                                                        08160000
+                                                                        08170000
+         PRINT NOGEN                                                    08180000
+         ICVT  ,                                                        08190000
+         ITASK ,                                                        08200000
+         IPCB  ,                                                        08210000
+         PRINT GEN                                                      08220000
+                                                                        08230000
+         END   ,                                                        08240000
