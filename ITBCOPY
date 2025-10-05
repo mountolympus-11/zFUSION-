@@ -1,0 +1,399 @@
+ITBCOPY  TITLE 'TABLE SERVICES - TABLE COPY ROUTINE'                    00010000
+***************************************************************         00020000
+*                                                                       00030000
+*   READ / WRITE WORKING STORAGE AREA                                   00040000
+*                                                                       00050000
+***************************************************************         00060000
+WORKAREA DSECT                                                          00070000
+                                                                        00080000
+         @WORK PLIST=(MFE_LIST,80)                                      00090000
+                                                                        00100000
+DFTBUFSZ EQU   128           ARBITRARY DEFAULT BUFFER SIZE FOR GET      00110000
+*                               WILL BE ADJUSTED IF NECESSARY ON A      00120000
+*                               GET FAILURE DUE TO LENGTH               00130000
+                                                                        00140000
+SRCTOKEN DS    F             SOURCE TABLE TOKEN                         00150000
+NEWTOKEN DS    F             TARGET TABLE TOKEN                         00160000
+                                                                        00170000
+@DESC    DS    A             ADDR OF TABLE DESCRIPTOR (COLDEF/KEYDEF)   00180000
+@DESCLN  DS    F             LENGTH OF TABLE DESCRIPTOR                 00190000
+                                                                        00200000
+#COLS    DS    F             NUMBER OF COLUMNS, SOURCE TABLE            00210000
+#KEYS    DS    F             NUMBER OF INDEXES, SOURCE TABLE            00220000
+                                                                        00230000
+COLARRAY DS    A             COLUMN ARRAY STORAGE POINTER               00240000
+COLALEN  DS    A             LENGTH OF COLUMN ARRAY                     00250000
+KEYARRAY DS    A             KEY ARRAY STORAGE POINTER                  00260000
+KEYALEN  DS    A             LENGTH OF KEY ARRAY                        00270000
+                                                                        00280000
+SRCROW   DS    A             ROW BUFFER FOR SOURCE RECORD               00290000
+SRCROWLN DS    F             ROW LENGTH                                 00300000
+NEWROW   DS    A             ROW FOR TARGET TABLE                       00310000
+NEWROWLN DS    F             ROW LENGTH OF RETRIEVED ROW                00320000
+                                                                        00330000
+RETREGS  DS    3F            R15-R1 PRESERVATION                        00340000
+NULL_IND DS    XL64          NULL INDICATOR MASK FOR 512 COLS           00350000
+                                                                        00360000
+WKPAGE   DS    0F            LOWER LEVEL TBL SERVICES CAN USE THE REST  00370000
+WORKLEN  EQU   *-WORKAREA                                               00380000
+                                                                        00390000
+         EJECT                                                          00400000
+         @TBCOPY             ITBCOPY INPUT PARM LIST                    00410000
+                                                                        00420000
+         EJECT                                                          00430000
+         TBSERVIS OPEN,DESC,CREATE,GET,ADD,CLOSE                        00440000
+                                                                        00450000
+         EJECT                                                          00460000
+         EQUS  LINKAGE=VCON                                             00470000
+                                                                        00480000
+         EJECT                                                          00490000
+**<DOC-ON>*****************************************************         00500000
+*                                                                       00510000
+* ROUTINE: ITBCOPY - COPY ONE TABLE TO ANOTHER NEW COPY                 00520000
+*                                                                       00530000
+*    THIS ROUTINE COPIES AN EXISTING TABLE TO ANOTHER. THEY MAY         00540000
+*    RESIDE IN DIFFERENT TABLE SPACES (SEE STOKEN1, STOKEN2             00550000
+*    PARAMETERS).  STANDARD TABLE SERVICES ARE USED TO PERFORM          00560000
+*    THE TABLE COPY.                                                    00570000
+*                                                                       00580000
+*    FUTURE ENHANCEMENT TO THIS ROUTINE IS TO CODE THE                  00590000
+*    EXTENSION AND REFORMAT SUB-ROUTINES (TBEXTEND AND TBREFORM         00600000
+*    RESPECTIVELY).  THESE WOULD ALLOW THE CALLER TO EXPAND OR          00610000
+*    MODIFY AN EXISTING TABLE. THE EXTENSION ROUTINE WILL ADD,          00620000
+*    MODIFY OR REMOVE TBCOLDEFS OR TBKEYDEFS FROM THE TABLE             00630000
+*    DESCRIPTION PRIOR TO A TBCREATE. THE REFORMAT ROUTINE WILL         00640000
+*    UPDATE THE ROWS OF THE OLD TABLE TO MATCH THE NEW                  00650000
+*    DESCRIPTION IMPOSED BY THE EXTENSION ROUTINE.                      00660000
+*                                                                       00670000
+*                                                                       00680000
+* ON ENTRY:                                                             00690000
+*                                                                       00700000
+*      R1 POINTS TO A PARAMETER LIST AS MAPPED BY DSEC TBCOPY.          00710000
+*         USE THE @TBCOPY MACRO TO EXPAND THE DSECT                     00720000
+*                                                                       00730000
+* ON EXIT:                                                              00740000
+*                                                                       00750000
+*      R15 CONTAINS A RETURN CODE                                       00760000
+*                                                                       00770000
+*          RC00 - SUCCESSFUL TABLE COPY                                 00780000
+*          RC08 - TABLE COPY FAILURE                                    00790000
+*                                                                       00800000
+*            R0 - REASON CODES ON FAILURE                               00810000
+*               4  - TABLE OPEN FAILE FOR THE OLD TABLE                 00820000
+*               8  - TBDESC FAILED FOR OLD TABLE                        00830000
+*               12 - THE EXTENSION ROUTINE FAILED (ADDING/MODIFYING     00840000
+*                        TBCOLDEFS OR TBKEYDEFS)                        00850000
+*               16 - TBCREATE FAILED FOR NEW TABLE                      00860000
+*               20 - REFORMAT ROUTINE FAILED (ROW MODIFICATION ROUTINE  00870000
+*                        FAILED)                                        00880000
+*               24 - TBADD FAILED                                       00890000
+*                                                                       00900000
+*          RC20 - INSUFFICIENT STORAGE AVAILABLE IN OBJECT SPACE        00910000
+*                                                                       00920000
+**<DOC-OFF>****************************************************         00930000
+                                                                        00940000
+         EJECT                                                          00950000
+ITBCOPY  @ENTER WORKA=(WORKAREA,WORKLEN),ASC=PRIMARY                    00960000
+                                                                        00970000
+         LR    R8,R1              RETAIN INPUT PARM ADDRESS             00980000
+         USING TBCOPY,R8          DECLARE INTENTIONS                    00990000
+                                                                        01000000
+*--------------------------------------------------------------         01010000
+*   COPYOPEN - TBOPEN THE SOURCE TABLE                                  01020000
+*--------------------------------------------------------------         01030000
+COPYOPEN DS    0H                                                       01040000
+         TBOPEN *TBYTABNM,        SOURCE TABLE NAME FROM PARMS         X01050000
+               STOKEN=*STOKEN1,   SPACE TOKEN FOR SOURCE TABLE         X01060000
+               TTOKEN=SRCTOKEN,   RETURN TABLE TOKEN HERE              X01070000
+               SHRPAGE=WKPAGE,    WORK AREA ADDRESS                    X01080000
+               MF=(E,MFE_LIST)                                          01090000
+                                                                        01100000
+         CH    R15,=AL2(RC16)     CRITICAL ERROR                        01110000
+         BNL   EXIT               DIRECT EXIT                           01120000
+         LTR   R15,R15            TABLE OPEN SUCCESSFUL?                01130000
+         BNZ   ERR_SRCT           NO - THEN PROCESS ERROR               01140000
+                                                                        01150000
+*--------------------------------------------------------------         01160000
+*   COPYDESC - ACQUIRE THE SOURCE TABLE DESCRIPTION                     01170000
+*--------------------------------------------------------------         01180000
+COPYDESC DS    0H                                                       01190000
+         TBDESC TTOKEN=SRCTOKEN,  SOURCE TABLE TOKEN                   X01200000
+               LINK=ACON,         RETURN ACON LIST (NOT OFFSET LINKS)  X01210000
+               SHRPAGE=WKPAGE,    WORK AREA ADDRESS                    X01220000
+               MF=(E,MFE_LIST)                                          01230000
+                                                                        01240000
+         CH    R15,=AL2(RC16)     CRITICAL ERROR                        01250000
+         BNL   EXIT               DIRECT EXIT                           01260000
+         LTR   R15,R15            TABLE DESCRIPTION ACQUIRED?           01270000
+         BNZ   ERR_SRCD           NO - THEN PROCESS ERROR               01280000
+                                                                        01290000
+         ST    R1,@DESC           TABLE DESCRIPTOR ADDRESS              01300000
+         ST    R0,@DESCLN         LENGTH OF DESCRIPTOR                  01310000
+                                                                        01320000
+         LR    R6,R1              TBFMT ADDRESS                         01330000
+         USING TBFMT,R6           DECLARE IT                            01340000
+                                                                        01350000
+*--------------------------------------------------------------         01360000
+*   COPYEXT  - CALL ROUTINE TO VALIDATE AND EXTEND THE DESCRIPTION      01370000
+*               IF REQUESTED                                            01380000
+*--------------------------------------------------------------         01390000
+COPYEXT  DS    0H                                                       01400000
+         L     R2,TBYNCOLS        GET COUNT OF TBCOLDEF ENTRIES         01410000
+         LTR   R2,R2              ARE THERE ANY?                        01420000
+         BNZ   CALLEXT            YES - SO NEED EXTENSION VALIDATION    01430000
+         L     R2,TBYNKEYS        IF NO COLDEF GET KEYDEF COUNT         01440000
+         LTR   R2,R2              ARE THERE ANY?                        01450000
+         BZ    COPYCRE8           NO - GO CREATE NEW TABLE              01460000
+                                                                        01470000
+CALLEXT  DS    0H                                                       01480000
+         BAS   R14,TBEXTEND       GO PROCESS EXTENSION REQUEST          01490000
+                                                                        01500000
+         LTR   15,R15             EXTNESION PROCESS OK?                 01510000
+         BNZ   ERR_EXT            NO - THEN PROCESS ERROR               01520000
+                                                                        01530000
+         ST    R1,@DESC           SAVE NEW DESCRIPTOR ADDRESS           01540000
+         ST    R0,@DESCLN         SAVE NEW DESCRIPTOR LENGTH            01550000
+         LR    R6,R1              TBFMT ADDRESS                         01560000
+                                                                        01570000
+*--------------------------------------------------------------         01580000
+*   COPYCRE8 - TBCREATE NEW TABLE                                       01590000
+*--------------------------------------------------------------         01600000
+COPYCRE8 DS    0H                                                       01610000
+         L     R1,@DESC           GET TBFMT BLOCK ADDRESS               01620000
+         BAS   R14,SETARRAY       GO BUILD COL AND KEY DEF ARRAYS       01630000
+                                                                        01640000
+         XC    FWORD,FWORD        CLEAR OUT THE WORK OPTION AREA        01650000
+         MVI   FWORD,TBT$REP      REPLACE LIKE NAMED TABLE              01660000
+                                                                        01670000
+         MVC   #COLS+2(2),TBF#COLS                                      01680000
+         MVC   #KEYS+2(2),TBF#KEYS                                      01690000
+                                                                        01700000
+         TBCREATE *TBYNEWNM,      TARGET TABLE NAME FROM INPUT PARMS   X01710000
+               COLLST=*COLARRAY,  TBCOLDEF LIST          (TBDESC/EXT)  X01720000
+               COLCNT=*#COLS,     TBCOLDEF COUNT         (TBDESC/EXT)  X01730000
+               DESC=*TBYDESC,     TARGET TABLE DESCRIPTOR STRING       X01740000
+               DESCLN=*TBYDESCL,  TARGET TABLE DESCRIPTOR LENGTH       X01750000
+               KEYLST=*KEYARRAY,  TBKEYDEF LIST          (TBDESC/EXT)  X01760000
+               KEYCNT=*#KEYS,     TBKEYDEF COUNT         (TBDESC/EXT)  X01770000
+               OPTBYTE=*FWORD,                                         X01780000
+               SHRPAGE=WKPAGE,    WORK AREA ADDRESS                    X01790000
+               STOKEN=*STOKEN2,   SPACE TOKEN FOR NEW TABLE            X01800000
+               TTOKEN=NEWTOKEN,   RETURN TARGET TABLE TOKEN HERE       X01810000
+               MF=(E,MFE_LIST)                                          01820000
+                                                                        01830000
+         CH    R15,=AL2(RC16)     CRITICAL ERROR                        01840000
+         BNL   EXIT               DIRECT EXIT                           01850000
+         LTR   R15,R15            NEW TABLE CREATED ALRIGHT?            01860000
+         BNZ   ERR_CRE8           NO - THEN PROCESS THE ERROR           01870000
+                                                                        01880000
+*--------------------------------------------------------------         01890000
+*   COPYCOPY - BEGIN READ/WRITE LOOP FOR COPYING THE TABLE              01900000
+*--------------------------------------------------------------         01910000
+                                                                        01920000
+         LA    R2,DFTBUFSZ        PRIME THE BUFFER LENGTH               01930000
+         $GETSTOR (R2)            AND GET THE FIRST ONE                 01940000
+         ST    R1,SRCROW          RETAIN THE ADDRESS FOR FUTUTRE GETS   01950000
+         ST    R2,SRCROWLN        RETAIN THE LENGTH FOR FUTUTRE GETS    01960000
+                                                                        01970000
+COPYCOPY DS    0H                                                       01980000
+         TBGET *SRCROW,           RETURN ROW HERE                      X01990000
+               LENGTH=*SRCROWLN,  LENGTH OF BUFFER FOR GET             X02000000
+               TTOKEN=SRCTOKEN,   SOURCE TABLE TOKEN                   X02010000
+               POS=NEXT,          GET NEXT OPERATION                   X02020000
+               INDEX=0,           NO INDEXING - SEQUENTIAL READS       X02030000
+               SARGS=0,           NO SEARCH CRITERIA TO BE APPLIED     X02040000
+               NULLMASK=NULL_IND, NULL INDICATOR ARRAY                 X02050000
+               SHRPAGE=WKPAGE,    WORK AREA ADDRESS                    X02060000
+               MF=(E,MFE_LIST)                                          02070000
+                                                                        02080000
+         CH    R15,=AL2(RC16)     CRITICAL ERROR                        02090000
+         BNL   EXIT               DIRECT EXIT                           02100000
+         C     R15,=F'4'          GET SUCCESSFUL?                       02110000
+         BH    ERR_REF            NO - THEN PROCESS ERROR               02120000
+         BE    COPYEOF            GO SEE IF IT IS EOF                   02130000
+                                                                        02140000
+         MVC   NEWROW,SRCROW      ROW ADDRESSES ARE THE SAME FOR NOW    02150000
+         ST    R1,NEWROWLN        SAVE LENGTH OF THIS ROW               02160000
+         B     COPYREF            GO REFORMAT IF NECESSARY              02170000
+                                                                        02180000
+COPYEOF  DS    0H                                                       02190000
+         LTR   R0,R0              IS IT ENDOF FILE?                     02200000
+         BZ    COPYCLOS           YES - GO CLOSE THE TABLES             02210000
+         LR    R2,R0              GET NECESSARY LENGTH                  02220000
+         $RETSTOR *SRCROW         FREE THE SMALL BUFFER                 02230000
+                                                                        02240000
+         $GETSTOR (R2)            AND GET A BIGGER ONE                  02250000
+         ST    R1,SRCROW          RETAIN THE ADDRESS FOR FUTUTRE GETS   02260000
+         ST    R2,SRCROWLN        RETAIN THE LENGTH FOR FUTUTRE GETS    02270000
+         B     COPYCOPY           NOW GO TRY THE GET                    02280000
+                                                                        02290000
+*--------------------------------------------------------------         02300000
+*   COPYREF  - IF AN EXTEND OR TABLE UPDATE THE ROW MAY NEED            02310000
+*                TO BE REFORMATTED INTO THE NEW ROW                     02320000
+*--------------------------------------------------------------         02330000
+COPYREF  DS    0H                                                       02340000
+         B     COPYADD            TIME SAVER FOR NOW, NEED TEST FOR     02350000
+*?????                              IF A REFORMAT IS NEEDED OR NOT      02360000
+         BAS   R14,TBREFORM       REFORMAT THE NEW ROW AS DESIRED       02370000
+                                                                        02380000
+         LTR   R15,R15            REFORMAT COMPLETED SUCCESSFUL?        02390000
+         BNZ   ERR_REF            NO - THEN PROCESS ERROR               02400000
+                                                                        02410000
+*--------------------------------------------------------------         02420000
+*   COPYADD - ADD A ROW TO THE NEW TABLE                                02430000
+*--------------------------------------------------------------         02440000
+COPYADD  DS    0H                                                       02450000
+         TBADD *NEWROW,           ROW TO BE ADDED TO TARGET TABLE      X02460000
+               TTOKEN=NEWTOKEN,   TARGET TABLE TOKEN                   X02470000
+               SHRPAGE=WKPAGE,                                         X02480000
+               POS=LAST,          ADD ROW AT END OF TARGET TABLE       X02490000
+               NULLMASK=NULL_IND, NULL INDICATOR ARRAY                 X02500000
+               MF=(E,MFE_LIST)                                          02510000
+                                                                        02520000
+         CH    R15,=AL2(RC16)     CRITICAL ERROR                        02530000
+         BNL   EXIT               DIRECT EXIT                           02540000
+         LTR   R15,R15            ADD SUCCESSFULE?                      02550000
+         BNZ   ERR_ADD            NO -THEN PROCESS ERROR                02560000
+                                                                        02570000
+         B     COPYCOPY           COPY ALL ROWS                         02580000
+                                                                        02590000
+*--------------------------------------------------------------         02600000
+*   COPYCLOS - CLOSE THE TWO TABLES                                     02610000
+*--------------------------------------------------------------         02620000
+COPYCLOS DS    0H                                                       02630000
+                                                                        02640000
+         TBCLOSE TTOKEN=SRCTOKEN,                                      X02650000
+               SHRPAGE=WKPAGE,                                         X02660000
+               MF=(E,MFE_LIST)                                          02670000
+         CH    R15,=AL2(RC16)     CRITICAL ERROR                        02680000
+         BNL   EXIT               DIRECT EXIT                           02690000
+                                                                        02700000
+         TBCLOSE TTOKEN=NEWTOKEN,                                      X02710000
+               SHRPAGE=WKPAGE,                                         X02720000
+               MF=(E,MFE_LIST)                                          02730000
+         CH    R15,=AL2(RC16)     CRITICAL ERROR                        02740000
+         BNL   EXIT               DIRECT EXIT                           02750000
+                                                                        02760000
+*--------------------------------------------------------------         02770000
+* COPYEND - TABLE COPY IS COMPLETED                                     02780000
+*--------------------------------------------------------------         02790000
+         SR    R15,R15            CLEAR RETURN REGISTER                 02800000
+         B     EXIT               GO GET OUT OF HERE                    02810000
+         DROP  R6                                                       02820000
+                                                                        02830000
+*--------------------------------------------------------------         02840000
+*   RETURN TO REQUESTOR                                                 02850000
+*--------------------------------------------------------------         02860000
+EXIT     DS    0H                                                       02870000
+         STM   R15,R1,RETREGS     REGS FOR RETURN                       02880000
+         ICM   R2,15,COLARRAY     ANY COLUMN ARRAY?                     02890000
+         BZ    EXITKEY            NO - GO CHECK KEY ARRAY               02900000
+         $RETSTOR (R2)                                                  02910000
+                                                                        02920000
+EXITKEY  ICM   R2,15,KEYARRAY     ANY KEY ARRAY?                        02930000
+         BZ    EXITROW            NO - GO CHECK ROW                     02940000
+         $RETSTOR (R2)                                                  02950000
+                                                                        02960000
+EXITROW  ICM   R2,15,SRCROW       ANY NEW ROW STORAGE?                  02970000
+         BZ    EXITFIN            NO - THEN CLEAR OUT                   02980000
+         $RETSTOR (R2)                                                  02990000
+                                                                        03000000
+EXITFIN  NOP   0                  RETURN                                03010000
+         LM    R15,R1,RETREGS     RESTORE RETURN REGS                   03020000
+         @EXIT ,                                                        03030000
+                                                                        03040000
+         EJECT ,                                                        03050000
+*--------------------------------------------------------------         03060000
+*   ERROR PROCESSING ROUTINES                                           03070000
+*--------------------------------------------------------------         03080000
+ERR_SRCT DS    0H                                                       03090000
+         LA    R0,RSN04           TABLE OPEN FAILED                     03100000
+         B     ERR_ERR                                                  03110000
+                                                                        03120000
+ERR_SRCD DS    0H                                                       03130000
+         LA    R0,RSN08           FAILED TO ACQUIRE TABLE DESCRIPTION   03140000
+         B     ERR_ERR                                                  03150000
+                                                                        03160000
+ERR_EXT  DS    0H                                                       03170000
+         LA    R0,RSN12           TABLE EXTENSION ROUTINE FAILED        03180000
+         B     ERR_ERR                                                  03190000
+                                                                        03200000
+ERR_CRE8 DS    0H                                                       03210000
+         LA    R0,RSN16           NEW TABLE CREATE FAILED               03220000
+         B     ERR_ERR                                                  03230000
+                                                                        03240000
+ERR_REF  DS    0H                                                       03250000
+         LA    R0,RSN20           REFORMAT ROUTINE FAILED               03260000
+         B     ERR_ERR                                                  03270000
+                                                                        03280000
+ERR_ADD  DS    0H                                                       03290000
+         LA    R0,RSN24           TBADD FAILED TO ADD A ROW             03300000
+                                                                        03310000
+ERR_ERR  DS    0H                                                       03320000
+         LA    R15,RC08                                                 03330000
+         B     EXIT                                                     03340000
+                                                                        03350000
+ERR_STG  DS    0H                 STORAGE NOT AVAILABLE IN OBJ SPACE    03360000
+         LA    R15,RC20           STD RETCODE, MORE OR LESS             03370000
+         B     EXIT               DONE                                  03380000
+                                                                        03390000
+*--------------------------------------------------------------         03400000
+*    ROUTINE STUBS FOR BETTER STUFF LATER                               03410000
+*--------------------------------------------------------------         03420000
+TBEXTEND DS    0H                                                       03430000
+TBREFORM DS    0H                                                       03440000
+         SR    R15,R15                                                  03450000
+         BR    R14                                                      03460000
+                                                                        03470000
+         EJECT  ,                                                       03480000
+***************************************************************         03490000
+*                                                                       03500000
+* ROUTINE: SET ARRAY - BUILD POINTER ARRAYS FOR TBCOLDEFS AND           03510000
+*           TBKEYDEFS RETURNED BY TBDESC                                03520000
+*                                                                       03530000
+***************************************************************         03540000
+SETARRAY DS    0H                                                       03550000
+         BAKR  R14,0                                                    03560000
+         LR    R6,R1              GET TBFMT ADDRESS                     03570000
+         USING TBFMT,R6           ADDRESS IT                            03580000
+                                                                        03590000
+         LH    R4,TBF#COLS        NUMBER OF TBCOLDEFS IN LIST           03600000
+         LR    R3,R4              NUMBER OF TBCOLDEFS IN LIST           03610000
+         SLL   R3,2               ENTRIES IN ARRAY * 4 IS STRG NEEDED   03620000
+         $GETSTOR (R3)            GET REQUIRED STORAGE FOR ARRAY        03630000
+         ST    R1,COLARRAY        SAVE IT                               03640000
+         ST    R3,COLALEN         AND THE LENGTH                        03650000
+                                                                        03660000
+         L     R2,TBFCOFF         FIRST TBCOLDEF IN LIST                03670000
+         USING TBCOLDEF,R2        ADDRESS IT                            03680000
+                                                                        03690000
+SETCOL   DS    0H                                                       03700000
+         ST    R2,0(,R1)          PLACE COLDEF POINTER IN ARRAY         03710000
+         LA    R2,TBCOLDFL(,R2)   GET NEXT TBCOLDEF                     03720000
+         LA    R1,4(,R1)          NEXT ARRAY ENTRY                      03730000
+         BCT   R4,SETCOL          GET THEM ALL                          03740000
+         DROP  R2                                                       03750000
+                                                                        03760000
+         LH    R4,TBF#KEYS        NUMBER OF TBKEYDEFS IN LIST           03770000
+         LR    R3,R4              NUMBER OF TBKEYDEFS IN LIST           03780000
+         SLL   R3,2               ENTRIES IN ARRAY * 4 IS STRG NEEDED   03790000
+         $GETSTOR (R3)            GET REQUIRED STORAGE FOR ARRAY        03800000
+         ST    R1,KEYARRAY        SAVE IT                               03810000
+         ST    R3,KEYALEN         AND THE LENGTH                        03820000
+                                                                        03830000
+         L     R2,TBFKOFF         FIRST TBKEYDEF IN LIST                03840000
+         USING TBKEYDEF,R2        ADDRESS IT                            03850000
+                                                                        03860000
+SETKEY   DS    0H                                                       03870000
+         ST    R2,0(,R1)          PLACE KEYDEF POINTER IN ARRAY         03880000
+         LH    R3,TBKCOUNT        GET NUMBER OF COLS IN PREV KEYDEF     03890000
+         SLL   R3,2               FULWORD FOR EACH                      03900000
+         LA    R2,TBKEYDFL(R3,R2) GET NEXT TBKEYDEF                     03910000
+         LA    R1,4(,R1)          NEXT ARRAY ENTRY                      03920000
+         BCT   R4,SETKEY          GET THEM ALL                          03930000
+                                                                        03940000
+         PR  ,                                                          03950000
+                                                                        03960000
+         EJECT  ,                                                       03970000
+         LTORG ,                                                        03980000
+         END   ,                                                        03990000

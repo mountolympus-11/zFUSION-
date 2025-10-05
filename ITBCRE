@@ -1,0 +1,1510 @@
+ITBCRE   TITLE 'TABLE SERVICES - TABLE CREATE'                          00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE:  ITBCRE - Table services, table create                       00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*                                                                       00080000
+*                                                                       00090000
+* ON ENTRY:                                                             00100000
+*                                                                       00110000
+*    R1  contains the address of a parameter block desribed by          00120000
+*        the @TBTABDF mapping macro                                     00130000
+*                                                                       00140000
+*                                                                       00150000
+* ON EXIT:                                                              00160000
+*                                                                       00170000
+*    R15 contains one of the following return codes                     00180000
+*    R0  may contain an associated reason code                          00190000
+*                                                                       00200000
+*        RC00 - request complete, table token returned                  00210000
+*                                                                       00220000
+*               R1 - zero, the current number of table rows             00230000
+*               R0 - number of table columns                            00240000
+*                                                                       00250000
+*        RC04 - reserved                                                00260000
+*                                                                       00270000
+*        RC08 - environmental error                                     00280000
+*                                                                       00290000
+*               RSN04 - primary storage not available                   00300000
+*                                                                       00310000
+*        RC12 - request in error                                        00320000
+*                                                                       00330000
+*               RSN00 - invalid SPACE or OBJECT token provided          00340000
+*                       or no table token return area supplied          00350000
+*                                                                       00360000
+*               RSN04 - improper column list designation                00370000
+*               RSN08 - invalid column definition             (ref R1)  00380000
+*               RSN12 - improper key list designation                   00390000
+*               RSN16 - invalid key definition                (ref R1)  00400000
+*               RSN20 - duplicate column (name) definition    (ref R1)  00410000
+*               RSN24 - invalid table name                              00420000
+*               RSN28 - key does not reference a valid column           00430000
+*               RSN32 - duplicate key or index name           (ref R1)  00440000
+*               RSN36 - reserved                                        00450000
+*               RSN40 - field overlap occurs in source row              00460000
+*                                                                       00470000
+*        RC16 - error encountered by object manager                     00480000
+*                                                                       00490000
+*        RC20 - storage management error                                00500000
+*                                                                       00510000
+**<DOC-OFF>****************************************************         00520000
+                                                                        00530000
+         EJECT                                                          00540000
+***************************************************************         00550000
+*                                                                       00560000
+* MAINTENANCE:                                                          00570000
+*                                                                       00580000
+*    05/xx/92 R. Turgeon                                                00590000
+*             Initial version                                           00600000
+*                                                                       00610000
+*    03/20/95 R. Turgeon                                                00620000
+*             Maintain index entry count in LOCINUSE                    00630000
+*                                                                       00640000
+*    10/23/95 R. Turgeon                                                00650000
+*             Implement the NOLOCATOR property                          00660000
+*                                                                       00670000
+*    11/07/95 R. Turgeon                                                00680000
+*             LINKAGE=DIRECT on $OBJECT STORAGE calls                   00690000
+*                                                                       00700000
+***************************************************************         00710000
+                                                                        00720000
+         EJECT                                                          00730000
+***************************************************************         00740000
+*                                                                       00750000
+*   Working storage area                                                00760000
+*                                                                       00770000
+***************************************************************         00780000
+                                                                        00790000
+WORKAREA DSECT                                                          00800000
+                                                                        00810000
+         @WORK ,                  STANDARD WORKAREA                     00820000
+                                                                        00830000
+OPTIONS  DS    X                  TBCREATE OPTIONS BYTE                 00840000
+                                                                        00850000
+COLNDXRF DS    F                  # COLS REFERENCED BY ALL INDECIES     00860000
+TABTOKEN DS    A                  ADDRESS OF TABLE TOKEN                00870000
+BASEADDR DS    A                  UNQUALIFIED BASE ADDRESS OF OBJECT    00880000
+COLS     DS    F                  CURRENT COLUMN NUMBER / TOTAL COLS    00890000
+KEYS     DS    F                  CURRENT KEY NUMBER / TOTAL KEYS       00900000
+DISPL    DS    F                  COLUMN DISPLACEMENT IN TABLE ROW      00910000
+LASTCOL  DS    A                  ADDR OF LAST COLUMN ENTRY             00920000
+LASTKEY  DS    A                  ADDR OF LAST COLKEY ENTRY             00930000
+FREESPC  DS    A                  TABLE OBJECT FREE SPACE PTR           00940000
+SRCDISPL DS    F                  NON-ZERO IF SOURCE ROW INCLUDES DSPLS 00950000
+                                                                        00960000
+TABNAMLN DS    F                  LENGTH OF TABLE NAME                  00970000
+LOCNAMLN DS    F                  LENGTH OF LOCATOR ARRAY NAME          00980000
+NDXNAMLN DS    F                  LENGTH OF INDEX ARRAY PREFIX          00990000
+TSIZEEST DS    F                  ROUNDED TABLE SIZE ESTIMATE           01000000
+TSIZEOVH DS    F                  OVERHEAD FOR TABLE CONTROL INFO       01010000
+ALUSIZE  DS    F                  SIZE OF A SPACE MANAGER ALU           01020000
+                                                                        01030000
+LINKREGS DS    4F                 R14-R1 WHEN CONVENIENT                01040000
+                                                                        01050000
+TABOBJNM DS    CL32               PADDED TABLE NAME (SOURCE IS CL16)    01060000
+LOCOBJNM DS    CL32               PADDED LOCATOR ARRAY NAME             01070000
+NDXOBJNM DS    CL32               PADDED INDEX NAME                     01080000
+                                                                        01090000
+OBJTOKEN $TOKEN TYPE=BLOCK        OBJECT TOKEN RETURN AREA              01100000
+                                                                        01110000
+WORKFREE DS    0D                 AVAILABLE TO SERVICE ROUTINES         01120000
+WORKLEN  EQU   *-WORKAREA         LENGTH OF WORKAREA                    01130000
+                                                                        01140000
+         EJECT                                                          01150000
+         $TOKEN ,                 OBJECT SPACE TOKEN                    01160000
+                                                                        01170000
+         EJECT                                                          01180000
+         TBTOKEN ,                TABLE TOKEN                           01190000
+                                                                        01200000
+         EJECT                                                          01210000
+         $STG TYPE=DSECT          FREE STORAGE MGMT                     01220000
+                                                                        01230000
+         EJECT                                                          01240000
+         @TABLE ,                 TABLE OBJECT PREFIX                   01250000
+                                                                        01260000
+         EJECT                                                          01270000
+         @TBSET ,                 ROW POSITION CODES                    01280000
+                                                                        01290000
+         EJECT                                                          01300000
+         @TBTABDF ,               TABLE DEFINITION                      01310000
+                                                                        01320000
+         EJECT                                                          01330000
+         @TBCOLDF ,               COLUMN DEFINITION                     01340000
+                                                                        01350000
+         EJECT                                                          01360000
+         @TBKEYDF ,               INDEX DEFINITION                      01370000
+                                                                        01380000
+         EJECT                                                          01390000
+         COLHDR ,                 COLUMN DEFINITION HEADER / LINKAGE    01400000
+                                                                        01410000
+         EJECT                                                          01420000
+         LOCATOR ,                RECORD LOCATOR ARRAY FORMAT           01430000
+                                                                        01440000
+         EJECT                                                          01450000
+         INDEX ,                  INDEX ENTRY FORMAT                    01460000
+                                                                        01470000
+         EJECT                                                          01480000
+         DICPARMS ,               DATA DICTIONARY INTERFACE PARMS       01490000
+                                                                        01500000
+         EJECT                                                          01510000
+         TBEQUS ,                 TABLE SERVICES CONSTANTS              01520000
+                                                                        01530000
+         EJECT                                                          01540000
+         EQUS  LINKAGE=VCON                                             01550000
+                                                                        01560000
+         EJECT                                                          01570000
+ITBCRE   @ENTER WORKA=(WORKAREA,WORKLEN),ASC=PRIMARY                    01580000
+                                                                        01590000
+***************************************************************         01600000
+*                                                                       01610000
+*   Fetch and validate passed parameters                                01620000
+*                                                                       01630000
+***************************************************************         01640000
+                                                                        01650000
+         LAM   R1,R8,MFE_LIST     PRIMARY SPACE ADDRESSING              01660000
+                                                                        01670000
+         LR    R7,R1              PARAMETER LIST                        01680000
+         USING TBTABDEF,R7        COARSE VALIDATIONS                    01690000
+         ICM   R0,15,TBTSPCTK     OBJECT SPACE TOKEN                    01700000
+         BZ    ETOKENS                                                  01710000
+         ICM   R0,15,TBTABLTK     TOKEN RETURN AREA                     01720000
+         BZ    ETOKENS                                                  01730000
+                                                                        01740000
+*--------------------------------------------------------------         01750000
+*   Make local copy of options flags                                    01760000
+*--------------------------------------------------------------         01770000
+                                                                        01780000
+         LA    R3,TBTOPTA+3       OPTIONS BYTE MAY BE INLINE OR REMOTE  01790000
+         ICM   R4,15,TBTOPTA      FETCH BYTE OR BYTE POINTER            01800000
+         BZ    INITOPTS           REPLACE NOT SPECIFIED                 01810000
+         CL    R4,=A(X'FF')       OPTION BYTE ADDRESS PASSED?           01820000
+         BNH   *+6                NO, PASSED THE ACTUAL BYTE - SKIP     01830000
+         LR    R3,R4              ADDRESS THE BYTE                      01840000
+         MVC   OPTIONS,0(R3)      EXTRACT TBCREATE OPTION FLAGS         01850000
+                                                                        01860000
+INITOPTS DS    0H                                                       01870000
+                                                                        01880000
+*--------------------------------------------------------------         01890000
+*   Acquire allocation unit size, basis for new object sizes            01900000
+*--------------------------------------------------------------         01910000
+                                                                        01920000
+         $SPACE ALUSIZE,          ACQUIRE SIZE OF $SPACE ALU           X01930000
+               TOKEN=*TBTSPCTK,   DERIVE FROM SPACE TOKEN              X01940000
+               SHRPAGE=WORKFREE,  WORKAREA                             X01950000
+               MF=(E,MFE_LIST)                                          01960000
+                                                                        01970000
+         ST    R1,ALUSIZE         RETAIN ALU SIZE IN BYTES              01980000
+                                                                        01990000
+*--------------------------------------------------------------         02000000
+*   Construct object names for table, locator array, and index          02010000
+*--------------------------------------------------------------         02020000
+                                                                        02030000
+         MVI   NDXOBJNM,C' '      PREPARE PADDED OBJECT NAME            02040000
+         MVC   NDXOBJNM+1(L'NDXOBJNM-1),NDXOBJNM                        02050000
+         MVC   LOCOBJNM,NDXOBJNM                                        02060000
+         MVC   TABOBJNM,NDXOBJNM                                        02070000
+                                                                        02080000
+         L     R2,TBTNAME         TABLE NAME ADDRESS                    02090000
+         @TRIM (R2),16,CHAR=C' '  TRUE LENGTH OF TABLE EXTERNAL NAME    02100000
+         LTR   R1,R1              VALID NAME PROVIDED                   02110000
+         BNP   ETABNAME           ERROR IF NOT                          02120000
+         ST    R1,TABNAMLN        SAVE TRUE NAME LENGTH                 02130000
+         BCTR  R1,0               PREPARE FOR EX COPY                   02140000
+         EX    R1,*+4             COPY                                  02150000
+         MVC   TABOBJNM(*-*),0(R2)                                      02160000
+                                                                        02170000
+         MVC   LOCOBJNM(L'TABOBJNM),TABOBJNM                            02180000
+         LA    R2,LOCOBJNM+1(R1)                                        02190000
+         MVC   0(L'LOCSUFX,R2),LOCSUFX                                  02200000
+         LA    R0,L'LOCSUFX+1(,R1)                                      02210000
+         ST    R0,LOCNAMLN                                              02220000
+                                                                        02230000
+         MVC   NDXOBJNM(L'TABOBJNM),TABOBJNM                            02240000
+         LA    R2,NDXOBJNM+1(R1)                                        02250000
+         MVC   0(L'NDXSUFX,R2),NDXSUFX                                  02260000
+         LA    R0,L'NDXSUFX+1(,R1)                                      02270000
+         ST    R0,NDXNAMLN                                              02280000
+                                                                        02290000
+*--------------------------------------------------------------         02300000
+*   Validate column definitions                                         02310000
+*--------------------------------------------------------------         02320000
+                                                                        02330000
+         ICM   R2,15,TBT#COLS     NUMBER OF COLUMNS DEFINED             02340000
+         BNP   ECOLPRM            TABLE MUST HAVE COLUMNS               02350000
+         ICM   R3,15,TBTCOLST     LOCATE COLUMN PTR VECTOR              02360000
+         BZ    ECOLPRM            INVALID REQUEST STRUCTURE             02370000
+         SR    R4,R4              INITIALIZE COLUMN NUMBER              02380000
+                                                                        02390000
+COLVAL   DS    0H                 VALIDATE NEXT COLUMN DEFINITION       02400000
+         LA    R4,1(,R4)          COLUMN NUMBLER FOR ERROR MSGS         02410000
+         L     R1,0(,R3)          R1 <== COLUMN DEFINITION              02420000
+         BAS   R14,VALCOLDF       PERFORM VALIDATION                    02430000
+         LR    R1,R4              PRESENT COLUMN NUMBER TO ERROR RTN    02440000
+         LTR   R15,R15            TEST RESULTS                          02450000
+         BNZ   ECOLDEF            INVALID COLUMN                        02460000
+         LA    R3,4(,R3)          ADVANCE TO NEXT COLUMN                02470000
+         BCT   R2,COLVAL          AND VALIDATE                          02480000
+                                                                        02490000
+*--------------------------------------------------------------         02500000
+*   Validate column key definitions                                     02510000
+*--------------------------------------------------------------         02520000
+                                                                        02530000
+         ICM   R2,15,TBT#KEYS     NUMBER OF COLKEYS DEFINED             02540000
+         BNP   NOKEYS             MAYBE ZERO                            02550000
+         ICM   R3,15,TBTKYLST     LOCATE COLKEY PTR VECTOR              02560000
+         BZ    EKEYPRM            INVALID REQUEST STRUCTURE             02570000
+         SR    R4,R4              INITIALIZE COLKEY NUMBER              02580000
+         SR    R5,R5              TOTAL NUMBER OF COLUMN REFERENCES     02590000
+                                                                        02600000
+KEYVAL   DS    0H                 VALIDATE NEXT COLKEY DEFINITION       02610000
+         LA    R4,1(,R4)          COLKEY NUMBLER FOR ERROR MSGS         02620000
+         L     R1,0(,R3)          R1 <== COLKEY DEFINITION              02630000
+         BAS   R14,VALKEYDF       PERFORM VALIDATION                    02640000
+         LR    R1,R4              PRESENT COLKEY NUMBER TO ERROR RTN    02650000
+         LTR   R15,R15            TEST RESULTS                          02660000
+         BNZ   EKEYDEF            INVALID COLKEY                        02670000
+         AR    R5,R0              ACCUMULATE TOTAL COLUMN REFERENCES    02680000
+         LA    R3,4(,R3)          ADVANCE TO NEXT COLKEY                02690000
+         BCT   R2,KEYVAL          AND VALIDATE                          02700000
+         ST    R5,COLNDXRF        NUMBER OF COLUMNS REFERENCED BY NDXS  02710000
+                                                                        02720000
+NOKEYS   DS    0H                                                       02730000
+                                                                        02740000
+*--------------------------------------------------------------         02750000
+*   If REPLACE opt is specified, delete any like named objects          02760000
+*--------------------------------------------------------------         02770000
+                                                                        02780000
+         TM    OPTIONS,TBT$REP    TABLE REPLACE?                        02790000
+         BNO   NOREPL             SKIP OBJECT DELETES IF NOT            02800000
+                                                                        02810000
+         LA    R1,TABOBJNM        IDENTIFY TABLE OBJECT                 02820000
+         BAS   R14,OBJLANDK       LOCATE AND DESTROY                    02830000
+         CH    R15,=H'4'          TEST RESULTS                          02840000
+         BL    DELLOC             BASE OBJECT FOUND AND DELETED         02850000
+         BE    NOREPL             ODD, BUT ONWARD                       02860000
+         BH    EOBJSRV            OBJECT NOT FOUND, DONE                02870000
+                                                                        02880000
+DELLOC   DS    0H                                                       02890000
+         LA    R1,LOCOBJNM        IDENTIFY ROW (SLOT) LOCATOR           02900000
+         BAS   R14,OBJLANDK       LOCATE AND DESTROY                    02910000
+         CH    R15,=H'4'          TEST RESULTS                          02920000
+         BL    DELINDEX           LOCATOR FOUND AND DELETED             02930000
+         BE    DELINDEX           LOCATOR NOT FOUND, ASSUME _NOLOCATOR  02940000
+         BH    EOBJSRV            OBJECT NOT FOUND, DONE                02950000
+                                                                        02960000
+*--------------------------------------------------------------         02970000
+*   Loop through all valid index names until one is not found           02980000
+*--------------------------------------------------------------         02990000
+                                                                        03000000
+DELINDEX DS    0H                                                       03010000
+         SR    R4,R4              NUMBER OF INDEX OBJECTS IS UNKNOWN    03020000
+                                                                        03030000
+DELNDX   DS    0H                 DELETE NEXT INDEX OBJECT              03040000
+         LA    R4,1(,R4)          INDEX COUNTER                         03050000
+         LR    R1,R4              CONVERSION PARM                       03060000
+         BAS   R14,SMALLDEC       CONVERT SMALL DECIMAL NUMBER          03070000
+         L     R2,NDXNAMLN        LENGTH OF NDX NAME PREFIX             03080000
+         LA    R2,NDXOBJNM(R2)    INSERTION LOCATION                    03090000
+         MVC   0(2,R2),2(R1)      TWO DIGIT SUFFIX                      03100000
+                                                                        03110000
+         LA    R1,NDXOBJNM        INDENTIFY INDEX OBJECT                03120000
+         BAS   R14,OBJLANDK       LOCATE AND DESTROY                    03130000
+         CH    R15,=H'4'          TEST RESULTS                          03140000
+         BL    DELNDX             INDEX FOUND AND DELETED               03150000
+         BH    EOBJSRV            ERROR                                 03160000
+                                                                        03170000
+NOREPL   DS    0H                                                       03180000
+                                                                        03190000
+*--------------------------------------------------------------         03200000
+*   Construct a table token                                             03210000
+*--------------------------------------------------------------         03220000
+                                                                        03230000
+         ICM   R2,15,TBT#KEYS     NUMBER OF COLKEYS                     03240000
+         BZ    *+8                NONE REQUIRED                         03250000
+         MH    R2,=AL2($TOKLN)    TABLE TOKEN EXPANSION RQMT            03260000
+         AH    R2,=AL2(TTOKBASE)  FIXED TOKEN LENGTH                    03270000
+                                                                        03280000
+         $STORAGE OBTAIN,LENGTH=(R2),COND=YES,LOC=ANY                   03290000
+         LR    R0,R2              REQUEST SIZE FOR ERROR HANDLER        03300000
+         LTR   R15,R15            STORAGE AVAILABLE?                    03310000
+         BNZ   ESTORAGE           ERROR IF NOT                          03320000
+                                                                        03330000
+         LR    R6,R1              ADDRESS NEW TABLE TOKEN               03340000
+         USING TBTOKEN,R6                                               03350000
+         ST    R6,TABTOKEN        SAVE TABLE TOKEN PTR FOR RETURN       03360000
+         LR    R0,R6              CLEAR THE TOKEN                       03370000
+         LR    R1,R2                                                    03380000
+         SR    R15,R15                                                  03390000
+         MVCL  R0,R14                                                   03400000
+                                                                        03410000
+         MVC   TTOKTAG,=CL8'TBTOKEN'   EYECATCHER                       03420000
+         STH   R2,TTOKSIZE        LENGTH OF TOKEN                       03430000
+                                                                        03440000
+*--------------------------------------------------------------         03450000
+*   Create row locator array object and initialize it                   03460000
+*--------------------------------------------------------------         03470000
+                                                                        03480000
+         TM    OPTIONS,TBT$NLOC   ROW (SLOT) LOCATOR REQUESTED?         03490000
+         BO    NOROWLOC           SKIP IF NOT                           03500000
+                                                                        03510000
+         LA    R1,LOCOBJNM        R1 <== OBJECT NAME                    03520000
+         L     R0,ALUSIZE         R0 <== INITIAL LOCATOR ARRAY SIZE     03530000
+         BAS   R14,OBJCRE         CREATE THE OBJECT                     03540000
+         LTR   R15,R15            TEST RESULTS                          03550000
+         BNZ   EOBJSRV            ERROR HANDLER                         03560000
+         MVC   TTOKLOCR($TOKLN),0(R1)                                   03570000
+                                                                        03580000
+         LA    R1,TTOKLOCR        R1  <== OBJECT TOKEN                  03590000
+         L     R0,ALUSIZE         R0  <== INITIAL SIZE                  03600000
+         LA    R15,4              R15 <== SIZE OF LOCATOR ARRAY SLOT    03610000
+         BAS   R14,LOCRINIT       INITIALIZE                            03620000
+         LTR   R15,R15            SUCCESS?                              03630000
+         BNZ   EOBJSRV            ERROR HANDLER                         03640000
+                                                                        03650000
+NOROWLOC DS    0H                                                       03660000
+                                                                        03670000
+*--------------------------------------------------------------         03680000
+*   Create index objects and initialize each                            03690000
+*--------------------------------------------------------------         03700000
+                                                                        03710000
+         ICM   R4,15,TBT#KEYS     NUMBER OF INDEX OBJECTS REQUIRED      03720000
+         BZ    NOINDEX            DONE IF NONE                          03730000
+         SR    R5,R5              INITIALIZE INDEX SEQUENCE NUMBER      03740000
+                                                                        03750000
+NEXTNDX  DS    0H                 CREATE NEXT INDEX OBJECT              03760000
+         LA    R5,1(,R5)          INDEX ID                              03770000
+         LR    R1,R5              PREPARE FOR CONVERSION                03780000
+         BAS   R14,SMALLDEC       CONVERT TO EYEBALL                    03790000
+         L     R2,NDXNAMLN        LENGTH OF INDEX OBJECT NAME PREFIX    03800000
+         LA    R2,NDXOBJNM(R2)    END OF PREFIX                         03810000
+         MVC   0(2,R2),2(R1)      APPEND ID TO INDEX NAME               03820000
+                                                                        03830000
+         LA    R1,NDXOBJNM        R1 <== OBJECT NAME                    03840000
+         L     R0,ALUSIZE         R0 <== INITIAL INDEX SIZE             03850000
+         BAS   R14,OBJCRE         CREATE THE OBJECT                     03860000
+         LTR   R15,R15            TEST RESULTS                          03870000
+         BNZ   EOBJSRV            ERROR HANDLER                         03880000
+         MVC   TTOKNDX($TOKLN),0(R1)  ACCEPT RETURNED TOKEN             03890000
+                                                                        03900000
+         L     R1,TABTOKEN        ADDRESS OF TOKEN                      03910000
+         STH   R5,TTOK#NDX-TBTOKEN(,R1)   ACCT FOR NEW OBJ (CLEANUP)    03920000
+                                                                        03930000
+         LA    R1,TTOKNDX         R1  <== OBJECT TOKEN                  03940000
+         L     R0,ALUSIZE         R0  <== INITIAL SIZE                  03950000
+         LA    R15,NDXLN          R15 <== SIZE OF LOCATOR ARRAY SLOT    03960000
+         BAS   R14,LOCRINIT       INITIALIZE                            03970000
+         LTR   R15,R15            SUCCESS?                              03980000
+         BNZ   EOBJSRV            ERROR HANDLER                         03990000
+                                                                        04000000
+         LA    R6,$TOKLN(,R6)     ADVANCE TO NEXT TABLE TOKEN NDX SLOT  04010000
+         BCT   R4,NEXTNDX         CREATE INDEX OBJECT FOR EACH COLKEY   04020000
+         L     R6,TABTOKEN        REFRESH TABLE TOKEN PTR               04030000
+                                                                        04040000
+NOINDEX  DS    0H                                                       04050000
+                                                                        04060000
+         EJECT                                                          04070000
+***************************************************************         04080000
+*                                                                       04090000
+*   Compute space requirements, then create table object                04100000
+*                                                                       04110000
+***************************************************************         04120000
+                                                                        04130000
+         MVC   TSIZEEST,ALUSIZE   ASSUME SINGLE ALU TABLE               04140000
+         ICM   R3,15,TBTSIZE      TABLE SIZE ESTIMATE                   04150000
+         BZ    *+8                OMITTED                               04160000
+         ST    R3,TSIZEEST        SAVE REQUESTERS SIZE VALUE            04170000
+                                                                        04180000
+*--------------------------------------------------------------         04190000
+*   Compute size of table overhead for table, columns, indecies         04200000
+*--------------------------------------------------------------         04210000
+                                                                        04220000
+         LA    R3,TABLELN         LENGTH OF TABLE DEFINITION BLOCK      04230000
+         LA    R2,TBCOLDFL+COLHDRLN  INTERNAL LENGTH OF EACH COLUMN     04240000
+         MH    R2,TBT#COLS+2      NUMBER OF COLUMNS                     04250000
+         ALR   R3,R2              ROLL INTO FIXED STORAGE RQMT          04260000
+                                                                        04270000
+         LA    R2,TBKEYDFL        COLKEY BLOCK FIXED LENGTH             04280000
+         MH    R2,TBT#KEYS+2      COLKEY STORAGE OVERHEAD               04290000
+         ALR   R3,R2              ROLL INTO STORAGE RQMT                04300000
+         L     R2,COLNDXRF        TOTAL # COLS SPANNED BY ALL NDXS      04310000
+         SLL   R2,2               EACH REQUIRES A PTR                   04320000
+         ALR   R3,R2              ROLL INTO FIXED STORAGE RQMT          04330000
+                                                                        04340000
+         LA    R3,7(,R3)          ROUND TO DOUBLEWORD                   04350000
+         SRL   R3,3                                                     04360000
+         SLL   R3,3                                                     04370000
+         ST    R3,TSIZEOVH        TOTAL SIZE OF TABLE PREFIX            04380000
+                                                                        04390000
+         C     R3,TSIZEEST        TOTAL SIZE SUFFICIENT FOR PREFIX?     04400000
+         BNH   *+8                SKIP IF SO                            04410000
+         ST    R3,TSIZEEST        ELSE INCREASE REQUEST SIZE APPROP     04420000
+                                                                        04430000
+*--------------------------------------------------------------         04440000
+*   Calc, in bytes, the total table size w/ respect to ALU size         04450000
+*--------------------------------------------------------------         04460000
+                                                                        04470000
+         L     R1,TSIZEEST        SIZE OF SPACE REQUESTED               04480000
+         A     R1,ALUSIZE         ROUND TO NEAREST ALU                  04490000
+         BCTR  R1,0               ... BY ADDING ALUSIZE - 1             04500000
+         SR    R0,R0              PREPARE FOR DIVIDE                    04510000
+         D     R0,ALUSIZE         FULL ALUS                             04520000
+                                                                        04530000
+         MH    R1,ALUSIZE+2       CONVERT ALU COUNT TO BYTES            04540000
+         ST    R1,TSIZEEST        RETAIN TOTAL TABLE SIZE IN BYTES      04550000
+                                                                        04560000
+*--------------------------------------------------------------         04570000
+*   Create table object and acquire storage for first extent            04580000
+*--------------------------------------------------------------         04590000
+                                                                        04600000
+         LA    R1,TABOBJNM        R1 <== OBJECT NAME                    04610000
+         L     R0,TSIZEEST        R0 <== INITIAL SIZE OF OBJECT         04620000
+         BAS   R14,OBJCRE         CREATE THE OBJECT                     04630000
+         LTR   R15,R15            TEST RESULTS                          04640000
+         BNZ   EOBJSRV            ERROR HANDLER                         04650000
+         MVC   TTOKTABL($TOKLN),0(R1)                                   04660000
+                                                                        04670000
+         LA    R1,TTOKTABL        R1 <== TABLE BASE OBJECT TOKEN        04680000
+         L     R0,TSIZEEST        R0 <== SIZE OF STORAGE REQUIRED       04690000
+         BAL   R14,OBJSTORE       ACQUIRE STORAGE                       04700000
+         LTR   R15,R15            SUCCESS?                              04710000
+         BNZ   EOBJSRV            SERVICE ROUTINE FAILURE               04720000
+                                                                        04730000
+*--------------------------------------------------------------         04740000
+*   Initialize table prefix                                             04750000
+*--------------------------------------------------------------         04760000
+                                                                        04770000
+         SAC   ASCAR              ASC=AR                                04780000
+         SYSSTATE ASCENV=AR       ACCESS REGISTER MODE                  04790000
+                                                                        04800000
+         LAE   R11,0(,R1)         OPEN WINDOW TO BASE TABLE OBJECT      04810000
+         ST    R11,BASEADDR       TABLE OBJECT BASE ADDRESS             04820000
+         USING TABLE,R11          ESTABLISH ADDRESSABILITY              04830000
+                                                                        04840000
+         MVC   TBLTAG,=CL8'TBTABLE'                                     04850000
+         MVC   TBLPFXSZ,TSIZEOVH  SIZE OF TABLE PREFIX                  04860000
+         MVC   TBL#COLS,TBT#COLS  COLUMN DEFINITION BLOCK COUNT         04870000
+         MVC   TBL#KEYS,TBT#KEYS  KEY DEFINITION COUNT                  04880000
+         MVC   TBLNAME,TABOBJNM   RETAIN TABLE NAME                     04890000
+         MVC   TBLIEST,TSIZEEST   ESTIMATED SIZE                        04900000
+                                                                        04910000
+         TM    OPTIONS,TBT$NLOC   ROW (SLOT) LOCATOR ALLOCATED?         04920000
+         BNO   *+8                STANDARD TABLE IF SO                  04930000
+         OI    TBLPROP1,TBLP_NOLOCATOR  INDICATE SPECIAL PROPERTY       04940000
+                                                                        04950000
+         LAE   R10,TABLE+TABLELN  FREE SPACE                            04960000
+         ST    R10,FREESPC        INIT LOCAL PTR                        04970000
+                                                                        04980000
+         EJECT                                                          04990000
+***************************************************************         05000000
+*                                                                       05010000
+*   Copy column descriptors into linked base space structure            05020000
+*                                                                       05030000
+***************************************************************         05040000
+                                                                        05050000
+         LA    R10,TBLCOLST-(COLNEXT-COLHDR)                            05060000
+         ST    R10,LASTCOL        LAST COLUMN ACCEPTED                  05070000
+         XC    COLS,COLS          COLUMN NUMBERS                        05080000
+         XC    DISPL,DISPL        COLUMN POSITION IN ROW                05090000
+                                                                        05100000
+         L     R2,TBT#COLS        NUMBER OF COLUMNS                     05110000
+         L     R3,TBTCOLST        ORIGIN OF COLDEF PTR ARRAY            05120000
+                                                                        05130000
+*--------------------------------------------------------------         05140000
+*   Validate and copy col defintion to table object and enqueue         05150000
+*--------------------------------------------------------------         05160000
+                                                                        05170000
+COL_COPY DS    0H                 LINKUP NEXT COLUMN DEFINITION         05180000
+         L     R1,COLS            COLUMN NUMBER                         05190000
+         LA    R1,1(,R1)          UNIQUE COLUMN NUMBER                  05200000
+         ST    R1,COLS            RETAIN ALLOCATION HISTORY             05210000
+                                                                        05220000
+         L     R1,0(,R3)          R1 <== CANDIDATE COLUMN DEF           05230000
+         L     R0,BASEADDR        R0 <== TABLE OBJECT BASE              05240000
+         BAS   R14,LOCATCOL       TEST FOR DUPLICATION                  05250000
+         LTR   R15,R15            FOUND A MATCHING ENTRY?               05260000
+         BZ    EDUPCOL            ERROR IF SO (R1-ADDR, R0-COL#)        05270000
+                                                                        05280000
+         L     R9,FREESPC         FREE SPACE PTR                        05290000
+         LR    R1,R9              COPY PTR                              05300000
+         S     R1,BASEADDR        CONVERT ADDRESS TO DISPLACEMENT       05310000
+         L     R10,LASTCOL        ADDR OF LAST COLUMN ENTRY             05320000
+         USING COLHDR,R10         DESCRIBE IN-QUEUE COLUMN ENTRY        05330000
+         ST    R1,COLNEXT         ADD TO END OF CHAIN                   05340000
+                                                                        05350000
+         LR    R1,R9              FREESPACE USED TO BUILD COL ENTRY     05360000
+         LA    R1,COLHDRLN+TBCOLDFL(,R1)                                05370000
+         ST    R1,FREESPC         UPDATE FREE SPACE PTR                 05380000
+         LR    R10,R9             ADVANCE TO NEW ENTRY LOCATION         05390000
+         ST    R10,LASTCOL        MAINTAIN ADDR OF LAST ENTRY           05400000
+                                                                        05410000
+         LAE   R9,COLDEF          COLUMN DEFINTION IS APPENDED          05420000
+         USING TBCOLDEF,R9                                              05430000
+         XC    COLHDR(COLHDRLN),COLHDR                                  05440000
+         MVC   COLNUMBR,COLS      ASSIGN COLUMN NUMBER TO ENTRY         05450000
+         L     R4,0(,R3)          LOCATE CANDIDATE COLDEF               05460000
+                                                                        05470000
+         MVC   TBCOLDEF(TBCOLDFL),0(R4)  ENQUEUE IT                     05480000
+         OC    SRCDISPL,TBCDISPL  RETAIN PRESENCE OF SOURCE REC MAP     05490000
+                                                                        05500000
+         XC    TBCDESCL,TBCDESCL  ???TEMP???                            05510000
+         XC    TBCDESCA,TBCDESCA  ???TEMP???                            05520000
+         XC    TBCDFTLN,TBCDFTLN  ???TEMP???                            05530000
+         XC    TBCDFTA,TBCDFTA    ???TEMP???                            05540000
+                                                                        05550000
+*--------------------------------------------------------------         05560000
+*   Assign column position in stored row                                05570000
+*--------------------------------------------------------------         05580000
+                                                                        05590000
+         L     R1,DISPL           DISPL IN STORED ROW TO DATA           05600000
+         ST    R1,COLDISPL        ASSIGN TO COLUMN                      05610000
+         A     R1,TBCLENG         RESET OFFSET FOR NEXT COLUMN          05620000
+         ST    R1,DISPL           SAVE UPDATED VALUE                    05630000
+                                                                        05640000
+         LA    R3,4(,R3)          ADVANCE TO NEXT CANDIDATE COLUMN      05650000
+         BCT   R2,COL_COPY        PROCESS ALL COLUMNS                   05660000
+         MVC   TBLROWSZ,DISPL     POST SIZE OF EACH ROW                 05670000
+         DROP  R9,R10             TBCOLDEF, COLHDR                      05680000
+                                                                        05690000
+*--------------------------------------------------------------         05700000
+*   Now, ensure that source row is properly defined                     05710000
+*--------------------------------------------------------------         05720000
+                                                                        05730000
+         LAE   R10,TBLCOLST-(COLNEXT-COLHDR)                            05740000
+         USING COLHDR,R10         RESTATE INTENTIONS                    05750000
+         L     R2,SRCDISPL        NON-ZERO OF SOURCE CAME WITH OFFSETS  05760000
+                                                                        05770000
+COLASSGN DS    0H                 VALIDATE / COMPLETE SOURCE DATA DSPLS 05780000
+         ICM   R10,15,COLNEXT     ADVANCE TO NEXT COLUMN                05790000
+         BZ    COLASFIN           TRAVERSE ALL COLDEFS                  05800000
+         LA    R10,TABLE(R10)     CONVERT OFFLINK TO ADDRESS            05810000
+         LAE   R9,COLDEF          ADDRESS COLDEF PROPER                 05820000
+         USING TBCOLDEF,R9        COLUMN DEFINITION ADDRESSABILITY      05830000
+         LTR   R2,R2              NEED TO ASSIGN OFFSETS?               05840000
+         BNZ   *+10               SKIP COPY IF NOT                      05850000
+         MVC   TBCDISPL,COLDISPL  STORED = SOURCE ROW FORMATS           05860000
+                                                                        05870000
+         L     R0,TBCLENG         LENGTH OF SOURCE FIELD                05880000
+         AL    R0,TBCDISPL        MINIMUM SIZE OF SOURCE ROW            05890000
+         CL    R0,TBLSRCSZ        EXCEEDS PRIOR INFORMATION?            05900000
+         BNH   *+8                SKIP IF NOT                           05910000
+         ST    R0,TBLSRCSZ        ELSE SAVE SOURCE ROW SIZE             05920000
+         B     COLASSGN           ADVANCE TO NEXT COLUMN                05930000
+                                                                        05940000
+COLASFIN DS    0H                 VALIDATE SOURCE ROW COMPOSITION       05950000
+         CLC   TBLSRCSZ,TBLROWSZ  SOURCE LENGTH VS. STORED LENGTH       05960000
+         BL    EOVLP              SOURCE ROW REDEFINITION IS LIKELY     05970000
+         DROP  R9,R10             TBCOLDEF, COLHDR                      05980000
+                                                                        05990000
+         EJECT                                                          06000000
+***************************************************************         06010000
+*                                                                       06020000
+*   Copy key definitions and relocate key column references             06030000
+*                                                                       06040000
+***************************************************************         06050000
+                                                                        06060000
+         ICM   R2,15,TBT#KEYS     NUMBER OF KEYS / INDECIES             06070000
+         BZ    KEY_END            DONE IF NONE                          06080000
+         L     R3,TBTKYLST        ORIGIN OF COLKEY PTR ARRAY            06090000
+         LA    R10,TBLKYLST-(TBKLINK-TBKEYDEF)                          06100000
+         ST    R10,LASTKEY        LAST COLKEY ACCEPTED                  06110000
+                                                                        06120000
+*--------------------------------------------------------------         06130000
+*   Validate and copy key defintion to table object and enqueue         06140000
+*--------------------------------------------------------------         06150000
+                                                                        06160000
+KEY_COPY DS    0H                 LINK NEXT COLKEY                      06170000
+         L     R1,KEYS            KEY SEQUENCE NUMBER                   06180000
+         LA    R1,1(,R1)          UNIQUE KEY NUMBER                     06190000
+         ST    R1,KEYS            RETAIN ALLOCATION HISTORY             06200000
+                                                                        06210000
+         L     R1,0(,R3)          R1 <== CANDIDATE KEY DEF              06220000
+         L     R0,BASEADDR        R0 <== TABLE OBJECT BASE              06230000
+         BAS   R14,LOCATKEY       TEST FOR DUPLICATION                  06240000
+         LTR   R15,R15            FOUND A MATCHING ENTRY?               06250000
+         BZ    EDUPKEY            ERROR IF SO (R1-ADDR, R0-KEY#)        06260000
+                                                                        06270000
+         L     R4,0(,R3)          LOCATE CANDIDATE KEY DEF              06280000
+         USING TBKEYDEF,R4        DESCRIBE PLIST VER OF KEY DEF         06290000
+         LA    R5,TBKEYDFL        LENGTH OF KEY DEFINITION PREFIX       06300000
+         LH    R0,TBKCOUNT        NUMBER OF COLUMN REFERENCES           06310000
+         SLL   R0,2               EACH COL REF REQUIRES FOUR BYTES      06320000
+         AR    R5,R0              TOTAL SIZE OF ENTRY                   06330000
+         DROP  R4                 TBKEYDEF                              06340000
+                                                                        06350000
+         L     R9,FREESPC         FREE SPACE PTR                        06360000
+         LR    R1,R9              COPY PTR                              06370000
+         S     R1,BASEADDR        CONVERT ADDRESS TO DISPLACEMENT       06380000
+         L     R10,LASTKEY        ADDR OF LAST KEY ENTRY                06390000
+         USING TBKEYDEF,R10       DESCRIBE IN-QUEUE KEY ENTRY           06400000
+         ST    R1,TBKLINK         ADD TO END OF CHAIN                   06410000
+         LA    R1,0(R5,R9)        FREESPACE USED TO BUILD KEY ENTRY     06420000
+         ST    R1,FREESPC         POST FREE SPACE PTR                   06430000
+                                                                        06440000
+         LR    R10,R9             ADVANCE TO NEW ENTRY LOCATION         06450000
+         ST    R10,LASTKEY        MAINTAIN ADDR OF LAST ENTRY           06460000
+                                                                        06470000
+         LAE   R14,TBKEYDEF       TARGET ADDRESS                        06480000
+         LR    R15,R5             TARGET LENGTH                         06490000
+         LR    R0,R4              SOURCE ADDRESS                        06500000
+         LR    R1,R15             SOURCE LENGTH                         06510000
+         MVCL  R14,R0             MAKE COPY TO KEY DEFINITION           06520000
+         XC    TBKLINK,TBKLINK    LAST ENTRY IN KEY CHAIN               06530000
+                                                                        06540000
+*--------------------------------------------------------------         06550000
+*   Reassign key column pspace ptrs to table space offlinks             06560000
+*--------------------------------------------------------------         06570000
+                                                                        06580000
+         LH    R8,TBKCOUNT        NUMBER OF COLUMN PTRS                 06590000
+         LA    R10,TBKCOLS        ORIGIN OF TBCOLDEF PTR ARRAY          06600000
+                                                                        06610000
+KEY_REFS DS    0H                 CONVERT TO TABLE OBJECT OFFLINKS      06620000
+         L     R1,0(,R10)         R1 <== COLUMN DEF IN PRIMARY SPACE    06630000
+         L     R0,BASEADDR        R0 <== TABLE OBJECT BASE              06640000
+         BAS   R14,LOCATCOL       LOCATE COLUMN DEF                     06650000
+         LTR   R15,R15            R1 RETURNED A MATCHING ENTRY?         06660000
+         BNZ   EKEYREF            ERROR IF COL NOT ENQUEUED             06670000
+                                                                        06680000
+         S     R1,BASEADDR        CONVERT PTR TO OFFSET                 06690000
+         TM    0(R10),X'80'       SEQUENCE FLAG POSTED IN PSPACE ENTRY? 06700000
+         ST    R1,0(,R10)         (SLEAZY UPDATE) NOT AN OBJSPACE REF   06710000
+         BZ    *+8                SKIP IF NOT                           06720000
+         OI    0(R10),X'80'       RESTORE SEQUENCE FLAG                 06730000
+                                                                        06740000
+         LA    R10,4(,R10)        ADVANCE TO NEXT PSPACE COLUMN DEF     06750000
+         BCT   R8,KEY_REFS        RELOCATE ALL PTRS                     06760000
+                                                                        06770000
+*--------------------------------------------------------------         06780000
+*   Advance to next column key definition                               06790000
+*--------------------------------------------------------------         06800000
+                                                                        06810000
+         LA    R3,4(,R3)          ADVANCE TO NEXT CANDIDATE COLUMN      06820000
+         BCT   R2,KEY_COPY        PROCESS ALL COLUMNS                   06830000
+         DROP  R10                TBKEYDEF                              06840000
+                                                                        06850000
+KEY_END  DS    0H                                                       06860000
+                                                                        06870000
+         EJECT                                                          06880000
+***************************************************************         06890000
+*                                                                       06900000
+*   Designate any table storage remaining as free space.                06910000
+*   TSIZEOVH contains the size of the prefix and TSIZEEST               06920000
+*   contains the amount of storage actually assigned to the             06930000
+*   table.  If no space remains, the operation is benign.               06940000
+*                                                                       06950000
+***************************************************************         06960000
+                                                                        06970000
+         L     R2,TSIZEEST        TOTAL STORAGE REQUESTED               06980000
+         L     R3,TSIZEOVH        LENGTH OF TABLE PREFIX                06990000
+         SR    R2,R3              LENGTH OF FREE EXTENT                 07000000
+         LA    R3,TABLE(R3)       UNQUALIFIED ADDRESS OF FREE AREA      07010000
+                                                                        07020000
+         $STG  TBLSTG,INIT,(R2),A=(R3),BASE=TABLE,                     X07030000
+               MF=(E,MFE_LIST)                                          07040000
+                                                                        07050000
+         EJECT                                                          07060000
+***************************************************************         07070000
+*                                                                       07080000
+*   Data dictionary exit, if implemented                                07090000
+*                                                                       07100000
+***************************************************************         07110000
+                                                                        07120000
+         WXTRN IDDMNGR            DATA DICTIONARY MANAGER               07130000
+         ICM   R2,15,=V(IDDMNGR)  DATA DICTIONARY IN USE?               07140000
+         BZ    EXIT               DONE IF NOT                           07150000
+                                                                        07160000
+         LA    R4,MFE_LIST        PLIST CONSTRUCTION AREA               07170000
+         USING DICPARMS,R4        INTERFACE FORMAT                      07180000
+         XC    DICPARMS(DICPLN),DICPARMS                                07190000
+         LA    R0,DICFCRE         TABLE CREATE                          07200000
+         ST    R0,DICFUNC         ... PARM                              07210000
+         LA    R0,TBTOKEN         TABLE TOKEN                           07220000
+         ST    R0,DICTTOKN        ... PARM                              07230000
+         ST    R11,DICTBORG       BASE TABLE ORIGIN                     07240000
+         STAM  AR11,AR11,DICALET  ALET OF TABLE SPACE                   07250000
+         MVC   DICDESC,TBTDESCA   TABLE DESCRIPTION                     07260000
+         MVC   DICDESCL,TBTDESCL  LENGTH OF TABLE DESCRIPTION           07270000
+                                                                        07280000
+         @CALL IDDMNGR,MF=(E,DICPARMS)                                  07290000
+         DROP  R4                 DICPARMS                              07300000
+                                                                        07310000
+***************************************************************         07320000
+*                                                                       07330000
+*   Table create complete, return table token to requester              07340000
+*                                                                       07350000
+***************************************************************         07360000
+                                                                        07370000
+         LA    R5,TTOKTABL        OBJECT TOKEN FOR BASE TABLE           07380000
+         USING $TOKEN,R5          TEMP ADDRESSABILITY                   07390000
+         L     R0,=A(TBSP$TOP)    POSITION BEFORE FIRST ROW             07400000
+         ST    R0,$APPLVAR                                              07410000
+         DROP  R5                                                       07420000
+                                                                        07430000
+         L     R2,TBTABLTK        TOKEN RETURN AREA                     07440000
+         MVC   0(4,R2),TABTOKEN   TOKEN IS ACTUALLY A TOKEN PTR         07450000
+                                                                        07460000
+         LA    R15,RC00           SUCCESS                               07470000
+         LAE   R1,0(0,0)          NUMBER OF TABLE ROWS (ZERO)           07480000
+         L     R14,TBL#COLS       NUMBER OF TABLE COLUMNS               07490000
+         LAE   R0,0(R14,0)        CLEAR ALET                            07500000
+         B     EXIT               COMPLETE                              07510000
+                                                                        07520000
+         EJECT                                                          07530000
+***************************************************************         07540000
+*                                                                       07550000
+*   Reflect completion status via return and reason codes               07560000
+*                                                                       07570000
+***************************************************************         07580000
+                                                                        07590000
+                                                                        07600000
+*------- invalid request formats ------------------------------         07610000
+                                                                        07620000
+ETOKENS  DS    0H                 INVALID TOKENS                        07630000
+         LA    R0,RSN00                                                 07640000
+         B     ERR_REQ                                                  07650000
+                                                                        07660000
+ECOLPRM  DS    0H                 IMPROPER COLUMN LIST DESIGNATION      07670000
+         LA    R0,RSN04                                                 07680000
+         B     ERR_REQ                                                  07690000
+                                                                        07700000
+ECOLDEF  DS    0H                 IMPROPER COLUMN DEFINITION            07710000
+         LA    R0,RSN08           R1 CONTAINS COLUMN NUMBER             07720000
+         B     ERR_REQ                                                  07730000
+                                                                        07740000
+EKEYPRM  DS    0H                 IMPROPER KEY LIST DESIGNATION         07750000
+         LA    R0,RSN12                                                 07760000
+         B     ERR_REQ                                                  07770000
+                                                                        07780000
+EKEYDEF  DS    0H                 IMPROPER KEY DEFINITION               07790000
+         LA    R0,RSN16           R1 CONTAINS KEY NUMBER                07800000
+         B     ERR_REQ                                                  07810000
+                                                                        07820000
+EDUPCOL  DS    0H                 DUPLICATE COLUMN DEFINITION           07830000
+         LA    R0,RSN20                                                 07840000
+         L     R1,COLS            OFFENDING COLUMN #                    07850000
+         B     ERR_REQ                                                  07860000
+                                                                        07870000
+ETABNAME DS    0H                 INVALID TABLE NAME                    07880000
+         LA    R0,RSN24                                                 07890000
+         B     ERR_REQ                                                  07900000
+                                                                        07910000
+EKEYREF  DS    0H                 KEY DOES NOT REF VALID COLUMN         07920000
+         LA    R0,RSN28                                                 07930000
+         B     ERR_REQ                                                  07940000
+                                                                        07950000
+EDUPKEY  DS    0H                 DUPLICATE KEY/INDEX NAME              07960000
+         LA    R0,RSN32                                                 07970000
+         L     R1,KEYS            OFFENDING KEY #                       07980000
+         B     ERR_REQ                                                  07990000
+                                                                        08000000
+EOVLP    DS    0H                 IMPROPER DEFINITION OF SOURCE ROW     08010000
+         LA    R0,RSN40                                                 08020000
+         SR    R1,R1                                                    08030000
+         B     ERR_REQ                                                  08040000
+                                                                        08050000
+                                                                        08060000
+*------- environmental errors ---------------------------------         08070000
+                                                                        08080000
+ESTORAGE DS    0H                 UNABLE TO ACQUIRE PRIMARY STORAGE     08090000
+         LR    R1,R0              SIZE OF STORAGE REQUIRED              08100000
+         LA    R0,RSN04                                                 08110000
+         B     ERR_ENV                                                  08120000
+                                                                        08130000
+                                                                        08140000
+*------- object management failures ---------------------------         08150000
+                                                                        08160000
+EOBJSRV  DS    0H                 OBJECT MANAGER REQUEST FAILED         08170000
+         CH    R15,=AL2(RC12)     SPACE STORAGE OVERCOMMITTED?          08180000
+         BE    ERR_STG            DISTINCT NOTIFICATION IF SO           08190000
+                                                                        08200000
+         @PUSHERR ,                                                     08210000
+         B     ERR_OBJ                                                  08220000
+                                                                        08230000
+*--------------------------------------------------------------         08240000
+*   Establish error return codes                                        08250000
+*--------------------------------------------------------------         08260000
+                                                                        08270000
+ERR_ENV  DS    0H                 ENVIRONMENTAL ERROR                   08280000
+         LA    R15,RC08                                                 08290000
+         B     CLEANUP                                                  08300000
+                                                                        08310000
+ERR_REQ  DS    0H                 IMPROPERLY CONSTRUCTED REQUEST        08320000
+         LA    R15,RC12                                                 08330000
+         B     CLEANUP                                                  08340000
+                                                                        08350000
+ERR_OBJ  DS    0H                 OBJECT MANAGEMENT FAILURE             08360000
+         LA    R15,RC16                                                 08370000
+         B     CLEANUP                                                  08380000
+                                                                        08390000
+ERR_STG  DS    0H                 OBJECT SPACE STORAGE NOT AVAILABLE    08400000
+         LA    R15,RC20                                                 08410000
+         B     CLEANUP                                                  08420000
+                                                                        08430000
+*--------------------------------------------------------------         08440000
+*   Cleanup allocated primary and object storage                        08450000
+*--------------------------------------------------------------         08460000
+                                                                        08470000
+CLEANUP  DS    0H                                                       08480000
+         STM   R14,R1,LINKREGS    PRESERVE POSTED STATUS                08490000
+         SAC   ASCP               ENSURE PRIMARY MODE                   08500000
+         SYSSTATE ASCENV=P        PRIMARY MODE                          08510000
+                                                                        08520000
+         ICM   R6,15,TABTOKEN     ADDRESS TABLE TOKEN                   08530000
+         BZ    CLEANRET           NOT YET ALLOCATED                     08540000
+         USING TBTOKEN,R6         CONTAINS ALL OBJECT TOKENS            08550000
+         LA    R5,2               BASIC TABLE TOKENS                    08560000
+         AH    R5,TTOK#NDX        NUMBER OF INDEX TOKENS CONSTRUCTED    08570000
+         LA    R8,TTOKOBJS        LOCATE FIRST TOKEN                    08580000
+         USING $TOKEN,R8                                                08590000
+                                                                        08600000
+CLEANOBJ DS    0H                 DELETE ALL OBJECTS                    08610000
+         CLC   $TOKTAG,=CL8'OBJTOKEN'                                   08620000
+         BNE   CLEANFIN           ALL OBJECTS DELETED                   08630000
+         LA    R1,$TOKEN          R1 <== OBJECT TOKEN                   08640000
+         BAS   R14,OBJDELET       DELETE IT                             08650000
+         LA    R8,$TOKEN+$TOKLN   ADVANCE TO NEXT OBJECT TOKEN          08660000
+         BCT   R5,CLEANOBJ        PROCESS ALL OBJECTS                   08670000
+         DROP  R8                 $TOKEN                                08680000
+                                                                        08690000
+CLEANFIN DS    0H                 DELETE TABLE TOKEN AND INFORM USER    08700000
+         LH    R0,TTOKSIZE        LENGTH OF TABLE TOKEN                 08710000
+         $STORAGE RELEASE,LENGTH=(R0),ADDR=(R6)                         08720000
+                                                                        08730000
+CLEANRET DS    0H                                                       08740000
+         ICM   R2,15,TBTABLTK     TOKEN RETURN AREA                     08750000
+         BZ    *+10               INVALID, BUT LEAVING ANYWAY           08760000
+         XC    0(4,R2),0(R2)      CLEAR                                 08770000
+         LM    R14,R1,LINKREGS    RESTORE POSTED STATUS                 08780000
+                                                                        08790000
+*--------------------------------------------------------------         08800000
+                                                                        08810000
+EXIT     DS    0H                 RETURN RESULTS TO requester           08820000
+         NOP   0                  TRAPS                                 08830000
+         @EXIT ,                                                        08840000
+                                                                        08850000
+         EJECT                                                          08860000
+***************************************************************         08870000
+*                                                                       08880000
+* ROUTINE: VALCOLDF - Validate column definition                        08890000
+*                                                                       08900000
+*                                                                       08910000
+* ON ENTRY:                                                             08920000
+*                                                                       08930000
+*    R1 - address of a column definition mapped by @TBCOLDF             08940000
+*                                                                       08950000
+*                                                                       08960000
+* ON EXIT:                                                              08970000
+*                                                                       08980000
+*    R15 contains one of the following return codes                     08990000
+*                                                                       09000000
+*        RC00 - valid column definition                                 09010000
+*                                                                       09020000
+*        RC04 - invalid definition                                      09030000
+*                                                                       09040000
+*               RSN04 - length error                                    09050000
+*               RSN08 - invalid data type                               09060000
+*               RSN12 - length does not agree with data type            09070000
+*                                                                       09080000
+***************************************************************         09090000
+                                                                        09100000
+VALCOLDF DS    0H                                                       09110000
+         BAKR  R14,0                                                    09120000
+         LR    R8,R1              COLUMN DESCRIPTOR                     09130000
+         USING TBCOLDEF,R8                                              09140000
+                                                                        09150000
+         ICM   R2,15,TBCLENG      DECLARED DATA LENGTH                  09160000
+         BNP   VALCERR1                                                 09170000
+                                                                        09180000
+         CLI   TBCDTYPE,$DMAX$    VALID DATA TYPE?                      09190000
+         BH    VALCERR2           ERROR IF NOT                          09200000
+         CLI   TBCDTYPE,$NUMBR    NUMERIC TYPE                          09210000
+         BE    VALCNUM            VALIDATE NUMERICS                     09220000
+                                                                        09230000
+*--------------------------------------------------------------         09240000
+*   Validate non-numeric data types                                     09250000
+*--------------------------------------------------------------         09260000
+                                                                        09270000
+VALCD1   DS    0H                                                       09280000
+         CLI   TBCDTYPE,$CHAR     FIXED LENGTH CHAR STRING              09290000
+         BNE   VALCD2                                                   09300000
+         C     R2,=A(TBC_LENGTH_MAX_CHAR)                               09310000
+         BH    VALCERR3                                                 09320000
+                                                                        09330000
+VALCD2   DS    0H                                                       09340000
+         CLI   TBCDTYPE,$BIN      UNFORMATTED BINARY DATA               09350000
+         BNE   VALCD3                                                   09360000
+         C     R2,=A(TBC_LENGTH_MAX_BINARY)                             09370000
+         BH    VALCERR3                                                 09380000
+                                                                        09390000
+VALCD3   DS    0H                                                       09400000
+         CLI   TBCDTYPE,$BOOL     UNFORMATTED BINARY DATA               09410000
+         BNE   VALCD4                                                   09420000
+         C     R2,=A(TBC_LENGTH_BOOLEAN)                                09430000
+         BNE   VALCERR3                                                 09440000
+                                                                        09450000
+VALCD4   DS    0H                                                       09460000
+         CLI   TBCDTYPE,$VCHAR    UNFORMATTED BINARY DATA               09470000
+         BNE   VALCD5                                                   09480000
+         C     R2,=F'4'                                                 09490000
+         BNE   VALCERR3                                                 09500000
+                                                                        09510000
+VALCD5   DS    0H                                                       09520000
+         CLI   TBCDTYPE,$VBIN     UNFORMATTED BINARY DATA               09530000
+         BNE   VALCD6                                                   09540000
+         C     R2,=F'4'                                                 09550000
+         BNE   VALCERR3                                                 09560000
+                                                                        09570000
+VALCD6   DS    0H                 FUTURE EXPANSION                      09580000
+         CLI   TBCDTYPE,$VCHARX   UNFORMATTED BINARY DATA               09590000
+         BNE   VALCD7                                                   09600000
+         C     R2,=F'8'                                                 09610000
+         BNE   VALCERR3                                                 09620000
+                                                                        09630000
+VALCD7   DS    0H                                                       09640000
+         CLI   TBCDTYPE,$VBINX    UNFORMATTED BINARY DATA               09650000
+         BNE   VALCD8                                                   09660000
+         C     R2,=F'8'                                                 09670000
+         BNE   VALCERR3                                                 09680000
+                                                                        09690000
+VALCD8   DS    0H                                                       09700000
+         B     VALCNORM                                                 09710000
+                                                                        09720000
+*--------------------------------------------------------------         09730000
+*   Validate numeric data types                                         09740000
+*--------------------------------------------------------------         09750000
+                                                                        09760000
+VALCNUM  DS    0H                 VALIDATE NUMERIC DATA TYPES           09770000
+         CLI   TBCNTYPE,$NMAX$    WITHIN LIMITS?                        09780000
+         BH    VALCERR2           ERROR IF NOT                          09790000
+                                                                        09800000
+VALCN1   DS    0H                                                       09810000
+         CLI   TBCNTYPE,$NTINT    INTEGER                               09820000
+         BE    VALCINT                                                  09830000
+         CLI   TBCNTYPE,$NTUINT   UNSIGNED INTEGER                      09840000
+         BNE   VALCN2                                                   09850000
+                                                                        09860000
+VALCINT  DS    0H                 INTEGER LENGTH TESTS                  09870000
+         C     R2,=A(TBC_LENGTH_TINYINT)                                09880000
+         BE    VALCN2                                                   09890000
+         C     R2,=A(TBC_LENGTH_SMALLINT)                               09900000
+         BE    VALCN2                                                   09910000
+         C     R2,=A(TBC_LENGTH_INTEGER)                                09920000
+         BNE   VALCERR3                                                 09930000
+                                                                        09940000
+VALCN2   DS    0H                                                       09950000
+         CLI   TBCNTYPE,$NTFLOAT  FLOAT                                 09960000
+         BNE   VALCN3                                                   09970000
+         C     R2,=F'4'           FLOAT LENGTH TESTS                    09980000
+         BE    VALCN3                                                   09990000
+         C     R2,=F'8'                                                 10000000
+         BE    VALCN3                                                   10010000
+         C     R2,=F'16'                                                10020000
+         BNE   VALCERR3                                                 10030000
+                                                                        10040000
+VALCN3   DS    0H                                                       10050000
+         CLI   TBCNTYPE,$NTDEC    PACKED DECIMAL                        10060000
+         BNE   VALCN4                                                   10070000
+         C     R2,=F'16'                                                10080000
+         BH    VALCERR3                                                 10090000
+                                                                        10100000
+VALCN4   DS    0H                                                       10110000
+         B     VALCNORM                                                 10120000
+                                                                        10130000
+*--------------------------------------------------------------         10140000
+*   Completion status reported via retcode                              10150000
+*--------------------------------------------------------------         10160000
+                                                                        10170000
+VALCNORM DS    0H                                                       10180000
+         LA    R15,RC00           ACCEPTED                              10190000
+         B     VALCFIN                                                  10200000
+                                                                        10210000
+VALCERR1 DS    0H                 LENGTH ERROR                          10220000
+         LA    R15,RC04                                                 10230000
+         B     VALCFIN                                                  10240000
+                                                                        10250000
+VALCERR2 DS    0H                 INVALID DATA TYPE                     10260000
+         LA    R15,RC08                                                 10270000
+         B     VALCFIN                                                  10280000
+                                                                        10290000
+VALCERR3 DS    0H                 LENGTH DISAGREES WITH DATA TYPE       10300000
+         LA    R15,RC12                                                 10310000
+         B     VALCFIN                                                  10320000
+                                                                        10330000
+VALCFIN  DS    0H                                                       10340000
+         NOP   0                                                        10350000
+         PR    ,                                                        10360000
+         DROP  R8                                                       10370000
+                                                                        10380000
+         EJECT                                                          10390000
+***************************************************************         10400000
+*                                                                       10410000
+* ROUTINE: VALKEYDF - Validate column key definition                    10420000
+*                                                                       10430000
+*                                                                       10440000
+* ON ENTRY:                                                             10450000
+*                                                                       10460000
+*    R1 - addr of a column key definition mapped by @TBKEYDF            10470000
+*                                                                       10480000
+*                                                                       10490000
+* ON EXIT:                                                              10500000
+*                                                                       10510000
+*    R15 contains one of the following return codes                     10520000
+*                                                                       10530000
+*        RC00 - valid column definition                                 10540000
+*                                                                       10550000
+*               R1 - number of columns included in the key              10560000
+*                                                                       10570000
+*        RC04 - invalid definition                                      10580000
+*                                                                       10590000
+*               RSN04 - key definition format error                     10600000
+*               RSN08 - excessive number of key columns                 10610000
+*               RSN12 - column datatype not eligible  (withdrawn)       10620000
+*               RSN16 - column has null attribute     (?????????)       10630000
+*                                                                       10640000
+***************************************************************         10650000
+                                                                        10660000
+VALKEYDF DS    0H                                                       10670000
+         BAKR  R14,0                                                    10680000
+         LR    R8,R1              KEY DEFINITION                        10690000
+         USING TBKEYDEF,R8                                              10700000
+                                                                        10710000
+         SR    R2,R2              PREPARE FOR INSERT                    10720000
+         ICM   R2,3,TBKCOUNT      NUMBER OF KEYCOLS                     10730000
+         BNP   VALKERR1           INVALID                               10740000
+         CH    R2,=H'256'         KEY COMPONENT LIMIT                   10750000
+         BH    VALKERR2           INVALID                               10760000
+                                                                        10770000
+         LA    R4,TBKCOLS         COLUMN LIST                           10780000
+                                                                        10790000
+VALKNEXT DS    0H                                                       10800000
+         L     R3,0(,R4)          LOCATE COLUMN DESCRIPTOR              10810000
+         USING TBCOLDEF,R3        COLUMN FORMAT                         10820000
+                                                                        10830000
+***      TM    TBCATTRS,$ATNULL   NULL COLUMN                           10840000
+***      BO    VALKERR4                                                 10850000
+                                                                        10860000
+VALKADV  DS    0H                                                       10870000
+         LA    R4,4(,R4)          ADVANCE TO NEXT KEYCOL                10880000
+         BCT   R2,VALKNEXT        VALIDATE ALL COMPONENTS               10890000
+         DROP  R3                 TBCOLDEF                              10900000
+                                                                        10910000
+*--------------------------------------------------------------         10920000
+*   Completion status reported via retcode                              10930000
+*--------------------------------------------------------------         10940000
+                                                                        10950000
+VALKNORM DS    0H                                                       10960000
+         LA    R15,RC00           ACCEPTED                              10970000
+         LH    R0,TBKCOUNT        NUMBER OF COLUMNS SPANNED BY KEY      10980000
+         B     VALKFIN                                                  10990000
+                                                                        11000000
+VALKERR1 DS    0H                 KEY DEFINITION FORMAT ERROR           11010000
+         LA    R15,RC04                                                 11020000
+         B     VALKFIN                                                  11030000
+                                                                        11040000
+VALKERR2 DS    0H                 EXCESSIVE NUMBER OF KEY COLUMNS       11050000
+         LA    R15,RC08                                                 11060000
+         B     VALKFIN                                                  11070000
+                                                                        11080000
+VALKERR3 DS    0H                 COLUMN DATATYPE NOT ELIGIBLE          11090000
+         LA    R15,RC12                                                 11100000
+         B     VALKFIN                                                  11110000
+                                                                        11120000
+VALKERR4 DS    0H                 COLUMN HAS NULL ATTRIBUTE             11130000
+         LA    R15,RC16                                                 11140000
+                                                                        11150000
+VALKFIN  DS    0H                                                       11160000
+         NOP   0                                                        11170000
+         PR    ,                                                        11180000
+         DROP  R8                                                       11190000
+                                                                        11200000
+         EJECT                                                          11210000
+***************************************************************         11220000
+*                                                                       11230000
+* ROUTINE: OBJCRE - Object create                                       11240000
+*                                                                       11250000
+*                                                                       11260000
+* ON ENTRY:                                                             11270000
+*                                                                       11280000
+*    R1 - address of a CL32 object name                                 11290000
+*    R0 - initial allocation size in bytes                              11300000
+*                                                                       11310000
+*                                                                       11320000
+* ON EXIT:                                                              11330000
+*                                                                       11340000
+*    R15-R1 contain $OBJECT return, reason, and info codes              11350000
+*                                                                       11360000
+***************************************************************         11370000
+                                                                        11380000
+OBJCRE   DS    0H                                                       11390000
+         BAKR  R14,0                                                    11400000
+         SAC   ASCP                                                     11410000
+         SYSSTATE ASCENV=P             PRIMARY MODE                     11420000
+                                                                        11430000
+         LR    R2,R1                   R2 <== ADDR OF OBJECT NAME       11440000
+         LR    R3,R0                   R3 <== INITIAL ALLOCATION        11450000
+                                                                        11460000
+         $OBJECT CREATE,                                               X11470000
+               STOKEN=*TBTSPCTK,       SPACE TOKEN                     X11480000
+               OTOKEN=OBJTOKEN,        OBJECT TOKEN RETURN AREA        X11490000
+               NAME=(R2),              OBJECT NAME                     X11500000
+               NAMELN=32,              OBJECT NAME LENGTH              X11510000
+               SIZE=(R3),              INITIAL SIZE OF OBJECT          X11520000
+               SHRPAGE=WORKFREE,       WORKAREA                        X11530000
+               MF=(E,MFE_LIST)                                          11540000
+                                                                        11550000
+         LA    R1,OBJTOKEN             RETURN OBJECT TOKEN              11560000
+                                                                        11570000
+OBJCREX  NOP   0                                                        11580000
+         PR    ,                                                        11590000
+                                                                        11600000
+         EJECT                                                          11610000
+***************************************************************         11620000
+*                                                                       11630000
+* ROUTINE: OBJDELET - Object delete by object token                     11640000
+*                                                                       11650000
+*                                                                       11660000
+* ON ENTRY:                                                             11670000
+*                                                                       11680000
+*    R1 - address of the object token                                   11690000
+*                                                                       11700000
+*                                                                       11710000
+* ON EXIT:                                                              11720000
+*                                                                       11730000
+*    R15-R1 contain $OBJECT return, reason, and info codes              11740000
+*                                                                       11750000
+***************************************************************         11760000
+                                                                        11770000
+OBJDELET DS    0H                                                       11780000
+         BAKR  R14,0                                                    11790000
+         SAC   ASCP                                                     11800000
+         SYSSTATE ASCENV=P             PRIMARY MODE                     11810000
+                                                                        11820000
+         LR    R2,R1                   R2 <== ADDR OF OBJECT TOKEN      11830000
+                                                                        11840000
+         $OBJECT DESTROY,              DELETE AN OBJECT                X11850000
+               OTOKEN=(R2),            OBJECT TOKEN RETURN AREA        X11860000
+               SHRPAGE=WORKFREE,       WORKAREA                        X11870000
+               MF=(E,MFE_LIST)                                          11880000
+                                                                        11890000
+OBJDELX  NOP   0                                                        11900000
+         PR    ,                                                        11910000
+                                                                        11920000
+         EJECT                                                          11930000
+***************************************************************         11940000
+*                                                                       11950000
+* ROUTINE: OBJLANDK - Object locate and delete by object name           11960000
+*                                                                       11970000
+*                                                                       11980000
+* ON ENTRY:                                                             11990000
+*                                                                       12000000
+*    R1 - address of a CL32 object name                                 12010000
+*                                                                       12020000
+*                                                                       12030000
+* ON EXIT:                                                              12040000
+*                                                                       12050000
+*    R15-R1 contain $OBJECT return, reason, and info codes              12060000
+*                                                                       12070000
+***************************************************************         12080000
+                                                                        12090000
+OBJLANDK DS    0H                                                       12100000
+         BAKR  R14,0                                                    12110000
+         SAC   ASCP                                                     12120000
+         SYSSTATE ASCENV=P             PRIMARY MODE                     12130000
+                                                                        12140000
+         LR    R2,R1                   R2 <== ADDR OF OBJECT NAME       12150000
+                                                                        12160000
+         $OBJECT LOCATE,               DELETE AN OBJECT                X12170000
+               STOKEN=*TBTSPCTK,       SPACE TOKEN                     X12180000
+               OTOKEN=OBJTOKEN,        OBJECT TOKEN RETURN AREA        X12190000
+               NAME=(R2),              OBJECT NAME                     X12200000
+               NAMELN=32,              OBJECT NAME LENGTH              X12210000
+               SHRPAGE=WORKFREE,       WORKAREA                        X12220000
+               MF=(E,MFE_LIST)                                          12230000
+                                                                        12240000
+         LTR   R15,R15                 OBJECT LOCATED?                  12250000
+         BNZ   OBJLANDX                FAIL IF NOT                      12260000
+                                                                        12270000
+         LA    R1,OBJTOKEN             R1 <== OBJECT TOKEN ADDRESS      12280000
+         BAS   R14,OBJDELET            DELETE THE OBJECT                12290000
+                                                                        12300000
+OBJLANDX NOP   0                                                        12310000
+         PR    ,                                                        12320000
+                                                                        12330000
+         EJECT                                                          12340000
+***************************************************************         12350000
+*                                                                       12360000
+* ROUTINE: OBJSTORE - Acquire storage from object                       12370000
+*                                                                       12380000
+*                                                                       12390000
+* ON ENTRY:                                                             12400000
+*                                                                       12410000
+*    R1 - address of the object token                                   12420000
+*    R0 - initial allocation size in bytes                              12430000
+*                                                                       12440000
+*                                                                       12450000
+* ON EXIT:                                                              12460000
+*                                                                       12470000
+*    R15-R1 contain $OBJECT return, reason, and info codes              12480000
+*                                                                       12490000
+***************************************************************         12500000
+                                                                        12510000
+OBJSTORE DS    0H                                                       12520000
+         BAKR  R14,0                                                    12530000
+                                                                        12540000
+         LR    R2,R1                   R2 <== ADDR OF OBJECT TOKEN      12550000
+         LR    R3,R0                   R3 <== STORAGE EXTENT SIZE       12560000
+                                                                        12570000
+         $OBJECT STORAGE,              ACQUIRE STORAGE                 X12580000
+               OTOKEN=(R2),            OBJECT TOKEN                    X12590000
+               SIZE=(R3),              STORAGE EXTENT SIZE             X12600000
+               LINKAGE=DIRECT,         FAST PATH                       X12610000
+               SHRPAGE=WORKFREE,       WORKAREA                        X12620000
+               MF=(E,MFE_LIST)                                          12630000
+                                                                        12640000
+         BNP   OBJSTORX                                                 12650000
+                                                                        12660000
+         $OBJECT STORAGE,              ACQUIRE STORAGE, JOURNAL ERRORS X12670000
+               OTOKEN=(R2),            OBJECT TOKEN                    X12680000
+               SIZE=(R3),              STORAGE EXTENT SIZE             X12690000
+               SHRPAGE=WORKFREE,       WORKAREA                        X12700000
+               MF=(E,MFE_LIST)                                          12710000
+                                                                        12720000
+OBJSTORX NOP   0                                                        12730000
+         PR    ,                                                        12740000
+                                                                        12750000
+         EJECT                                                          12760000
+***************************************************************         12770000
+*                                                                       12780000
+* ROUTINE: LOCATCOL - Locate column definition by arg COLDEF            12790000
+*                                                                       12800000
+* DESCRIPTION:                                                          12810000
+*                                                                       12820000
+*    Locate a column defined in a table using a candidate               12830000
+*    TBCOLDEF entry as a search argument.  An entry matches             12840000
+*    if its column names match or if its column short names             12850000
+*    match.                                                             12860000
+*                                                                       12870000
+*                                                                       12880000
+* ON ENTRY:                                                             12890000
+*                                                                       12900000
+*    R1   - addr of candidate column definition (TBCOLDEF)              12910000
+*    R0   - base address of table object                                12920000
+*                                                                       12930000
+*                                                                       12940000
+* ON EXIT:                                                              12950000
+*                                                                       12960000
+*    R15 contains one of the following return codes                     12970000
+*                                                                       12980000
+*        RC00 - column definition matched                               12990000
+*                                                                       13000000
+*               R1 - unqualified in-queue column def (COLHDR)           13010000
+*               R0 - column number                                      13020000
+*                                                                       13030000
+*        RC04 - column definition not matched                           13040000
+*                                                                       13050000
+***************************************************************         13060000
+                                                                        13070000
+LOCATCOL DS    0H                                                       13080000
+         BAKR  R14,0              SAVE MAINLINE REGS                    13090000
+                                                                        13100000
+         LAE   R4,0(R1,0)         CANDIDATE COLDEF IN PSPACE            13110000
+C        USING TBCOLDEF,R4                                              13120000
+         LAE   R10,TBLCOLST-(COLNEXT-COLHDR)                            13130000
+         USING COLHDR,R10                                               13140000
+                                                                        13150000
+         LA    R15,RC04           ASSUME NO MATCH WILL BE FOUND         13160000
+                                                                        13170000
+LOCATNXT DS    0H                                                       13180000
+         ICM   R10,15,COLNEXT     ADVANCE TO NEXT Q COL                 13190000
+         BZ    LOCATRET           UNABLE TO MATCH CANDIDATE             13200000
+         AR    R10,R0             CONVERT OFFSET TO ADDRESS             13210000
+         LAE   R9,COLDEF          COLDEF ORIGIN                         13220000
+Q        USING TBCOLDEF,R9        IN QUEUE                              13230000
+                                                                        13240000
+         TM    Q.TBCSNAME,BF      SKIP IF OMITTED                       13250000
+         BZ    LOCSNAME                                                 13260000
+         CLC   Q.TBCSNAME,C.TBCSNAME                                    13270000
+         BE    LOCATHIT                                                 13280000
+                                                                        13290000
+LOCSNAME DS    0H                                                       13300000
+         TM    Q.TBCNAME,BF       NOMATCH IF OMITTED                    13310000
+         BZ    LOCATNXT                                                 13320000
+         CLC   Q.TBCNAME,C.TBCNAME                                      13330000
+         BNE   LOCATNXT                                                 13340000
+                                                                        13350000
+LOCATHIT DS    0H                 MATCHING INQUEUE COLDEF FOUND         13360000
+         LA    R1,COLHDR          RETURN INQUEUE ADDRESS                13370000
+         L     R0,COLNUMBR        RETURN MATCHING COLUMN NUMBER         13380000
+         LA    R15,RC00           INDICATE SUCCESS                      13390000
+                                                                        13400000
+LOCATRET DS    0H                                                       13410000
+         NOP   0                                                        13420000
+         PR    ,                                                        13430000
+         DROP  Q,C                IN-QUEUE AND CANDIDATE COLDEFS        13440000
+                                                                        13450000
+         EJECT                                                          13460000
+***************************************************************         13470000
+*                                                                       13480000
+* ROUTINE: LOCATKEY - Locate key definition by arg KEYDEF               13490000
+*                                                                       13500000
+*                                                                       13510000
+* ON ENTRY:                                                             13520000
+*                                                                       13530000
+*    R1   - addr of candidate key definition (TBKEYDEF)                 13540000
+*    R0   - base address of table object                                13550000
+*                                                                       13560000
+*                                                                       13570000
+* ON EXIT:                                                              13580000
+*                                                                       13590000
+*    R15 contains one of the following return codes                     13600000
+*                                                                       13610000
+*        RC00 - key definition matched                                  13620000
+*                                                                       13630000
+*               R1 - unqualified in-queue key entry ptr                 13640000
+*                                                                       13650000
+*        RC04 - key definition not matched                              13660000
+*                                                                       13670000
+***************************************************************         13680000
+                                                                        13690000
+LOCATKEY DS    0H                                                       13700000
+         BAKR  R14,0              SAVE MAINLINE REGS                    13710000
+                                                                        13720000
+         LAE   R4,0(R1,0)         CANDIDATE KEYDEF IN PSPACE            13730000
+C        USING TBKEYDEF,R4                                              13740000
+         LAE   R10,TBLKYLST                                             13750000
+Q        USING TBKEYDEF,R10                                             13760000
+                                                                        13770000
+         LA    R15,RC04           ASSUME NO MATCH WILL BE FOUND         13780000
+                                                                        13790000
+LOKEYNXT DS    0H                                                       13800000
+         ICM   R10,15,Q.TBKLINK   ADVANCE TO NEXT Q KEY                 13810000
+         BZ    LOKEYRET           UNABLE TO MATCH CANDIDATE             13820000
+         AR    R10,R0             CONVERT OFFSET TO ADDRESS             13830000
+         CLC   Q.TBKEYNAM,C.TBKEYNAM                                    13840000
+         BNE   LOKEYNXT                                                 13850000
+         LA    R1,Q.TBKEYDEF      RETURN INQUEUE ADDRESS                13860000
+         LA    R15,RC00           INDICATE SUCCESS                      13870000
+                                                                        13880000
+LOKEYRET DS    0H                                                       13890000
+         NOP   0                                                        13900000
+         PR    ,                                                        13910000
+         DROP  Q,C                IN-QUEUE AND CANDIDATE KEY DEFS       13920000
+                                                                        13930000
+         EJECT                                                          13940000
+***************************************************************         13950000
+*                                                                       13960000
+* ROUTINE: LOCRINIT - Initialize locator                                13970000
+*                                                                       13980000
+*                                                                       13990000
+* ON ENTRY:                                                             14000000
+*                                                                       14010000
+*    R15  - size of a locator array entry (slot size)                   14020000
+*    R1   - object token ptr                                            14030000
+*    R0   - initial allocation storage size                             14040000
+*                                                                       14050000
+*                                                                       14060000
+* ON EXIT:                                                              14070000
+*                                                                       14080000
+*    R15 contains one of the following return codes                     14090000
+*                                                                       14100000
+*        RC00 - locator object constructed                              14110000
+*        RC04 - $OBJECT could not acquire storage                       14120000
+*                                                                       14130000
+***************************************************************         14140000
+                                                                        14150000
+LOCRINIT DS    0H                                                       14160000
+         BAKR  R14,0              PRESERVE CALLING ENVIRONMENT          14170000
+                                                                        14180000
+         LR    R2,R0              SIZE OF STORAGE AREA REQUIRED         14190000
+         CH    R2,=AL2(LOCPFXLN)  SUFFICIENT FOR LOCATOR?               14200000
+         BNL   *+8                SKIP IF SO                            14210000
+         LA    R2,LOCPFXLN(R15)   SPACE FOR SINGLE ENTRY AT LEAST       14220000
+                                                                        14230000
+         LR    R3,R15             SIZE OF LOCATOR SLOT (ENTRIES)        14240000
+         BAS   R14,OBJSTORE       GET OBJECT STORAGE (REF R1,R0)        14250000
+         LTR   R15,R15            SUCCESSFUL?                           14260000
+         BNZ   LOCRIERR           OBJECT MANAGER ERROR OTHERWISE        14270000
+                                                                        14280000
+         SAC   ASCAR              OPEN OBJECT SPACE WINDOW              14290000
+         SYSSTATE ASCENV=AR       ACCESS REGISTER MODE                  14300000
+         LAE   R11,0(,R1)         WINDOW TO OBJECT SPACE                14310000
+         USING LOCATOR,R11        ADDRESSABILITY TO OBJECT              14320000
+         MVC   LOCTAG,=CL8'LOCATOR'                                     14330000
+         MVC   LOCINUSE,=X'80000000'                                    14340000
+         ST    R3,LOCSLOSZ        SIZE OF EACH SLOT                     14350000
+         ST    R2,LOCSIZE         SIZE OF LOCATOR STRUCTURE             14360000
+                                                                        14370000
+         LR    R5,R2              SIZE OF STORAGE EXTENT                14380000
+         SH    R5,=AL2(LOCPFXLN)  LENGTH AVAILABLE FOR SLOTS            14390000
+         SR    R4,R4              PREPARE FOR DIVIDE                    14400000
+         DR    R4,R3              GET NUMBER OF FULL SLOTS              14410000
+         ST    R5,LOCMAX          HIGHEST SLOT NUMBER AVAILABLE         14420000
+         LTR   R5,R5              SLOTS AVAILABLE?                      14430000
+         BNP   LOCRFIN            DONE IF NOT                           14440000
+         BCTR  R5,0               NUMBER OF FREE LIST LINKS             14450000
+                                                                        14460000
+         LA    R1,1               NUMBER OF FIRST FREE SLOT             14470000
+         ST    R1,LOCFREE         INITIALIZE FREE LIST ANCHOR           14480000
+         LAE   R10,LOCSLOTS       POINT TO FIRST SLOT (#1)              14490000
+                                                                        14500000
+LOCRLINK DS    0H                                                       14510000
+         LA    R1,1(,R1)          NUMBER OF NEXT FREE SLOT              14520000
+         ST    R1,0(,R10)         SET LINK TO NEXT FREE SLOT            14530000
+         OI    0(R10),X'80'       MARK SLOT AS FREE                     14540000
+         AR    R10,R3             ADVANCE TO NEXT SLOT                  14550000
+         BCT   R5,LOCRLINK        LAST FREE SLOT ENTRY IS GROUNDED      14560000
+         DROP  R11                LOCATOR                               14570000
+                                                                        14580000
+*--------------------------------------------------------------         14590000
+*   Return completion status to caller                                  14600000
+*--------------------------------------------------------------         14610000
+                                                                        14620000
+LOCRFIN  DS    0H                                                       14630000
+         LA    R15,RC00           SUCCESS                               14640000
+         B     LOCREXIT           DONE                                  14650000
+                                                                        14660000
+LOCRIERR DS    0H                                                       14670000
+         LA    R15,RC04           ERROR                                 14680000
+                                                                        14690000
+LOCREXIT DS    0H                                                       14700000
+         NOP   0                                                        14710000
+         PR    ,                                                        14720000
+                                                                        14730000
+         EJECT                                                          14740000
+***************************************************************         14750000
+*                                                                       14760000
+* ROUTINE: SMALLDEC - Convert arg to small decimal value                14770000
+*                                                                       14780000
+*                                                                       14790000
+* ON ENTRY:                                                             14800000
+*                                                                       14810000
+*    R1  - small positive integer value                                 14820000
+*                                                                       14830000
+*                                                                       14840000
+* ON EXIT:                                                              14850000
+*                                                                       14860000
+*    R1  - addr of a CL4 area containing right-justified,               14870000
+*          blank filled result                                          14880000
+*                                                                       14890000
+***************************************************************         14900000
+                                                                        14910000
+SMALLDEC DS    0H                                                       14920000
+         CVD   R1,DWORD           CONVERT TO DECIMAL                    14930000
+         MVC   FWORD,=X'40212020' AT LEAST A TWO-DIGIT RESULT           14940000
+         ED    FWORD,DWORD+6      EYEBALL FORMAT                        14950000
+         LA    R1,FWORD           RETURN RESULT                         14960000
+         BR    R14                DONE                                  14970000
+                                                                        14980000
+         EJECT                                                          14990000
+***************************************************************         15000000
+*                                                                       15010000
+*   Local read-only data areas, etc.                                    15020000
+*                                                                       15030000
+***************************************************************         15040000
+                                                                        15050000
+LOCSUFX  DC    C'.LOCATOR'        LOCATOR ARRAY NAME SUFFIX             15060000
+NDXSUFX  DC    C'.INDEX'          INDEX SUFFIX                          15070000
+                                                                        15080000
+         LTORG ,                                                        15090000
+         END   ,                                                        15100000

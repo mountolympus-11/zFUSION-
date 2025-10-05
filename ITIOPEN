@@ -1,0 +1,618 @@
+ITIOPEN  TITLE '- TABLE INTERFACE (TI) OPEN PROCESSOR'                  00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE: ITIOPEN - Table interface (TI) open processor                00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This routine provides the logic that allows a cooperative          00080000
+*    process (COOP) to open a table residing in a named                 00090000
+*    project.  Upon successful completion, a table token                00100000
+*    suitable for use in all other table interface services is          00110000
+*    returned.                                                          00120000
+*                                                                       00130000
+*    Coresident requests may also invoke this service,                  00140000
+*    optionally passing a previously opened table by table              00150000
+*    token.  This technique may be used to provide COOP access          00160000
+*    to a table built or opened by CORES.                               00170000
+*                                                                       00180000
+*                                                                       00190000
+* IMPLEMENTATION:                                                       00200000
+*                                                                       00210000
+*    All open tables are represented by a table interface               00220000
+*    block, or TIB, created by this routine and chained off the         00230000
+*    IUSER.  The TIB contains anchors for the table description         00240000
+*    (TBFMT, etc.) and other buffers used to satisfy subsequent         00250000
+*    table interface requests from the cooperative process.             00260000
+*                                                                       00270000
+*    COOP may propose one of several active projects.  TIOPEN           00280000
+*    accepts either the project currently active for the                00290000
+*    specified user, SYSCATLG, or INTEXSPC.                             00300000
+*                                                                       00310000
+*    First, the TIB chain is run to ensure that the table               00320000
+*    named not currently open - no scenario where multiple              00330000
+*    concurrent opens is desirable has been foreseen.  However,         00340000
+*    the branch (to WOPENED) leading to RC12,RSN04 is currently         00350000
+*    disabled.                                                          00360000
+*                                                                       00370000
+*    Then, a TBOPEN is issued using the table name provided.            00380000
+*    If successful, table services will return an appropriate           00390000
+*    table token suitable for use in all other table services           00400000
+*    requests.                                                          00410000
+*                                                                       00420000
+*    If successfully opened, two describe (TBDESC) operations           00430000
+*    are performed.  In the first, the table description is             00440000
+*    produced in portable offlink format.  This is normally             00450000
+*    generated for COOP but can be suppressed by setting                00460000
+*    TIOPEN.TIOPNDSC.  An additional describe is done to                00470000
+*    acquire the table description in linked (ACON) format.             00480000
+*    This result is anchored in the TIB for use by mainframe            00490000
+*    TI component request processors.                                   00500000
+*                                                                       00510000
+*    If the caller requests a table description, it can be              00520000
+*    delivered in one of two formats; standard or terse, as             00530000
+*    selected by TIOPOPTS.TIOPTERS.                                     00540000
+*                                                                       00550000
+*                                                                       00560000
+* ON ENTRY:                                                             00570000
+*                                                                       00580000
+*    R1  points to a parameter list described by the @TIOPEN            00590000
+*        mapping.  Primarily, that parameter list contains              00600000
+*        the name of the table and of the project in which              00610000
+*        the table is assumed to reside, or alternatively,              00620000
+*        a table token identifying an opened table.                     00630000
+*                                                                       00640000
+*                                                                       00650000
+* ON EXIT:                                                              00660000
+*                                                                       00670000
+*    A response block is constructed to convey the results of           00680000
+*    the open request.  When the return code is non-zero, the           00690000
+*    response string contains an appropriate error message.             00700000
+*                                                                       00710000
+*    Otherwise, the response string consists of the an optional         00720000
+*    describe (TBDESC LINK=OFFSET) operation performed against          00730000
+*    the open table.  The describe result, if generated, is             00740000
+*    mapped by TBFMT.                                                   00750000
+*                                                                       00760000
+*    The response area will contain one of the following                00770000
+*    return/reason code pairs which are also reflected to the           00780000
+*    caller via R15 and R0.  R1 contains a diagnostic in some           00790000
+*    cases.                                                             00800000
+*                                                                       00810000
+*       RC00 - open complete, tmrsttkn contains the table token         00820000
+*                                                                       00830000
+*              R1 - addr of newly constructed TIB                       00840000
+*              R0 - number of rows in the base table                    00850000
+*                                                                       00860000
+*       RC04 - insufficient response buffer allocation                  00870000
+*              (TXP insert service failure)                             00880000
+*                                                                       00890000
+*       RC08 - named table not found                                    00900000
+*                                                                       00910000
+*       RC12 - request in error                                         00920000
+*                                                                       00930000
+*              RSN04 - table is already open                            00940000
+*              RSN08 - invalid project id                               00950000
+*                                                                       00960000
+*       RC16 - services error                                           00970000
+*                                                                       00980000
+*              RSN04 - table services failure                           00990000
+*              RSN08 - storage allocation error                         01000000
+*                                                                       01010000
+*       RC20 - response service failure                                 01020000
+*                                                                       01030000
+**<DOC-OFF>****************************************************         01040000
+                                                                        01050000
+         EJECT                                                          01060000
+***************************************************************         01070000
+*                                                                       01080000
+* MAINTENANCE:                                                          01090000
+*                                                                       01100000
+*   08/xx/92  R. Turgeon                                                01110000
+*             Initial version                                           01120000
+*                                                                       01130000
+*   08/05/93  Ron Colmone                                               01140000
+*             Converted to STDENV                                       01150000
+*                                                                       01160000
+*   05/07/94  R. Turgeon                                                01170000
+*             Implement @TIOPEN.TIOPTKN requests allowing a             01180000
+*             coresident requester to provide the token of an           01190000
+*             open table, avoiding the expense of reopening             01200000
+*             the table.                                                01210000
+*                                                                       01220000
+*   11/22/94  R. Turgeon   par #156358                                  01230000
+*             Implement the TIOPNDSC flag to suppress the               01240000
+*             return of potentially lengthy table descriptions          01250000
+*             to uninterested requesters.                               01260000
+*                                                                       01270000
+*   12/06/94  R. Turgeon                                                01280000
+*             Removed PAGE= / SHRPAGE= for $SPACE, $OBJECT,             01290000
+*             and TB* service requests                                  01300000
+*                                                                       01310000
+*   11/13/95  R. Turgeon                                                01320000
+*             Implement FORMAT=TERSE column descriptor allowing         01330000
+*             the return of TBCOLDV1 blocks rather than the             01340000
+*             larger TBCOLDEF blocks.                                   01350000
+*                                                                       01360000
+***************************************************************         01370000
+                                                                        01380000
+         EJECT                                                          01390000
+         #WORK ,             READ / WRITE WORKAREA                      01400000
+                                                                        01410000
+TOTROWS  DS    F             # ROWS IN BASE TABLE FROM TBOPEN           01420000
+TTOKEN   DS    F             TABLE TOKEN                                01430000
+TTOKENIN DS    F             TABLE TOKEN PASSED TO THIS ROUTINE OR ZERO 01440000
+#TIBPTR  DS    A             ADDR OF NEWLY ALLOCATED TIB                01450000
+$TMRESP  DS    A             BOUND PTR TO TMRESP BLOCK IN TXP BUFFER    01460000
+                                                                        01470000
+DESC     DS    A             ADDR OF DESCRIBE RESULT                    01480000
+DESCLN   DS    F             DATA LENGTH IN DESCRIBE RESULT             01490000
+CODESC   DS    A             ADDR OF DESCRIBE RESULT FOR COOP           01500000
+CODESCLN DS    F             LENGTH OF STORAGE BLOCK ACQUIRED BY TBDESC 01510000
+                                                                        01520000
+DESCFMT  DS    F             TABLE DESCRIPTION FORMAT REQ (TIOPTERS)    01530000
+                                                                        01540000
+#TIB     DS    0F,XL(TIBLN)                                             01550000
+                                                                        01560000
+         #ENDWORK ,                                                     01570000
+                                                                        01580000
+         EJECT                                                          01590000
+         $RESMGR DSECT=YES   RESOURCE MANAGER PLIST                     01600000
+                                                                        01610000
+         EJECT                                                          01620000
+         @TIOPEN ,           REQUEST BLOCK FORMAT                       01630000
+                                                                        01640000
+         EJECT                                                          01650000
+         TIBLOCK ,           TABLE INTERFACE BLOCK (TIB)                01660000
+                                                                        01670000
+         EJECT                                                          01680000
+         IUSER ,             USER ANCHOR                                01690000
+                                                                        01700000
+         EJECT                                                          01710000
+         TMRESP  ,           RESPONSE HEADER                            01720000
+                                                                        01730000
+         EJECT                                                          01740000
+         REQHDR  ,           REQUEST  HEADER                            01750000
+                                                                        01760000
+         EJECT                                                          01770000
+         TBSERVIS OPEN,DESC,CLOSE                                       01780000
+                                                                        01790000
+         EJECT                                                          01800000
+         EQUS  ,             GENERAL EQUATES                            01810000
+                                                                        01820000
+         EJECT                                                          01830000
+ITIOPEN  #ENTER PREG=R8                                                 01840000
+                                                                        01850000
+         USING TIOPEN,R8          LIFE OF FUNCTION                      01860000
+         USING ITASK,R10          STDENV                                01870000
+                                                                        01880000
+         L     R9,TSKPCBC         PROCESS MODE                          01890000
+         USING IPCB,R9                                                  01900000
+                                                                        01910000
+*--------------------------------------------------------------         01920000
+*   General initialization and request validation                       01930000
+*--------------------------------------------------------------         01940000
+                                                                        01950000
+         XC    TIOPRTIB,TIOPRTIB  INITIAL TIB PTR RETURN                01960000
+         XC    TIOPRESP,TIOPRESP  INITIAL RESPONSE HEADER RETURN        01970000
+                                                                        01980000
+         MVC   DESCFMT(1),TIOPOPTS   OPTIONS                            01990000
+         NI    DESCFMT,TIOPTERS      TABLE DESCRIBE OUTPUT FORMAT       02000000
+                                                                        02010000
+         L     R7,PCBUSER         ADDRESS OF IUSER BLOCK                02020000
+         USING IUSER,R7           TEMP ADDRESSABILITY                   02030000
+                                                                        02040000
+         L     R7,USRPROJ         ADDRESS OF PROJECT BLOCK              02050000
+         USING IPROJ,R7           LIFE OF FUNCTION                      02060000
+                                                                        02070000
+         $XPBUFR ISRT,            ADDRESS RESPONSE HEADER TO XPBUFR    X02080000
+               NEWFUNC=(TBSV,TI$OPEN),                                 X02090000
+               DATALEN=TMRESPLN,                                       X02100000
+               EXPAND=YES,                                             X02110000
+               MF=(E,MFE_LIST)                                          02120000
+                                                                        02130000
+         BNZ   ERR_ITXP           RESPONSE ERROR OTHERWISE              02140000
+                                                                        02150000
+*--------------------------------------------------------------         02160000
+*   Bind the response block ptr to allow TXP buffer realloc             02170000
+*--------------------------------------------------------------         02180000
+                                                                        02190000
+         LR    R4,R1              NOW RESIDES IN TXP BUFFER             02200000
+         ST    R4,$TMRESP         SAVE BINDABLE PTR TO BLOCK            02210000
+         USING TMRESP,R4          RESPONSE BLOCK                        02220000
+                                                                        02230000
+         $XPBUFR ADDPTR,PTRS=($TMRESP)                                  02240000
+                                                                        02250000
+         EJECT                                                          02260000
+***************************************************************         02270000
+*                                                                       02280000
+*   If the table has already been opened by the (coresident)            02290000
+*   requester, the TBOPEN normally performed in this routine            02300000
+*   is bypassed.                                                        02310000
+*                                                                       02320000
+***************************************************************         02330000
+                                                                        02340000
+         ICM   R0,15,TIOPTKN      TABLE TOKEN PROVIDED?                 02350000
+         ST    R0,TTOKEN          ASSUME SO                             02360000
+         ST    R0,TTOKENIN        ALLOWS DETERMINATION OF PASSED TOKEN  02370000
+         BNZ   DESCRIBE           BYPASS TBOPEN, ETC. IF POSSIBLE       02380000
+                                                                        02390000
+***************************************************************         02400000
+*                                                                       02410000
+*   The table has been identified by project and table name and         02420000
+*   a TBOPEN is required.  Determine if project.table is                02430000
+*   already enqueued on TIB chain                                       02440000
+*                                                                       02450000
+***************************************************************         02460000
+                                                                        02470000
+         LA    R0,TIOPPROJ        R0 <== PROJECT NAME                   02480000
+         LA    R1,TIOPTABL        R1 <== TABLE NAME                     02490000
+         BAS   R14,LOCTIB         TEST WHETHER TABLE ALREADY OPENED     02500000
+         LTR   R15,R15            MATCHING TIB FOUND? (R1)              02510000
+SEENOTES NOP   WOPENED            WARN THE REQUESTOR                    02520000
+                                                                        02530000
+*--------------------------------------------------------------         02540000
+*   Acquire token for system space or user's active project             02550000
+*--------------------------------------------------------------         02560000
+                                                                        02570000
+         L     R2,ICTSYSP@        LOCATE CATALOG SPACE TOKEN            02580000
+         CLC   TIOPPROJ,=CL8'SYSCATLG'                                  02590000
+         BE    OPENTABL           READY IF CATALOG REQUEST              02600000
+                                                                        02610000
+         L     R2,ICTXSPT@        LOCATE EXECUTION SPACE TOKEN          02620000
+         CLC   TIOPPROJ,=CL8'INTEXSPC'                                  02630000
+         BE    OPENTABL           READY IF VDB TABLE REQUEST            02640000
+                                                                        02650000
+         LTR   R7,R7              PROJECT AVAILABLE?                    02660000
+         BZ    EPROJID            NO, INVALID PROJECT                   02670000
+                                                                        02680000
+         LA    R2,PRJTOKEN        LOCATE ACTIVE PROJECT TOKEN           02690000
+         CLC   TIOPPROJ,PRJNAME   AS ANTICIPATED                        02700000
+         BNE   EPROJID            ELSE INVALID PROJECT REFERENCE        02710000
+                                                                        02720000
+*--------------------------------------------------------------         02730000
+*   Open the target table                                               02740000
+*--------------------------------------------------------------         02750000
+                                                                        02760000
+OPENTABL DS    0H                                                       02770000
+         TBOPEN TIOPTABL,         OPEN THE NAMED TABLE                 X02780000
+               STOKEN=(R2),       PROJECT SPACE TOKEN                  X02790000
+               TTOKEN=TTOKEN,     RETAIN TABLE TOKEN                   X02800000
+               MF=(E,MFE_LIST)                                          02810000
+                                                                        02820000
+         LTR   R15,R15            NORMAL COMPLETION EXPECTED            02830000
+         BNZ   ETBOPEN            TABLE SERVICE DETECTED FAILURE        02840000
+                                                                        02850000
+         MVC   TIOPTKN,TTOKEN     RETURN TABLE TOKEN TO CORES REQUESTER 02860000
+                                                                        02870000
+         EJECT                                                          02880000
+***************************************************************         02890000
+*                                                                       02900000
+*   Two descriptions are required, one for use by the CORES             02910000
+*   table interface (TI) managers in linked (address) format and        02920000
+*   the other for COOP in portable (offlink) format.                    02930000
+*                                                                       02940000
+***************************************************************         02950000
+                                                                        02960000
+DESCRIBE DS    0H                                                       02970000
+         TBDESC TTOKEN=TTOKEN,    DESCRIBE THE TABLE                   X02980000
+               LINK=ACON,         LINKED FORMAT                        X02990000
+               MF=(E,MFE_LIST)                                          03000000
+                                                                        03010000
+         LTR   R15,R15            NORMAL COMPLETION EXPECTED            03020000
+         BNZ   ETBSRV             DESCRIBE ERROR                        03030000
+                                                                        03040000
+         ST    R1,DESC            LOCAL (TI) TABLE DESCRIPTION          03050000
+         ST    R0,DESCLN          LENGTH OF DESCRIBE RESULT BUFFER      03060000
+                                                                        03070000
+         MVC   TOTROWS,TBFROWCT-TBFMT(R1)   ROW COUNT                   03080000
+                                                                        03090000
+*--------------------------------------------------------------         03100000
+*   Get a table description in OFFLINK form (optionally TERSE)          03110000
+*--------------------------------------------------------------         03120000
+                                                                        03130000
+         TBDESC TTOKEN=TTOKEN,    DESCRIBE THE TABLE FORMAT            X03140000
+               LINK=OFFSET,       PORTABLE FORMAT                      X03150000
+               FORMAT=*DESCFMT,   DESCRIPTION FORMAT                   X03160000
+               MF=(E,MFE_LIST)                                          03170000
+                                                                        03180000
+         ST    R1,CODESC          SAVE RESULT ALLOCATED BY TBDESC       03190000
+         ST    R0,CODESCLN        SIZE OF STORAGE ACQUIRED BY TBDESC    03200000
+                                                                        03210000
+         LTR   R15,R15            NORMAL COMPLETION EXPECTED            03220000
+         BNZ   ETBSRV             DESCRIBE ERROR                        03230000
+                                                                        03240000
+         EJECT                                                          03250000
+***************************************************************         03260000
+*                                                                       03270000
+*   Create a TIB to represent COOP's use of table                       03280000
+*                                                                       03290000
+***************************************************************         03300000
+                                                                        03310000
+         L     R2,PCBUSER         ADDRESS OF IUSER                      03320000
+         USING IUSER,R2           ADDRESSABILITY                        03330000
+                                                                        03340000
+         LA    R5,#TIB            TIB                                   03350000
+         USING TIBLOCK,R5         FORMATTED AREA                        03360000
+         XC    TIBLOCK(TIBLN),TIBLOCK                                   03370000
+         MVC   TIBTAG,=CL4'TIB '  EYECATCHER                            03380000
+         MVC   TIBTOKN,TTOKEN     TABLE TOKEN                           03390000
+         MVC   TIBDESC,DESC       DESCRIBE AREA                         03400000
+         MVC   TIBDESCL,DESCLN    DESCRIBE AREA LENGTH                  03410000
+         MVC   TIBPROJ,TIOPPROJ   PROJECT NAME                          03420000
+         MVC   TIBTABL,TIOPTABL   TABLE NAME                            03430000
+                                                                        03440000
+         CLI   TIOPAUTO,0         AUTO CLOSE AT END-OF-TABLE?           03450000
+         BE    *+8                SKIP IF NOT                           03460000
+         OI    TIBFLAGS,TIB$CLS   RETAIN AUTO CLOSE OPTION              03470000
+                                                                        03480000
+         CLI   TIOPDROP,0         DROP TABLE AT CLOSE                   03490000
+         BE    *+8                SKIP IF NOT                           03500000
+         OI    TIBFLAGS,TIB$DROP  RETAIN AUTO DROP OPTION               03510000
+                                                                        03520000
+         STGGET TIBLN,QH=USRSTG   ALLOCATE TIB STORAGE                  03530000
+         BNZ   ERR_STG            ERROR, STORAGE ALLOCATION             03540000
+                                                                        03550000
+         MVC   0(TIBLN,R1),TIBLOCK                                      03560000
+         MVC   TIBNEXT-TIBLOCK(,R1),USRTIBS  PUSH TIB ONTO LIST         03570000
+         ST    R1,USRTIBS         REESTABLISH TOP OF STACK              03580000
+         ST    R1,#TIBPTR         RETAIN LOAL TIB PTR                   03590000
+         ST    R1,TIOPRTIB        RETURN PTR TO TIB                     03600000
+         DROP  R2                 IUSER                                 03610000
+                                                                        03620000
+***************************************************************         03630000
+*                                                                       03640000
+*   Request complete.  Prepare the table description for COOP           03650000
+*   return unless explicitly suppressed by TIOPEN parameter.            03660000
+*   Reason code is the number of table rows.                            03670000
+*                                                                       03680000
+***************************************************************         03690000
+                                                                        03700000
+         LA    R15,RC00           COMPLETION CODE                       03710000
+         L     R0,TOTROWS         RSN CODES IS # OF TABLE ROWS          03720000
+         SR    R2,R2              DESCRIBE RESULT LENGTH                03730000
+         SR    R3,R3              DESCRIBE RESULT ADDRESS               03740000
+                                                                        03750000
+         CLI   TIOPNDSC,FALSE     TABLE DESCRIPTION RETURN SUPPRESSED?  03760000
+         BNE   RESPOND            NO DESCRIPTION IF SO                  03770000
+                                                                        03780000
+         L     R2,CODESC          OPEN RESPONSE IS DESCRIBE OUTPUT      03790000
+         L     R3,TBFUSED-TBFMT(,R2)   LENGTH OF RESPONSE STRING        03800000
+         B     RESPOND            RESPOND TO COOP                       03810000
+                                                                        03820000
+         EJECT                                                          03830000
+***************************************************************         03840000
+*                                                                       03850000
+*   Error handlers                                                      03860000
+*                                                                       03870000
+***************************************************************         03880000
+                                                                        03890000
+ETBOPEN  DS    0H                 TBOPEN COULD NOT ACQUIRE TABLE        03900000
+         LA    R15,RC08           ASSUME TABLE NOT FOUND                03910000
+         SR    R0,R0                                                    03920000
+         LA    R2,MSGNF                                                 03930000
+         LA    R3,L'MSGNF                                               03940000
+         B     RESPOND                                                  03950000
+                                                                        03960000
+WOPENED  DS    0H                 TABLE IS ALREADY ACTIVE (R1 -> TIB)   03970000
+         LA    R15,RC12           FAIL THE REQUEST                      03980000
+         LA    R0,RSN04                                                 03990000
+         LA    R2,MSGACTIV                                              04000000
+         LA    R3,L'MSGACTIV                                            04010000
+         B     RESPOND                                                  04020000
+                                                                        04030000
+EPROJID  DS    0H                 INVALID PROJECT REFERENCE             04040000
+         LA    R15,RC12           FAIL THE REQUEST                      04050000
+         LA    R0,RSN08                                                 04060000
+         LA    R2,MSGIPROJ                                              04070000
+         LA    R3,L'MSGIPROJ                                            04080000
+         B     RESPOND                                                  04090000
+                                                                        04100000
+ETBSRV   DS    0H                 TABLE SERVICES FAILURE                04110000
+         LA    R15,RC16           FAIL THE REQUEST                      04120000
+         LA    R0,RSN04                                                 04130000
+         LA    R2,MSGTBERR                                              04140000
+         LA    R3,L'MSGTBERR                                            04150000
+         B     RESPOND                                                  04160000
+                                                                        04170000
+ERR_STG  DS    0H                 STORAGE ALLOCATION FAILURE            04180000
+         LA    R15,RC16           FAIL THE REQUEST                      04190000
+         LA    R0,RSN08                                                 04200000
+         LA    R2,MSGERSTG                                              04210000
+         LA    R3,L'MSGERSTG                                            04220000
+         B     RESPOND                                                  04230000
+                                                                        04240000
+         EJECT                                                          04250000
+***************************************************************         04260000
+*                                                                       04270000
+*   Construct response - the data portion of the response               04280000
+*   block consists of a response header followed by a response          04290000
+*   string.  When the TIOPEN request succeeds, the response             04300000
+*   string is the output of a describe (TBDESC) issued against          04310000
+*   the opened table.  In all error cases, the response string          04320000
+*   is an error message.                                                04330000
+*                                                                       04340000
+***************************************************************         04350000
+                                                                        04360000
+RESPOND  DS    0H                                                       04370000
+         MVC   TMRSTTKN,TIBTOKN   RETURN THE NEW TABLE TOKEN            04380000
+         ST    R15,TMRSRC                                               04390000
+         ST    R15,TMRSUPRC                                             04400000
+         ST    R0,TMRSRSN                                               04410000
+         ST    R1,TMRSINFO                                              04420000
+                                                                        04430000
+         LTR   R3,R3              RESPONSE PROVIDED?                    04440000
+         BZ    RESPOST            SKIP RESPONSE AREA INSERT IF NOT      04450000
+                                                                        04460000
+         $XPBUFR ISRT,            ADD RESPONSE TO TXP BUFFER           X04470000
+               DATA=(R2),                                              X04480000
+               DATALEN=(R3),                                           X04490000
+               EXPAND=YES,                                             X04500000
+               MF=(E,MFE_LIST)                                          04510000
+                                                                        04520000
+         BNZ   ERR_ITXP           NO, ERROR                             04530000
+                                                                        04540000
+RESPOST  DS    0H                                                       04550000
+         L     R4,$TMRESP         ALLOW FOR TXP BUFFER EXPANSION        04560000
+         STH   R3,TMRSDATL        SAVE DATA LENGTH                      04570000
+         B     CLEANUP            CLEANUP PROCESSING                    04580000
+                                                                        04590000
+         EJECT                                                          04600000
+***************************************************************         04610000
+*                                                                       04620000
+*   Errors usually precluding response to cooperative process           04630000
+*                                                                       04640000
+***************************************************************         04650000
+                                                                        04660000
+ERR_ITXP DS    0H                                                       04670000
+         LR    R1,R15             TXP SERVICE RETURN CODE               04680000
+         LA    R15,RC04           ASSUME OUT-OF-SPACE                   04690000
+         CR    R1,R15             CORRECT?                              04700000
+         BE    *+8                TERMINATE WITH WARNING                04710000
+         LA    R15,RC20           ELSE MORE SERIOUS PROBLEM             04720000
+                                                                        04730000
+         ST    R15,TMRSRC         RETURN CODE                           04740000
+         ST    R15,TMRSUPRC       LOCAL RETCODE                         04750000
+         ST    R0,TMRSRSN         TXP REASON                            04760000
+         ST    R1,TMRSINFO        TXP RETCODE                           04770000
+                                                                        04780000
+         EJECT                                                          04790000
+***************************************************************         04800000
+*                                                                       04810000
+*   Release transient storage.  Control blocks, buffers, etc            04820000
+*   acquired by this routine are also freed if the open fails.          04830000
+*                                                                       04840000
+***************************************************************         04850000
+                                                                        04860000
+CLEANUP  DS    0H                                                       04870000
+         L     R2,CODESCLN        SIZE OF BLOCK                         04880000
+         ICM   R3,15,CODESC       DESCRIBE DONE FOR COOP?               04890000
+         BZ    FREETEST           SKIP FREE IF NOT                      04900000
+                                                                        04910000
+         $RETSTOR (R3)                                                  04920000
+                                                                        04930000
+FREETEST DS    0H                                                       04940000
+                                                                        04950000
+*--------------------------------------------------------------         04960000
+*   Withdraw notification of TXP buffer movement                        04970000
+*--------------------------------------------------------------         04980000
+                                                                        04990000
+         $XPBUFR REMPTR,PTRS=($TMRESP)                                  05000000
+                                                                        05010000
+*--------------------------------------------------------------         05020000
+*   Cleanup peformed only if abnormal completion                        05030000
+*--------------------------------------------------------------         05040000
+                                                                        05050000
+         ICM   R0,15,TMRSRC       REQUEST FAILED?                       05060000
+         BZ    FREEFIN            DONE HERE IF NOT                      05070000
+         L     R2,PCBUSER         ADDRESS OF IUSER                      05080000
+         USING IUSER,R2           ADDRESSABILITY                        05090000
+                                                                        05100000
+         ICM   R3,15,#TIBPTR      TIB ALLOCATED?                        05110000
+         BZ    FREEDESC           SKIP FREE IF NOT                      05120000
+         MVC   USRTIBS,TIBNEXT-TIBLOCK(R3)  DECHAIN                     05130000
+                                                                        05140000
+         STGRETN ADDR=(R3),LEN=TIBLN,QH=USRSTG                          05150000
+                                                                        05160000
+         DROP  R2                 IUSER                                 05170000
+                                                                        05180000
+FREEDESC DS    0H                 FREE DESCRIBE AREA                    05190000
+         ICM   R1,15,DESC         DESCRIBE OPERATION COMPLETED?         05200000
+         BZ    FREETABL           SKIP FREE IF NOT                      05210000
+                                                                        05220000
+         $RETSTOR *DESC           RELEASE STORAGE                       05230000
+                                                                        05240000
+FREETABL DS    0H                                                       05250000
+         ICM   R2,15,TTOKENIN     TABLE WAS OPENED?                     05260000
+         BNZ   FREEFIN                                                  05270000
+                                                                        05280000
+         TBCLOSE TTOKEN=TTOKEN,   CLOSE THE TABLE                      X05290000
+               MF=(E,MFE_LIST)                                          05300000
+                                                                        05310000
+FREEFIN  DS    0H                                                       05320000
+                                                                        05330000
+         EJECT                                                          05340000
+***************************************************************         05350000
+*                                                                       05360000
+*   Return to caller                                                    05370000
+*                                                                       05380000
+***************************************************************         05390000
+                                                                        05400000
+         L     R4,$TMRESP         REFRESH RESPONSE BLOCK ORIGIN         05410000
+         MVC   TIOPRESP,$TMRESP   RETURN RESPONSE BLOCK ORG TO CALLER   05420000
+                                                                        05430000
+         L     R15,TMRSRC         RETURN CODE                           05440000
+         L     R0,TMRSRSN         REASON CODE                           05450000
+         L     R1,TMRSINFO        INFO / DIAGNOSTIC CODE                05460000
+                                                                        05470000
+         #EXIT ,                  RETURN                                05480000
+         DROP  R4                 TMRESP                                05490000
+                                                                        05500000
+         EJECT                                                          05510000
+***************************************************************         05520000
+*                                                                       05530000
+* ROUTINE: LOCTIB - locate TIB by project and table name                05540000
+*                                                                       05550000
+* ON ENTRY:                                                             05560000
+*                                                                       05570000
+*    R0  - address of project name                                      05580000
+*    R1  - address of table name                                        05590000
+*                                                                       05600000
+* ON EXIT:                                                              05610000
+*                                                                       05620000
+*    R15 contains one of the following return codes                     05630000
+*                                                                       05640000
+*        RC00 - TIB located and returned via R1                         05650000
+*        RC04 - the named table is not active                           05660000
+*                                                                       05670000
+***************************************************************         05680000
+                                                                        05690000
+LOCTIB   DS    0H                                                       05700000
+         BAKR  R14,0              PRESERVE MAINLINE ENVIRONMENT         05710000
+                                                                        05720000
+         L     R4,PCBUSER         ADDRESS OF IUSER                      05730000
+         USING IUSER,R4           ADDRESSABILITY                        05740000
+                                                                        05750000
+         LR    R2,R0              PROJECT NAME                          05760000
+         LR    R3,R1              TABLE NAME                            05770000
+                                                                        05780000
+         LA    R5,USRTIBS-(TIBNEXT-TIBLOCK)                             05790000
+         USING TIBLOCK,R5         PREPARE FOR TIB TRAVERSAL             05800000
+         LA    R15,RC04           ASSUME TABLE IS NOT ACTIVE            05810000
+                                                                        05820000
+LTIBNXT  DS    0H                                                       05830000
+         ICM   R5,15,TIBNEXT      ADVANCE TO NEXT TIB                   05840000
+         BZ    LTIBEXIT           TIB NOT FOUND                         05850000
+         CLC   TIBPROJ,0(R2)      PROJECT NAME MATCH?                   05860000
+         BNE   LTIBNXT            ONWARD IF NOT                         05870000
+         CLC   TIBTABL,0(R3)      TABLE NAME MATCH?                     05880000
+         BNE   LTIBNXT            ONWARD IF NOT                         05890000
+                                                                        05900000
+         LA    R1,TIBLOCK         RETURN MATCHING TIB                   05910000
+         LA    R15,RC00           INDICATE SUCCESS                      05920000
+                                                                        05930000
+LTIBEXIT NOP   0                  RETURN                                05940000
+         PR    ,                                                        05950000
+         DROP  R4,R5              IUSER, TIB                            05960000
+                                                                        05970000
+         EJECT                                                          05980000
+***************************************************************         05990000
+*                                                                       06000000
+*   Local read only storage                                             06010000
+*                                                                       06020000
+***************************************************************         06030000
+                                                                        06040000
+MSGNF    DC    C'Table not found'                                       06050000
+MSGACTIV DC    C'Table is in use'                                       06060000
+MSGIPROJ DC    C'Invalid project reference'                             06070000
+MSGTBERR DC    C'Table service error'                                   06080000
+MSGERSTG DC    C'Storage allocation failure'                            06090000
+                                                                        06100000
+         LTORG ,                                                        06110000
+                                                                        06120000
+         PRINT NOGEN                                                    06130000
+         ICVT  ,                                                        06140000
+         ITASK ,                                                        06150000
+         IPCB  ,                                                        06160000
+         IPROJ ,                                                        06170000
+         END   ,                                                        06180000

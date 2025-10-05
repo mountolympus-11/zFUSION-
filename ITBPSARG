@@ -1,0 +1,711 @@
+ITBPSARG TITLE 'TABLE SERVICES - SEARCH ARG VALIDATION / CONVERSION'    00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE:  ITBPSARG - search argument validation & conversion          00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    Phase I                                                            00080000
+*    =======                                                            00090000
+*                                                                       00100000
+*    This routine resolves the column names supplied in the             00110000
+*    request.  It places the table space offset of the                  00120000
+*    appropriate column definition in the basic predicate.              00130000
+*    Once the column name is resolved the routine then                  00140000
+*    validates the value supplied. if the column definition is          00150000
+*    for a character type then the length is checked so it is           00160000
+*    no bigger than allowed as well as a check for zero length          00170000
+*    which will also be rejected.                                       00180000
+*                                                                       00190000
+*    If the column has an integral datatype then the predicate          00200000
+*    value is converted to a fullword binary value.  Several            00210000
+*    tests are done prior to the actual numeric conversion to           00220000
+*    ensure the CVB will not fail.                                      00230000
+*                                                                       00240000
+*                                                                       00250000
+*    Phase II                                                           00260000
+*    ========                                                           00270000
+*                                                                       00280000
+*    Predetermined truth values associated with connectors and,         00290000
+*    more often, individual predicates are propogated upwards           00300000
+*    in the predicate tree.  In addition, column / value                00310000
+*    preparation is skipped for predicates having predetermined         00320000
+*    truth values.  A reason indicates whether, on the basis of         00330000
+*    the promotion of truth values, the resultant search argument       00340000
+*    is categorically true or false.                                    00350000
+*                                                                       00360000
+*                                                                       00370000
+* ON ENTRY:                                                             00380000
+*                                                                       00390000
+*    R1  contains the address of the @tbpsarg parameter block           00400000
+*                                                                       00410000
+*                                                                       00420000
+* ON EXIT:                                                              00430000
+*                                                                       00440000
+*    R15 contains one of the following return codes                     00450000
+*                                                                       00460000
+*        RC00 - predicate resolution / conversion complete              00470000
+*                                                                       00480000
+*               R0 contains a search argument truth value               00490000
+*                  as follows:                                          00500000
+*                                                                       00510000
+*                  00 - truth value not determined                      00520000
+*                  01 - search arg categorically true                   00530000
+*                  FF - search arg categorically false                  00540000
+*                                                                       00550000
+*        RC08 - an invalid predicate was encountered                    00560000
+*                                                                       00570000
+*               RSN00 - SARG optimizer error                            00580000
+*               RSN04 - column not defined in table                     00590000
+*               RSN08 - excessive character value length                00600000
+*               RSN12 - excessive numeric value length or mull          00610000
+*               RSN16 - invalid numeric value for numeric column        00620000
+*               RSN20 - numeric value exceeds column maximum            00630000
+*               RSN24 - storage manager failure                         00640000
+*               RSN28 - unsupported column datatype                     00650000
+*               RSN32 - RESERVED                                        00660000
+*               RSN36 - negative value clashed with unsigned int        00670000
+*                                                                       00680000
+*        RC12 - request in error                                        00690000
+*                                                                       00700000
+*               RSN04 - invalid table token                             00710000
+*                                                                       00720000
+*        RC16 - table object access error                               00730000
+*                                                                       00740000
+*               R0 and R1 contain diagnostic info                       00750000
+*                                                                       00760000
+**<DOC-OFF>****************************************************         00770000
+                                                                        00780000
+         EJECT                                                          00790000
+***************************************************************         00800000
+*                                                                       00810000
+* MAINTENANCE :                                                         00820000
+*                                                                       00830000
+*    12/19/94 Su-fen Wu                                                 00840000
+*             Comparision for column name with trimmed column           00850000
+*             name length is wrong, replace with fixed length.          00860000
+*                                                                       00870000
+*    02/21/95 R. Turgeon                                                00880000
+*             Significantly restructured                                00890000
+*                                                                       00900000
+*    06/15/95 R. Turgeon                                                00910000
+*             Formalized and externalized SARG optimization             00920000
+*             service                                                   00930000
+*                                                                       00940000
+*    11/17/95 R. Turgeon                                                00950000
+*             Extend SARG to allow tests for null/non-null              00960000
+*             values                                                    00970000
+*                                                                       00980000
+*    01/18/95 R. Turgeon                                                00990000
+*             Removed invalid test for NULL                             01000000
+*                                                                       01010000
+***************************************************************         01020000
+                                                                        01030000
+         EJECT                                                          01040000
+***************************************************************         01050000
+*                                                                       01060000
+*   Working storage area                                                01070000
+*                                                                       01080000
+***************************************************************         01090000
+                                                                        01100000
+WORKAREA DSECT                                                          01110000
+                                                                        01120000
+         @WORK ,                  STANDARD WORKAREA                     01130000
+                                                                        01140000
+XSTGMGRP DS    10F                EXTERNAL STORAGE MANAGER REQ PARMS    01150000
+                                                                        01160000
+ALETTABL DS    F                  BASE TABLE OBJECT ALET                01170000
+BASETABL DS    A                  BASE TABLE ORIGIN                     01180000
+                                                                        01190000
+WORKFREE DS    0D                 AVAILABLE TO SERVICE ROUTINES         01200000
+WORKLEN  EQU   *-WORKAREA         LENGTH OF WORKAREA                    01210000
+                                                                        01220000
+         EJECT                                                          01230000
+         @TBPSARG ,               PARAMETER LIST                        01240000
+                                                                        01250000
+         EJECT                                                          01260000
+         TBBNODES ,               SEARCH ARG, ETC.                      01270000
+                                                                        01280000
+         EJECT                                                          01290000
+         @TBSAOPT ,               SEARCH ARG OPTIMIZATION REQUEST LIST  01300000
+                                                                        01310000
+         EJECT                                                          01320000
+         $TOKEN  ,                SPACE TOKEN                           01330000
+                                                                        01340000
+         EJECT                                                          01350000
+         TBTOKEN ,                TABLE TOKEN                           01360000
+                                                                        01370000
+         EJECT                                                          01380000
+         $STG  TYPE=DSECT         OBJECT STORAGE REQUEST PLIST          01390000
+                                                                        01400000
+         EJECT                                                          01410000
+         @TABLE ,                 TABLE OBJECT PREFIX                   01420000
+                                                                        01430000
+         EJECT                                                          01440000
+         @TBCOLDF ,               COLUMN DEFINITION                     01450000
+                                                                        01460000
+         EJECT                                                          01470000
+         COLHDR ,                 COLUMN DEFINITION HEADER / LINKAGE    01480000
+                                                                        01490000
+         EJECT                                                          01500000
+         EQUS  LINKAGE=VCON                                             01510000
+                                                                        01520000
+         EJECT                                                          01530000
+ITBPSARG @ENTER WORKA=(WORKAREA,WORKLEN),ASC=AR                         01540000
+                                                                        01550000
+         EJECT                                                          01560000
+***************************************************************         01570000
+*                                                                       01580000
+*   General initialization and request validation                       01590000
+*                                                                       01600000
+***************************************************************         01610000
+                                                                        01620000
+         LAM   R1,R7,MFE_LIST     PRIMARY SPACE WINDOWS                 01630000
+                                                                        01640000
+         LR    R7,R1              ACQUIRE TBSARG ENTRANCE LIST          01650000
+         USING TBPSARG,R7                                               01660000
+                                                                        01670000
+         L     R6,TBPTOKN         LOCATE TABLE TOKEN                    01680000
+         L     R6,0(,R6)          TRAVERSE ANCHOR TO TOKEN              01690000
+         USING TBTOKEN,R6         LOF TABLE TOKEN ADDRESSABILITY        01700000
+         CLC   TTOKTAG,=CL8'TBTOKEN'                                    01710000
+         BNE   ETBTOKEN                                                 01720000
+                                                                        01730000
+*--------------------------------------------------------------         01740000
+*   Initialize external storage manager request list                    01750000
+*--------------------------------------------------------------         01760000
+                                                                        01770000
+         LA    R2,XSTGMGRP+2*4    FIRST TWO PARMS ARE (LEN,ADDR)        01780000
+         ICM   R1,15,TBPSXST#     NUMBER OF ADDITIONAL PARMS            01790000
+         BZ    EXSTG              SKIP IF NONE                          01800000
+         SLL   R1,2               CONVERT TO WORDS                      01810000
+         BCTR  R1,0               PREPARE FOR EX                        01820000
+         EX    R1,*+4             COMPLETE THE PLIST                    01830000
+         MVC   0(*-*,R2),TBPSXSTP BY APPENDING EXTERNAL PARMS           01840000
+                                                                        01850000
+EXSTG    DS    0H                                                       01860000
+                                                                        01870000
+*--------------------------------------------------------------         01880000
+*   Acquire address of table object                                     01890000
+*--------------------------------------------------------------         01900000
+                                                                        01910000
+         $OBJECT ACCESS,INTENT=READ,OTOKEN=TTOKTABL,                   X01920000
+               SHRPAGE=WORKFREE,MF=(E,MFE_LIST)                         01930000
+                                                                        01940000
+         BNZ   ETABLOBJ           FAIL IF NOT                           01950000
+                                                                        01960000
+         STAM  AR1,AR1,ALETTABL   LOCATOR ALET                          01970000
+         ST    R1,BASETABL        SAVE BASE ADDRESS                     01980000
+         LAE   R11,0(,R1)         OBJECT ADDRESS                        01990000
+         USING TABLE,R11          TABLE BASE                            02000000
+         CLC   TBLTAG,=CL8'TBTABLE'                                     02010000
+         BNE   ETABLOBJ                                                 02020000
+                                                                        02030000
+         EJECT                                                          02040000
+***************************************************************         02050000
+*                                                                       02060000
+*   Phase I:  column resolution                                         02070000
+*                                                                       02080000
+***************************************************************         02090000
+                                                                        02100000
+         L     R5,TBPSARGA        GET SARG POINTER                      02110000
+         USING TBSARG1,R5         LEVEL 1 SARG                          02120000
+                                                                        02130000
+         L     R1,TBS1NODE        R1 <== ROOT OF SEARCH ARG TREE        02140000
+         LAE   R1,0(R1,0)         RESIDES IN PRIMARY SPACE              02150000
+         BAS   R14,TREEPROC       RESOLVE COLUMN NAMES IN SARG TREE     02160000
+         LTR   R15,R15            SUCCESSFUL?                           02170000
+         BNZ   $REJECT            REJECT IF NOT                         02180000
+                                                                        02190000
+         MVI   TBS1VAL,TBS1$VAL   INDICATE TREE VALIDATED AND COMPLETE  02200000
+                                                                        02210000
+***************************************************************         02220000
+*                                                                       02230000
+*   Phase II:  propogate truth values                                   02240000
+*                                                                       02250000
+***************************************************************         02260000
+                                                                        02270000
+         LAE   R1,MFE_LIST        PLIST CONSTRUCTION                    02280000
+         USING TBSAOPT,R1         INTERNAL TBSAOPT REQUEST              02290000
+         ST    R5,TBSASARG        SARG ORIGIN                           02300000
+                                                                        02310000
+         @CALL ITBSAOPT           INVOKE SARG OPTIMIZER                 02320000
+*                                 R0 CONTAINS TRUTH VALUE OR ZERO       02330000
+                                                                        02340000
+         LTR   R15,R15            ERRORS ENCOUNTERED?                   02350000
+         BZ    $ACCEPT            DONE IF NOT                           02360000
+         LA    R15,RSN00          ELSE TBSAOPT FAILURE RSN CODE         02370000
+         B     $REJECT            FAILURE                               02380000
+         DROP  R1,R5              TBSAOPT, TBSARG1                      02390000
+                                                                        02400000
+         EJECT                                                          02410000
+***************************************************************         02420000
+*                                                                       02430000
+*   Return completion status to caller                                  02440000
+*                                                                       02450000
+***************************************************************         02460000
+                                                                        02470000
+$ACCEPT  DS    0H                 CANDIDATE SATISFIES REQUIREMENTS      02480000
+         LA    R15,RC00           R0 CONTAINS TRUTH VALUE               02490000
+         B     RETURN                                                   02500000
+                                                                        02510000
+$REJECT  DS    0H                 INVALID SEARCH ARG COMPOSITION        02520000
+         LR    R0,R15             CONSTRUCTION RTN RETCODE IS RSNCODE   02530000
+         LA    R15,RC08                                                 02540000
+         B     RETURN                                                   02550000
+                                                                        02560000
+*--------------------------------------------------------------         02570000
+*   Logical request errors                                              02580000
+*--------------------------------------------------------------         02590000
+                                                                        02600000
+ETBTOKEN DS    0H                                                       02610000
+         LA    R15,RC12           REQUEST FORMULATION ERROR             02620000
+         LA    R0,RSN04           INVALID TABLE TOKEN SUPPLIED          02630000
+         B     RETURN                                                   02640000
+                                                                        02650000
+*--------------------------------------------------------------         02660000
+*   Table object access error                                           02670000
+*--------------------------------------------------------------         02680000
+                                                                        02690000
+ETABLOBJ DS    0H                 COULD NOT ACCESS BASE TABLE           02700000
+                                                                        02710000
+         @PUSHERR ,               SERVICE ROUTINE FAILURE FDBK          02720000
+                                                                        02730000
+         LA    R15,RC16           LOCAL RETURN CODE                     02740000
+         B     RETURN                                                   02750000
+                                                                        02760000
+*--------------------------------------------------------------         02770000
+*   Return results to requestor                                         02780000
+*--------------------------------------------------------------         02790000
+                                                                        02800000
+RETURN   DS    0H                                                       02810000
+         SR    R2,R2                                                    02820000
+         SAR   AR0,R2                                                   02830000
+         SAR   AR1,R2                                                   02840000
+         SAR   AR14,R2                                                  02850000
+         SAR   AR15,R2                                                  02860000
+                                                                        02870000
+         @EXIT ,                                                        02880000
+                                                                        02890000
+         EJECT                                                          02900000
+***************************************************************         02910000
+*                                                                       02920000
+* ROUTINE: TREEPROC - associate column info with psarg tree             02930000
+*                                                                       02940000
+***************************************************************         02950000
+                                                                        02960000
+TREEPROC DS    0H                                                       02970000
+         BAKR  R14,0              SAVE MAINLINE REGS                    02980000
+                                                                        02990000
+         CLI   TBPRTYPE-TBBPRED(R1),TBCO$CON                            03000000
+         BE    TREECON            PROCESS BOOLEAN CONNECTOR NODE        03010000
+                                                                        03020000
+***************************************************************         03030000
+*                                                                       03040000
+*   Process predicate node                                              03050000
+*                                                                       03060000
+***************************************************************         03070000
+                                                                        03080000
+         LR    R2,R1              RETAIN CURRENT NODE POINTER           03090000
+         USING TBBPRED,R2                                               03100000
+                                                                        03110000
+         CLI   TBPRTV,0           TRUTH VALUE PREDETERMINED?            03120000
+         BNE   TR_NORM            NO NEED FOR CLOSER INSPECTION IF SO   03130000
+                                                                        03140000
+*--------------------------------------------------------------         03150000
+*   Locate column definition and bind to the predicate                  03160000
+*--------------------------------------------------------------         03170000
+                                                                        03180000
+         LH    R0,TBPRCOLL        R0 <== COLUMN NAME LENGTH             03190000
+         L     R1,TBPRCOL         R1 <== COLUMN NAME ORIGIN             03200000
+         LAE   R1,0(R1,0)         COLUMN NAME RESIDES IN PSPACE         03210000
+         BAS   R14,GETCOL         LOCATE TABLE RESIDENT COLUMN DEF      03220000
+         LTR   R15,R15            FOUND AS ANTICIPATED?                 03230000
+         BNZ   TR_NOCOL           ERROR RETURN IF NOT                   03240000
+                                                                        03250000
+         LR    R15,R1             COLHDR ADDRESS IN OBJECT SPACE        03260000
+         SR    R15,R11            CONVERT ADDRESS TO OFFSET             03270000
+         ST    R15,TBPRCDEF       RETAIN IN SARG1 NODE                  03280000
+                                                                        03290000
+         LA    R1,COLHDRLN(,R1)   POINT PAST COLHDR TO TBCOLDEF         03300000
+         USING TBCOLDEF,R1        OBJECT SPACE BASED PTR                03310000
+                                                                        03320000
+*--------------------------------------------------------------         03330000
+*   (not) NULL tests may be catagorically (true) false                  03340000
+*--------------------------------------------------------------         03350000
+                                                                        03360000
+         CLI   TBPRTYPE,TBPR$NUP  NULL PREDICATE?                       03370000
+         BNE   TR_STDP            NO VALIDATION REQUIRED                03380000
+                                                                        03390000
+         LA    R0,TBPR$F          NULL CAN BE CATAGORICALLY FALSE       03400000
+         CLI   TBPROPR,TBPR$IS    TEST FOR NULL?                        03410000
+         BE    *+8                READY IF SO                           03420000
+         LA    R0,TBPR$T          NOT-NULL CAN BE CATAGORICALLY TRUE    03430000
+                                                                        03440000
+         TM    TBCATTRS,$ATNULL   COLUMN CAN BE NULLED?                 03450000
+         BO    *+8                SKIP IF SO, ELSE                      03460000
+         STC   R0,TBPRTV          RESULT IS CATAGORICALLY TRUE/FALSE    03470000
+         B     TR_NORM            COMPLETE                              03480000
+                                                                        03490000
+*--------------------------------------------------------------         03500000
+*   Value validation                                                    03510000
+*--------------------------------------------------------------         03520000
+                                                                        03530000
+TR_STDP  DS    0H                                                       03540000
+         TM    TBPRVTYP,TBPR$HOS  HOST VARIABLE?                        03550000
+         BNO   TRNOHOSV           IMPORT THE VALUE IF NOT HOST VARIABLE 03560000
+         TM    TBPRVTYP,TBPR$HOV  HOST VARIABLE WAS RESOLVED?           03570000
+         BNO   TR_NORM            BYPASS CONVERSION OF VALUE IF NOT     03580000
+                                                                        03590000
+TRNOHOSV DS    0H                                                       03600000
+                                                                        03610000
+*--------------------------------------------------------------         03620000
+*   Analyze data type (consideration of nulls)                          03630000
+*--------------------------------------------------------------         03640000
+                                                                        03650000
+         SR    R14,R14            PREPARE FOR INSERT                    03660000
+         IC    R14,TBCDTYPE       FETCH PRIMARY DATA TYPE               03670000
+         SLL   R14,2              MULTIPLE OF FOUR                      03680000
+                                                                        03690000
+         B     *+4(R14)                                                 03700000
+         B     TRNUMBER           NUMERIC DATA                          03710000
+         B     TR_CHAR            CHAR                                  03720000
+         B     TREEINV            BINARY                                03730000
+         B     TREEINV            BOOLEAN                               03740000
+         B     TR_VARC            VARCHAR                               03750000
+         B     TREEINV            VARBINARY                             03760000
+         B     TR_VARC            VARCHARX                              03770000
+         B     TREEINV            VARBINARYX                            03780000
+         B     TREEINV            TIMESTAMP                             03790000
+                                                                        03800000
+TRNUMBER DS    0H                                                       03810000
+         IC    R14,TBCNTYPE       FETCH NUMERIC DATA TYPE               03820000
+         SLL   R14,2              MULTIPLE OF FOUR                      03830000
+                                                                        03840000
+         B     *+4(R14)                                                 03850000
+         B     TREEINV            RESERVED                              03860000
+         B     TR_INT             INTEGER                               03870000
+         B     TR_UINT            UNSIGNED INT                          03880000
+         B     TREEINV            DECIMAL                               03890000
+         B     TREEINV            MONEY                                 03900000
+         B     TREEINV            FLOAT                                 03910000
+         B     TREEINV            PRECISION/SCALE QUALIFIED NUMERIC     03920000
+                                                                        03930000
+***************************************************************         03940000
+*                                                                       03950000
+*   Character string data types                                         03960000
+*                                                                       03970000
+***************************************************************         03980000
+                                                                        03990000
+*--------------------------------------------------------------         04000000
+*   Fixed length char strings                                           04010000
+*--------------------------------------------------------------         04020000
+                                                                        04030000
+TR_CHAR  DS    0H                                                       04040000
+         LH    R3,TBPRVALL        LENGTH OF VALUE                       04050000
+         CH    R3,TBCLENG+2       EXCEEDS LENGTH OF COLUMN?             04060000
+         BH    TFCHRLEN           FAIL IF SO                            04070000
+                                                                        04080000
+         MVC   TBPRCVAL,TBPRVAL   NO CONVERSION REQUIRED FOR CHAR STR   04090000
+         MVC   TBPRCVLN,TBPRVALL  CONVERSION LENGTH = SOURCE LENGTH     04100000
+         B     TR_NORM            CONVERSION COMPLETE                   04110000
+                                                                        04120000
+*--------------------------------------------------------------         04130000
+*   Varying length char strings                                         04140000
+*--------------------------------------------------------------         04150000
+                                                                        04160000
+TR_VARC  DS    0H                                                       04170000
+         LH    R3,TBPRVALL        LENGTH OF VALUE                       04180000
+         SR    R0,R0              PREPARE FOR INSERT                    04190000
+         ICM   R0,3,TBCMAXLN      MAXIMUM LENGTH IMPOSED ON VALUE?      04200000
+         BZ    TR_VCNUL           NO LENGTH VALIDATION IF NOT           04210000
+         CR    R3,R0              VALUE EXCEEDS MAXIMUM LENGTH?         04220000
+         BH    TFCHRLEN           FAIL IF SO                            04230000
+                                                                        04240000
+TR_VCNUL DS    0H                                                       04250000
+         MVC   TBPRCVAL,TBPRVAL   NO CONVERSION REQUIRED FOR CHAR STR   04260000
+         MVC   TBPRCVLN,TBPRVALL  CONVERSION LENGTH = SOURCE LENGTH     04270000
+         B     TR_NORM            CONVERSION COMPLETE                   04280000
+                                                                        04290000
+***************************************************************         04300000
+*                                                                       04310000
+*   Integer data types                                                  04320000
+*                                                                       04330000
+***************************************************************         04340000
+                                                                        04350000
+*--------------------------------------------------------------         04360000
+*   Signed integers                                                     04370000
+*--------------------------------------------------------------         04380000
+                                                                        04390000
+TR_INT   DS    0H                 GET LENGTH OF INPUT VALUE             04400000
+         LH    R3,TBPRVALL        GET LENGTH OF INPUT VALUE             04410000
+         CH    R3,=H'10'          10 DIGIT LIMIT MAXIMUM                04420000
+         BH    TFNUMLEN           BEYOND LIMIT                          04430000
+                                                                        04440000
+         BCTR  R3,0               PREPARE FOR USE IN EX                 04450000
+         L     R4,TBPRVAL         LOCATE SOURCE VALUE                   04460000
+         EX    R3,NUMVALD         ENSURE DECIMAL DIGITS ONLY            04470000
+         BC    HITS,TFNUMBR       ERROR OTHERWISE                       04480000
+                                                                        04490000
+         EX    R3,NUMPACK         CONVERT INPUT VALUE TO PACKED DECIMAL 04500000
+         CP    DWORD,=P'2147483647'  LARGEST VALUE ALLOWED              04510000
+         BH    TFNUMSIZ           FAIL IF FULLWORD CAPACITY EXCEEDED    04520000
+                                                                        04530000
+         CVB   R4,DWORD           CONVERT THE PACKED DECIMAL TO BINARY  04540000
+         L     R14,TBCLENG        LENGTH OF COLUMN 1 - 4 BYTES          04550000
+         BCTR  R14,0              CONVERT TO ZERO BASE INDEX            04560000
+         SLL   R14,2              CONVERT TO FULLWORD                   04570000
+         LAE   R15,INTSIZE(R14)   LOCATE SIGNED INT SIZE LIMIT          04580000
+         C     R4,0(,R15)         CAPACITY OF COLUMN EXCEEDED?          04590000
+         BH    TFNUMSIZ                                                 04600000
+                                                                        04610000
+         TM    TBPRVTYP,TBPR$NEG  UNARY NEGATION APPLIED?               04620000
+         BNO   *+6                SKIP IF POSITIVE                      04630000
+         LNR   R4,R4              NEGATE OTHERWISE                      04640000
+         B     TR_IPOST           ATTACH CONVERTED VALUE TO SARG        04650000
+                                                                        04660000
+*--------------------------------------------------------------         04670000
+*   Unsigned integers                                                   04680000
+*--------------------------------------------------------------         04690000
+                                                                        04700000
+TR_UINT  DS    0H                 GET LENGTH OF INPUT VALUE             04710000
+         LH    R3,TBPRVALL        GET LENGTH OF INPUT VALUE             04720000
+         CH    R3,=H'10'          10 DIGIT LIMIT MAXIMUM                04730000
+         BH    TFNUMLEN           BEYOND LIMIT                          04740000
+                                                                        04750000
+         BCTR  R3,0               PREPARE FOR USE IN EX                 04760000
+         L     R4,TBPRVAL         LOCATE SOURCE VALUE                   04770000
+         EX    R3,NUMVALD         ENSURE DECIMAL DIGITS ONLY            04780000
+         BC    HITS,TFNUMBR       ERROR OTHERWISE                       04790000
+                                                                        04800000
+         EX    R3,NUMPACK         CONVERT INPUT VALUE TO PACKED DECIMAL 04810000
+         CP    DWORD,=P'4294967295'  LARGEST VALUE ALLOWED              04820000
+         BH    TFNUMSIZ           FAIL IF FULLWORD CAPACITY EXCEEDED    04830000
+                                                                        04840000
+         CVB   R4,DWORD           CONVERT THE PACKED DECIMAL TO BINARY  04850000
+         L     R14,TBCLENG        LENGTH OF COLUMN 1 - 4 BYTES          04860000
+         BCTR  R14,0              CONVERT TO ZERO BASE INDEX            04870000
+         SLL   R14,2              CONVERT TO FULLWORD                   04880000
+         LAE   R15,UINTSIZE(R14)  LOCATE SIGNED INT SIZE LIMIT          04890000
+         CL    R4,0(,R15)         CAPACITY OF COLUMN EXCEEDED?          04900000
+         BH    TFNUMSIZ                                                 04910000
+                                                                        04920000
+         TM    TBPRVTYP,TBPR$NEG  UNARY NEGATION APPLIED?               04930000
+         BO    TFNEGATE           NOT ALLOWED WITH UNSIGNED ARG         04940000
+                                                                        04950000
+*--------------------------------------------------------------         04960000
+*   Acquire storage for integer value and attach to SARG                04970000
+*--------------------------------------------------------------         04980000
+                                                                        04990000
+TR_IPOST DS    0H                 R4 <== SIGNED OR UNSIGNED VALUE       05000000
+         LA    R0,4               LENGTH OF STORAGE REQUIRED            05010000
+         BAS   R14,STORGET        ACQUIRE STORAGE                       05020000
+         BNZ   TR_STG                                                   05030000
+                                                                        05040000
+         ST    R4,0(,R1)          PLACE THE BINARY VALUE IN OUR TREE    05050000
+         ST    R1,TBPRCVAL        ADDRESS IN THE TREE PREDICATE NODE    05060000
+         LA    R4,4               SET LENGTH OF FULLWORD                05070000
+         STH   R4,TBPRCVLN        IN THE PREDICATE NODE                 05080000
+         B     TR_NORM            CONVERSION COMPLETE                   05090000
+         DROP  R2                 TBBPRED                               05100000
+                                                                        05110000
+***************************************************************         05120000
+*                                                                       05130000
+*   Process connector node                                              05140000
+*                                                                       05150000
+***************************************************************         05160000
+                                                                        05170000
+TREECON  DS    0H                                                       05180000
+         LR    R2,R1              CURRENT CONNECTOR PTR                 05190000
+         USING TBCONN,R2                                                05200000
+                                                                        05210000
+         CLI   TBCOTV,0           TRUTH VALUE PREDETERMINED?            05220000
+         BNE   TR_NORM            NO NEED TO LOOK FURTHER IF SO         05230000
+                                                                        05240000
+         L     R1,TBCOLEFT        POINT TO LEFT SUBTREE                 05250000
+         LAE   R1,0(R1,0)         RESIDES IN PSPACE                     05260000
+         BAS   R14,TREEPROC       EVALUATE                              05270000
+         LTR   R15,R15            EVERYTHING ALRIGHT?                   05280000
+         BNZ   TREEND             NO - GET OUT AND PERCOLATE ERROR      05290000
+                                                                        05300000
+         L     R1,TBCORGHT        POINT TO RIGHT SUBTREE                05310000
+         LAE   R1,0(R1,0)         RESIDES IN PSPACE                     05320000
+         BAS   R14,TREEPROC       AND PROCESS IT                        05330000
+         B     TREEND             COMPLETE                              05340000
+         DROP  R2                 TBCONN                                05350000
+                                                                        05360000
+***************************************************************         05370000
+*                                                                       05380000
+*   Return normal or failure completion status                          05390000
+*                                                                       05400000
+***************************************************************         05410000
+                                                                        05420000
+TR_NORM  DS    0H                                                       05430000
+         LA    R15,RC00           INDICATE SUCCESS                      05440000
+         B     TREEND             DONE                                  05450000
+                                                                        05460000
+*--------------------------------------------------------------         05470000
+*   Terminating error encountered                                       05480000
+*--------------------------------------------------------------         05490000
+                                                                        05500000
+TR_NOCOL DS    0H                 GETCOL() FAILURE                      05510000
+         LAE   R1,0(R1,0)         COLUMN NAME NOT MATCHED (PSPACE)      05520000
+         LA    R15,RSN04          COLUMN NOT FOUND                      05530000
+         MVC   TBPRUWD1-TBBPRED(,R2),TBPRUWD2-TBBPRED(R2) ????????      05540000
+         B     TR_ERROR                                                 05550000
+                                                                        05560000
+TFCHRLEN DS    0H                                                       05570000
+         LA    R15,RSN08          CHAR STRING LENGTH EXCEEDS CAPACITY   05580000
+         B     TR_ERROR                                                 05590000
+                                                                        05600000
+TFNUMLEN DS    0H                                                       05610000
+         LA    R15,RSN12          INVALID DECIMAL DIGIT STRING LENGTH   05620000
+         B     TR_ERROR                                                 05630000
+                                                                        05640000
+TFNUMBR  DS    0H                                                       05650000
+         LA    R15,RSN16          INVALID DECIMAL DIGIT STRING          05660000
+         B     TR_ERROR                                                 05670000
+                                                                        05680000
+TFNUMSIZ DS    0H                                                       05690000
+         LA    R15,RSN20          NUMERIC VALUE EXCEEDS COLUMN CAPACITY 05700000
+         B     TR_ERROR                                                 05710000
+                                                                        05720000
+TR_STG   DS    0H                                                       05730000
+         LA    R15,RSN24          ERROR OBTAINING STORAGE FOR VALUE     05740000
+         B     TR_ERROR                                                 05750000
+                                                                        05760000
+TREEINV  DS    0H                                                       05770000
+         LA    R15,RSN28          DATA TYPE NOT VALID IN SEARCH ARG     05780000
+         B     TR_ERROR                                                 05790000
+                                                                        05800000
+TFNEGATE DS    0H                                                       05810000
+         LA    R15,RSN36          NEGATIVE VALUE CLASHED WITH UINT      05820000
+         B     TR_ERROR                                                 05830000
+                                                                        05840000
+TR_ERROR DS    0H                                                       05850000
+         LAE   R1,0(R2,0)         RETURN PSPACE PTR TO FAILING PRED     05860000
+                                                                        05870000
+*--------------------------------------------------------------         05880000
+*   Return results to requester                                         05890000
+*--------------------------------------------------------------         05900000
+                                                                        05910000
+TREEND   DS    0H                                                       05920000
+         NOP   0                                                        05930000
+         PR    ,                                                        05940000
+         DROP  R1                 TBCOLDEF                              05950000
+                                                                        05960000
+         EJECT                                                          05970000
+***************************************************************         05980000
+*                                                                       05990000
+* ROUTINE: GETCOL - Locate column definition by column name             06000000
+*                                                                       06010000
+*                                                                       06020000
+* ON ENTRY:                                                             06030000
+*                                                                       06040000
+*    R1 - address of column name                                        06050000
+*    R0 - length  of column name                                        06060000
+*                                                                       06070000
+*                                                                       06080000
+* ON EXIT:                                                              06090000
+*                                                                       06100000
+*    R15 contains one of the following return codes                     06110000
+*                                                                       06120000
+*        RC00 - AR qualified COLHDR addr returned via R1                06130000
+*        RC04 - column name not matched                                 06140000
+*                                                                       06150000
+***************************************************************         06160000
+                                                                        06170000
+GETCOL   DS    0H                                                       06180000
+         BAKR  R14,0              SAVE MAINLINE REGS                    06190000
+         LA    R15,RC04           ASSUME NO MATCH WILL BE FOUND         06200000
+         LR    R2,R0              ACCEPT COLUMN LENGTH PROVIDED         06210000
+         BCTR  R2,0               LENGTH CODE FOR COPY                  06220000
+                                                                        06230000
+         MVI   WAAVAIL,C' '                                             06240000
+         MVC   WAAVAIL+1(L'TBCNAME-1),WAAVAIL                           06250000
+         EX    R2,*+4                                                   06260000
+         MVC   WAAVAIL(*-*),0(R1)                                       06270000
+                                                                        06280000
+         LAE   R10,TBLCOLST-(COLNEXT-COLHDR)                            06290000
+         USING COLHDR,R10                                               06300000
+                                                                        06310000
+GETNEXT  DS    0H                                                       06320000
+         ICM   R10,15,COLNEXT     ADVANCE TO NEXT Q COL                 06330000
+         BZ    GETRET             UNABLE TO MATCH CANDIDATE             06340000
+         LAE   R10,TABLE(R10)     CONVERT OFFSET TO ADDRESS             06350000
+         LAE   R9,COLDEF          COLUMN DEFINITION PROPER              06360000
+         USING TBCOLDEF,R9                                              06370000
+                                                                        06380000
+         CLC   TBCNAME,WAAVAIL    MATCHING COLUMN NAME?                 06390000
+         BE    GETHIT                                                   06400000
+         CLC   TBCSNAME,WAAVAIL   MATCHING SHORT COLUMN NAME?           06410000
+         BNE   GETNEXT                                                  06420000
+                                                                        06430000
+GETHIT   DS    0H                 MATCHING TBCOLDEF FOUND               06440000
+         LAE   R1,COLHDR          RETURN IT AR QUALIFIED                06450000
+         LA    R15,RC00           INDICATE SUCCESS                      06460000
+         DROP  R9,R10             TBCOLDEF, COLHDR                      06470000
+                                                                        06480000
+GETRET   DS    0H                                                       06490000
+         NOP   0                                                        06500000
+         PR    ,                                                        06510000
+                                                                        06520000
+         EJECT                                                          06530000
+***************************************************************         06540000
+*                                                                       06550000
+* ROUTINE: STORGET - Acquire storage using external storage mgr         06560000
+*                                                                       06570000
+* ON ENTRY:                                                             06580000
+*                                                                       06590000
+*     R0 - length of block required                                     06600000
+*                                                                       06610000
+* ON EXIT:                                                              06620000
+*                                                                       06630000
+*     R1 - block address (primary)                                      06640000
+*                                                                       06650000
+***************************************************************         06660000
+                                                                        06670000
+STORGET  DS    0H                                                       06680000
+         ST    R14,FWORD          PRESERVE RETURN ADDR                  06690000
+                                                                        06700000
+         LAE   R1,XSTGMGRP        R1 <== STORAGE MGR PLIST              06710000
+         ST    R0,0(,R1)          INSERT LENGTH                         06720000
+         XC    4(4,R1),4(R1)      INDICATE STORAGE GET                  06730000
+                                                                        06740000
+         L     R15,TBPSXST@       STORAGE SERVICE                       06750000
+         BASR  R14,R15            ACQUIRE STORAGE                       06760000
+                                                                        06770000
+         LAE   R1,0(R1,0)         BLOCK RESIDES IN PSPACE               06780000
+         L     R14,FWORD          RESTORE RETURN ADDR                   06790000
+         LTR   R15,R15            SET CONDITION CODE ZERO IF SUCCESS    06800000
+         BR    R14                                                      06810000
+                                                                        06820000
+         EJECT                                                          06830000
+***************************************************************         06840000
+*                                                                       06850000
+*   Local read-only data areas, etc.                                    06860000
+*                                                                       06870000
+***************************************************************         06880000
+                                                                        06890000
+INTSIZE  DS    0F                 SIZE CEILINGS FOR SIGNED INTEGERS     06900000
+         DC    A(X'0000007F')        ONE BYTE                           06910000
+         DC    A(X'00007FFF')        TWO BYTES                          06920000
+         DC    A(X'007FFFFF')        THREE BYTES                        06930000
+         DC    A(X'7FFFFFFF')        FOUR BYTES                         06940000
+                                                                        06950000
+UINTSIZE DS    0F                 SIZE CEILINGS FOR UNSIGNED INTEGERS   06960000
+         DC    A(X'000000FF')        ONE BYTE                           06970000
+         DC    A(X'0000FFFF')        TWO BYTES                          06980000
+         DC    A(X'00FFFFFF')        THREE BYTES                        06990000
+         DC    A(X'FFFFFFFF')        FOUR BYTES                         07000000
+                                                                        07010000
+NUMVALD  TRT   0(*-*,R4),NUMERICS VALIDATE DECIMAL DIGIT STRING         07020000
+NUMPACK  PACK  DWORD,0(0,R4)      CONVERT DECIMAL TO PACKED FORMAT      07030000
+                                                                        07040000
+NUMERICS DC    0A(0),256AL1(4)                                          07050000
+         ORG   NUMERICS+C'0'                                            07060000
+         DC    10AL1(0)                                                 07070000
+         ORG   ,                                                        07080000
+                                                                        07090000
+         LTORG ,                                                        07100000
+         END   ,                                                        07110000

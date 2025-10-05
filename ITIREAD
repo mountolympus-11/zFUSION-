@@ -1,0 +1,924 @@
+ITIREAD  TITLE 'ITIREAD - TABLE INTERFACE MULTI-ROW READ'               00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE: ITIREAD - TABLE INTERFACE MULTI-ROW READ                     00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    THIS ROUTINE ALLOWS A COOPERATIVE PROCESS TO RETRIEVE              00080000
+*    MULTIPLE ROWS FROM A HOST TABLE.  ADDITIONALLY, SPECIFIC           00090000
+*    COLUMNS MAY BE RETRIEVED AND FORMATED BY NAME.  THE NUMBER         00100000
+*    OF ROWS RETRIEVED IS CONTROLLED BY THE REQUESTOR EITHER            00110000
+*    VIA BUFFER SIZE OR COUNT (WHICHEVER FILLS FIRST).                  00120000
+*                                                                       00130000
+*    TXP BUFFER EXPANSION PARAMETERS ARE PASSED TO ITITANK TO           00140000
+*    ENSURE THAT AT LEAST ONE ROW IS RETURNED TO THE REQUESTER          00150000
+*    ON EVERY CALL.                                                     00160000
+*                                                                       00170000
+*                                                                       00180000
+* ON ENTRY:                                                             00190000
+*                                                                       00200000
+*    R1 POINTS TO A PARAMETER LIST DESCRIBED BY THE @TIREAD             00210000
+*       MAPPING.                                                        00220000
+*                                                                       00230000
+*       IN SOME CASES, THIS BLOCK RESIDES WITHIN THE TXP BUFFER         00240000
+*       AND IS SUBJECT TO RELOCATION AFTER ANY $XPBUFR ISRT             00250000
+*       EXPAND=YES REQUEST IS COMPLETED. FOR THIS REASON A              00260000
+*       LOCAL COPY OF THE (READ/ONLY) PLIST IS MADE FOR GENERAL         00270000
+*       REFERENCE.                                                      00280000
+*                                                                       00290000
+*       SIMILARLY, DATA AREAS ANCHORED BY OFFSET IN THE TIREAD          00300000
+*       PARAMETER LIST ARE ALSO SUBJECT TO THE SAME RELOCATION          00310000
+*       AFFECT AS THE TIREAD PLIST ITSELF (TIRESARG, AT THIS TIME).     00320000
+*                                                                       00330000
+*                                                                       00340000
+* ON EXIT:                                                              00350000
+*                                                                       00360000
+*    R15 CONTAINS ONE OF THE FOLLOWING RETURN CODES.  R0 MAY            00370000
+*        CONTAIN AN ASSOCIATED REASON CODE.                             00380000
+*                                                                       00390000
+*    R1  CONTAINS THE ADDRESS OF THE TXP RESIDENT TABLE INTERFACE       00400000
+*        RESPONSE HEADER (TMRESP) CREATED BY THIS ROUTINE               00410000
+*                                                                       00420000
+*       RC00 - MULTIREAD COMPLETE                                       00430000
+*                                                                       00440000
+*       RC04 - INSUFFICIENT RESPONSE BUFFER ALLOCATION                  00450000
+*                                                                       00460000
+*       RC08 - NAMED TABLE NOT FOUND                                    00470000
+*                                                                       00480000
+*       RC12 - REQUEST IN ERROR                                         00490000
+*                                                                       00500000
+*              RSN04 - TABLE TOKEN DOES NOT MATCH OPEN TABLE            00510000
+*              RSN08 - INVALID COLUMN SELECTION MASK                    00520000
+*              RSN12 - PRIOR ERROR PRECLUDES COMPLETION OF REQ          00530000
+*              RSN16 - TABLE READ AFTER END OF TABLE RETURNED           00540000
+*              RSN20 - INDEX CONTEXT SWITCH                             00550000
+*              RSN24 - ARGUMENT LIST SIZE EXCEEDS CAPACITY              00560000
+*              RSN28 - COLUMN COUNT EXCEEDS CAPACITY OF CALLER   135096 00570000
+*                                                                       00580000
+*       RC16 - SERVICE ROUTINE FAILURE                                  00590000
+*                                                                       00600000
+*              RSN00 - TRANSMISSION TANK LOAD ENCOUNTERED ERROR         00610000
+*              RSN04 - TABLE SERVICES FAILURE                           00620000
+*                                                                       00630000
+*       RC20 - RESPONSE SERVICE FAILURE                                 00640000
+*                                                                       00650000
+**<DOC-OFF>****************************************************         00660000
+                                                                        00670000
+         EJECT                                                          00680000
+***************************************************************         00690000
+*                                                                       00700000
+* MAINTENANCE:                                                          00710000
+*                                                                       00720000
+*   08/XX/92  R. TURGEON                                                00730000
+*             INITIAL VERSION                                           00740000
+*                                                                       00750000
+*   08/05/93  RON COLMONE                                               00760000
+*             CONVERTED TO STDENV                                       00770000
+*                                                                       00780000
+*   08/03/94  R. TURGEON          PAR#  135096                   135096 00790000
+*             ACCEPT VERSION 1 TIREAD PLIST EXTENDING THE        135096 00800000
+*             NUMBER OF TABLE COLUMNS FROM 64 TO 512.            135096 00810000
+*                                                                       00820000
+*   08/13/94  R. TURGEON          PAR#  137148                   137148 00830000
+*             RETURN DITTO INDICATOR RATHER THAN COLUMN VALUE    137148 00840000
+*             WHEN THE VALUE OF A COLUMN IS THE SAME AS THAT IN  137148 00850000
+*             THE IMMEDIATELY PRECEEDING ROW.                    137148 00860000
+*                                                                       00870000
+*   10/12/94  R. TURGEON                                                00880000
+*             ENSURE THAT AT LEAST ONE ROW IS RETURNED ON ANY           00890000
+*             ITIREAD REQUEST WHERE A ROW IS AVAILABLE,                 00900000
+*             REGARDLESS OF ITS SIZE.                                   00910000
+*                                                                       00920000
+*   12/06/94  R. TURGEON                                                00930000
+*             REMOVED PAGE= / SHRPAGE= FOR $SPACE, $OBJECT,             00940000
+*             AND TB* SERVICE REQUESTS                                  00950000
+*                                                                       00960000
+*   02/25/95  R. TURGEON          ODBC                                  00970000
+*             IMPLEMENT NULL COLUMNS                                    00980000
+*                                                                       00990000
+***************************************************************         01000000
+                                                                        01010000
+         EJECT                                                          01020000
+         #WORK LENGTH=1024   READ / WRITE WORKAREA                      01030000
+                                                                        01040000
+ERRFLGS  DS    X             ERROR FLAGS                                01050000
+ERR$TANK EQU   X'80'            TANK LOADER FAILURE                     01060000
+ERR$GET  EQU   X'40'            TBGET FAILURE                           01070000
+                                                                        01080000
+TRMFLGS  DS    X             PASS TERMINATION FLAGS                     01090000
+TRM$FULL EQU   X'80'            TANK FULL                               01100000
+TRM$EOT  EQU   X'40'            END OF TABLE REACHED                    01110000
+                                                                        01120000
+BYTE     DS    X             ONE BYTE WORKAREA                          01130000
+                                                                        01140000
+ROWCOUNT DS    F             # OF ROWS IN TANK                          01150000
+COLCOUNT DS    F             # COLS PER ROW                             01160000
+FXROWSIZ DS    F             FIXED LENGTH OF ROW (NO VAR/VARX)   137148 01170000
+MINBUF   DS    F             ROW BUFFER SIZE REQUIRED FOR REALLOC       01180000
+                                                                        01190000
+PREDROW  DS    0A,0F         BUFFER DESCRIPTOR IN $REALLOC FMT   137148 01200000
+PREDROWB DS    A                ADDRESS OF AGED ROW BUFFER       137148 01210000
+PREDROWL DS    F                LENGTH  OF AGED ROW BUFFER       137148 01220000
+                                                                        01230000
+ERRINFO  DS    0F            R14-R1 UPON SERVICE ROUTINE FAILURE        01240000
+ERR_R14  DS    F                                                        01250000
+ERR_R15  DS    F                                                        01260000
+ERR_R0   DS    F                                                        01270000
+ERR_R1   DS    F                                                        01280000
+                                                                        01290000
+RETREGS  DS    0F            R15-R1 RETURNED TO REQUESTER               01300000
+RETC     DS    F             RETURN CODE                                01310000
+RSNC     DS    F             REASON CODE                                01320000
+DIAGNOSE DS    F             TMRESP ADDRESS OR DIAGNOSTICS              01330000
+                                                                        01340000
+@TIREAD  DS    A             ADDR OF PASSED TIREAD PLIST WHICH MAY OR   01350000
+*                            ... MAY NOT RESIDE WITHIN THE TXP BUFFER   01360000
+@TMRESP  DS    A             ADDR OF TI GENERAL RESPONSE HEADER         01370000
+@PREDTIB DS    A             ADDR PREDECESSOR TIB ON TIB CHAIN          01380000
+                                                                        01390000
+NULLPRED DS    XL64          PRIOR ROW - NULL INDICATORS (512 COLS)     01400000
+$TIREAD  DS    XL(TIREADLN)  TIREAD REQUEST PLIST - BASIC (VER0) AREA   01410000
+                                                                        01420000
+WORKFREE DS    XL512         WORKAREA FOR (TI) SERVICE ROUTINES         01430000
+                                                                        01440000
+         #ENDWORK ,          END OF WORKAREA                            01450000
+                                                                        01460000
+         EJECT                                                          01470000
+         @TIREAD ,           OUR REQUEST BLOCK FORMAT                   01480000
+                                                                        01490000
+         EJECT ,                                                 137148 01500000
+         @TITANK ,           TITANK REQUEST BLOCK FORMAT         137148 01510000
+                                                                        01520000
+         EJECT                                                          01530000
+         TIBLOCK ,           TABLE INTERFACE BLOCK          (TIB)       01540000
+                                                                        01550000
+         EJECT                                                          01560000
+         TMRESP  ,           RESPONSE HEADER                            01570000
+                                                                        01580000
+         EJECT                                                          01590000
+         REQHDR  ,           REQUEST  HEADER                            01600000
+                                                                        01610000
+         EJECT                                                          01620000
+         TIRDRET ,           MULTIROW READ RETURN AREA                  01630000
+                                                                        01640000
+         EJECT                                                          01650000
+         @TBFMT ,            TABLE DESCRIPTION (TBDESC RESULT)          01660000
+                                                                        01670000
+         EJECT                                                          01680000
+         TBSERVIS GET,SET                                               01690000
+                                                                        01700000
+         EJECT                                                          01710000
+         EQUS  ,             GENERAL EQUATES                            01720000
+                                                                        01730000
+         EJECT                                                          01740000
+ITIREAD  #ENTER BASE=R12,WAPASS=YES,PREG=R8                             01750000
+                                                                        01760000
+         EJECT                                                          01770000
+*--------------------------------------------------------------         01780000
+*   FETCH PASSED PARAMETERS, DATA AREAS, ETC.                           01790000
+*--------------------------------------------------------------         01800000
+         USING ITASK,R10          ITASK ADDRESSABILITY                  01810000
+         L     R9,TSKPCBC         ADDR OF CURRENT PCB                   01820000
+         USING IPCB,R9            IPCB  ADDRESSABILITY                  01830000
+                                                                        01840000
+         ST    R8,@TIREAD         RETAIN (RELOCATABLE) PTR              01850000
+         USING TIREAD,R8          LIFE OF FUNCTION ADDRESSABILITY       01860000
+                                                                        01870000
+         L     R7,PCBUSER         ADDRESS OF IUSER                      01880000
+         USING IUSER,R7           TEMP ADDRESSABILITY                   01890000
+         L     R7,USRPROJ         PROJECT CONTROL AREA                  01900000
+         USING IPROJ,R7           LIFE OF FUNCTION                      01910000
+                                                                        01920000
+*--------------------------------------------------------------  135096 01930000
+*   CONVERT VERSION 0 PLIST TO VERSION 1 FORMAT                  135096 01940000
+*--------------------------------------------------------------  135096 01950000
+         CLI   TIREVER,TIREVER1   VERSION 1 OR LATER PLIST?             01960000
+         BL    PVER0              ELSEWHERE FOR VERSION 0               01970000
+         MVC   $TIREAD,TIREAD     LOCAL COPY OF VERSION 1 PLIST         01980000
+         B     PVERCOMN           DONE HERE                             01990000
+                                                                        02000000
+PVER0    DS    0H                                                       02010000
+         MVC   $TIREAD(TIREADV0),TIREAD   FIXED PORTION V0 & V1  135096 02020000
+         MVC   $TIREAD+(TIREXCLS-TIREAD)(L'TIRECOLS),TIRECOLS    135096 02030000
+                                                                        02040000
+PVERCOMN DS    0H                                                       02050000
+         LA    R8,$TIREAD         SWITCH TO REFORMATTED COPY     135096 02060000
+                                                                        02070000
+*--------------------------------------------------------------         02080000
+*   DECLARE PTRS INTO TXP BUFFER ALLOWING SUBSEQUENT REALLOC            02090000
+*--------------------------------------------------------------         02100000
+         $XPBUFR ADDPTR,PTRS=(@TIREAD,@TMRESP)                          02110000
+                                                                        02120000
+         BZ    *+8                ASSERT AVAILABILITY OF PTR SLOTS      02130000
+         EX    R0,*               DESIGN ERROR                          02140000
+                                                                        02150000
+*--------------------------------------------------------------         02160000
+*   INSERT GENERIC TI RESPONSE BLOCK AND TIREAD RETURN HEADER           02170000
+*--------------------------------------------------------------         02180000
+         $XPBUFR ISRT,            ASSIGN RESPONSE BUFFER SPACE         X02190000
+               NEWFUNC=(TBSV,TI$READ),                                 X02200000
+               DATA=0,                                                 X02210000
+               DATALEN=TMRESPLN+TIRDHLN,                               X02220000
+               EXPAND=YES,                                             X02230000
+               MF=(E,MFE_LIST)                                          02240000
+                                                                        02250000
+         LTR   R15,R15            DATA ACCEPTED?                        02260000
+         BNZ   ERR_ITXP           TXP RESPONSE MGR ERROR                02270000
+                                                                        02280000
+         ST    R1,@TMRESP         SAVE PTR TO GENERAL RESPONSE HDR      02290000
+         USING TMRESP,R1          TEMP TMRESP ADDRESSABILITY     137148 02300000
+         LA    R0,TIRDHLN         RESPONSE INCLUDES READ-SPECIFIC RESP  02310000
+         STH   R0,TMRSDATL        INITIAL LENGTH                        02320000
+         MVC   TMRSVER,TIREVER    REQUEST / RESPONSE VERSION IDS 137148 02330000
+         DROP  R1                 TMRESP                         137148 02340000
+                                                                        02350000
+*--------------------------------------------------------------         02360000
+*   GENERAL INITIALIZATION AND REQUEST VALIDATION                       02370000
+*--------------------------------------------------------------         02380000
+         LA    R1,TIRETKN         R1 <== TABLE TOKEN ADDR               02390000
+         BAS   R14,LOCTIB         TEST WHETHER TABLE IS OPEN            02400000
+         LTR   R15,R15            TIB CHAIN SEGMENT RETURNED?           02410000
+         BNZ   ENOTIB             ERROR                                 02420000
+                                                                        02430000
+         LR    R5,R0              MATCHING TIB                          02440000
+         USING TIBLOCK,R5         MAPPED                                02450000
+         ST    R1,@PREDTIB        RETAIN TIB PREDECESSOR FOR POSSIBLE   02460000
+*                                 DECHAIN WHEN AUTOCLOSE / AUTODROP     02470000
+*                                 OPTIONS ARE IN AFFECT                 02480000
+                                                                        02490000
+*--------------------------------------------------------------         02500000
+*   VALIDATE CONSTRUCTION OF COLUMN SELECTION MASK                      02510000
+*--------------------------------------------------------------         02520000
+         L     R1,TIBDESC         R1 <== TABLE DESCRIPTION              02530000
+         L     R2,TBFROWSZ-TBFMT(,R1)  FIXED LENGTH OF ROW       137148 02540000
+         ST    R2,FXROWSIZ        RETAINED                       137148 02550000
+         ST    R2,MINBUF          IS SMALLEST BUFFER REQUIRED    137148 02560000
+                                                                        02570000
+         BAS   R14,VCOLMASK       VALIDATE COLUMN SELECTION MASK        02580000
+         LTR   R15,R15            MASK ACCEPTED                         02590000
+         BNZ   ECOLSEL            REQUEST REFUSED                       02600000
+         ST    R0,COLCOUNT        # COLUMNS SELECTED PER ROW            02610000
+                                                                        02620000
+         CLI   TIREVER,TIREVER1   EXTENDED COLUMN MASK?          135096 02630000
+         BNL   CVALFIN            DONE IF SO                     135096 02640000
+         C     R0,=A(L'TIRECOLS*8)   REQ CAPACITY EXCEEDED?      135096 02650000
+         BH    ECOLIMIT           FAIL THE REQUEST IF SO         135096 02660000
+                                                                        02670000
+CVALFIN  DS    0H                                                135096 02680000
+                                                                        02690000
+         EJECT                                                          02700000
+***************************************************************         02710000
+*                                                                       02720000
+*   REPOSITION CRP WITHIN DESIGNATED TABLE & INDEX IF REQUESTED         02730000
+*                                                                       02740000
+***************************************************************         02750000
+         CLC   TIREP,=A(TIREPCUR) EXPLICIT REPOSITIONING REQUESTED?     02760000
+         BE    ENDREPOS           SKIP IF NOT                           02770000
+                                                                        02780000
+         L     R2,=A(TBSP$TOP)    ASSUME MOVING TO TABLE TOP            02790000
+         CLI   TIREP,TIREPTOP     ASSUMPTION CORRECT?                   02800000
+         BE    REPOS              REPOSITION ACCORDINGLY IF SO          02810000
+         L     R2,=A(TBSP$BOT)    ASSUME MOVING TO TABLE BOTTOM         02820000
+         CLI   TIREP,TIREPBOT     ASSUMPTION CORRECT?                   02830000
+         BNE   ENDREPOS           IGNORE IF NOT                         02840000
+                                                                        02850000
+REPOS    DS    0H                                                       02860000
+         SR    R3,R3              ASSUME NO INDEX NAME PROVIDED         02870000
+         TM    TIRENDX,BF         INDEX NAME PRESENT IN REQUEST?        02880000
+         BZ    *+8                SKIP IF NOT                           02890000
+         LA    R3,TIRENDX         POINT TO INDEX NAME                   02900000
+                                                                        02910000
+         TBSET TTOKEN=TIRETKN,    REPOSITION                           X02920000
+               POS=(R2),          AS DETERMINED BY ENTRANCE REQUEST    X02930000
+               INDEX=(R3),        INDEX NAME ADDRESS OR ZERO           X02940000
+               MF=(E,MFE_LIST)                                          02950000
+                                                                        02960000
+         STM   R14,R1,ERRINFO     JUST IN CASE                          02970000
+         LTR   R15,R15            ENSURE STANDARD COMPLETION            02980000
+         BNZ   ETBSRV             TABLE SERVICES FAILURE                02990000
+                                                                        03000000
+         NI    TIBFLAGS,FF-TIB$$POS                                     03010000
+         MVC   TIBLNDX,TIRENDX    RESET INDEX NAME                      03020000
+                                                                        03030000
+         EJECT                                                          03040000
+*--------------------------------------------------------------         03050000
+*   VALIDATE SUITABILITY OF POSITION VS. REQUEST                        03060000
+*--------------------------------------------------------------         03070000
+ENDREPOS DS    0H                                                       03080000
+         TM    TIBFLAGS,TIB$ERR   PREVIOUS REQUEST FORCED ERROR STATE?  03090000
+         BO    ERRSTATE           CANT CONTINUE IF SO                   03100000
+         TM    TIBFLAGS,TIB$EOT   END OF EXTENT PREVIOUSLY REACHED?     03110000
+         BO    EDBLEOF            CANT POSSIBLY SUCCEED IF SO           03120000
+                                                                        03130000
+         CLC   TIBLNDX,TIRENDX    INDEX CONSISTENT WITH LAST REQ?       03140000
+         BE    ENDVAL1            VALIDATION COMPLETE                   03150000
+         TM    TIBLNDX,BF         LAST REQ OMITTED INDEX?               03160000
+         BNZ   ERNDXREF           ERROR IF NOT                          03170000
+         TM    TIRENDX,BF         THIS REQUEST OMITS INDEX?             03180000
+         BNZ   ERNDXREF           ERROR IF NOT                          03190000
+                                                                        03200000
+ENDVAL1  DS    0H                                                       03210000
+                                                                        03220000
+         EJECT                                                          03230000
+***************************************************************         03240000
+*                                                                       03250000
+*   ACQUIRE ROWS UNTIL NORMAL/ABNORMAL TERMINATION SIGNALED             03260000
+*                                                                       03270000
+***************************************************************         03280000
+READ_TOP DS    0H                                                       03290000
+         STM   R14,R1,ERRINFO     PRESERVE ERROR DIAGNOSTICS            03300000
+         CLI   ERRFLGS,0          ERROR CONDITION RAISED?               03310000
+         BNE   ENDREAD            DONE IF SO                            03320000
+         CLI   TRMFLGS,0          TERMINATION CONDITION RAISED?         03330000
+         BNE   ENDREAD            DONE IF SO                            03340000
+                                                                        03350000
+*--------------------------------------------------------------         03360000
+*   TRANSFORM RETURNED ROW TO TRANSMISSION FORMAT                       03370000
+*--------------------------------------------------------------         03380000
+         TM    TIBFLAGS,TIB$REC   ROW PRESENT IN TIB?                   03390000
+         BNO   READ_BUF           ROW RETRIEVE REQUIRED IF NOT          03400000
+                                                                        03410000
+         LA    R1,MFE_LIST        GENERAL PURPOSE PLIST CONSTRUCTION    03420000
+         USING TITANK,R1          PREPARE TITANK REQUEST                03430000
+         XC    TITANK(TITANKLN),TITANK                                  03440000
+         ST    R5,TITIB           TABLE INTERFACE BLOCK                 03450000
+         LA    R0,TIREXCLS        COLUMN SELECTION MASK                 03460000
+         ST    R0,TITCMASK                                              03470000
+                                                                        03480000
+         LA    R0,TIBRNULL        CURRENT ROW NULL INDICATOR ARRAY      03490000
+         ST    R0,TITNULLS        PROVIDE TO TANKER                     03500000
+         LA    R0,NULLPRED        PRIOR   ROW NULL INDICATOR ARRAY      03510000
+         ST    R0,TITNULLP        PROVIDE TO TANKER                     03520000
+                                                                        03530000
+         MVC   TITVER+3(1),TIREVER   TIREAD PLIST VERSION ID            03540000
+         MVC   TITCOLS,COLCOUNT   COLUMNS PER ROW                       03550000
+         MVC   TITROW,TIBROWBF    CURRENT ROW ORIGIN                    03560000
+         MVC   TITPREV,PREDROWB   PREVIOUS ROW ORIGIN                   03570000
+                                                                        03580000
+         XC    TITXPAND,TITXPAND  TXP BUFFER EXPANSION NOT ALLOWED      03590000
+         ICM   R0,15,ROWCOUNT     EXCEPT ON THE FIRST ROW               03600000
+         BNZ   *+10               SKIP IF FIRST ROW ACQUIRED            03610000
+         MVC   TITXPAND,=A(TRUE)  ELSE SIGNAL EXPANSION ALLOWD          03620000
+                                                                        03630000
+         LA    R0,WORKFREE        SERVICE ROUTINE WORKAREA              03640000
+         @CALL ITITANK            R1 <== AMOUNT OF TXP BUFR USED        03650000
+                                                                        03660000
+         B     *+4(R15)           ANALYZE COMPLETION                    03670000
+         B     TNK_ACPT           ROW ACCEPTED                          03680000
+         B     TNK_FULL           TANK FULL                             03690000
+         B     TNK_ERR            TANK FAILURE                          03700000
+         DROP  R1                 TITANK                                03710000
+                                                                        03720000
+*--------------------------------------------------------------         03730000
+*   ROW SUCCESSFULLY TANKED, UPDATE STATS                               03740000
+*--------------------------------------------------------------         03750000
+TNK_ACPT DS    0H                 ROW ACCEPTED, BUFFER NOW EMPTY        03760000
+         L     R4,@TMRESP         VOLITILE RESPONSE HEADER LOCATION     03770000
+         USING TMRESP,R4          RESPONSE HEADER FORMAT                03780000
+                                                                        03790000
+         NI    TIBFLAGS,FF-TIB$REC                               137148 03800000
+         XC    TIBROWLN,TIBROWLN  ROW IS CURRENTLY EMPTY         137148 03810000
+                                                                        03820000
+         AH    R1,TMRSDATL        ACCOUNT FOR NEWLY FORMATTED ROW       03830000
+         STH   R1,TMRSDATL        SAVE UPDATED RESPONSE SIZE            03840000
+         ICM   R0,15,TIREBFSZ     MAXIMUM ROW BUFFER EXPENDITURE        03850000
+         BZ    ACPTSIZE           SKIP IF NOT DEFINED                   03860000
+         CR    R1,R0              BUFFER LENGTH CAP EXCEEDED?           03870000
+******** BH    TNK_FULL           DONE IF SO                            03880000
+ACPTSIZE DS    0H                                                       03890000
+                                                                        03900000
+         L     R2,ROWCOUNT        FETCH ROW COUNT                       03910000
+         LA    R2,1(,R2)          ACCOUNT FOR THIS ROW                  03920000
+         ST    R2,ROWCOUNT        SAVE UPDATED VALUE                    03930000
+         LH    R0,TIREMAX         MAXIMUM ROW COUNT                     03940000
+         LTR   R0,R0              MAX ROW THRESHOLD ESTABLISHED?        03950000
+         BZ    ACPTROWS           SKIP IF NOT                           03960000
+         CR    R2,R0              ROW COUNT LIMIT EXCEEDED?             03970000
+******** BH    TNK_FULL           DONE IF SO                            03980000
+ACPTROWS DS    0H                                                       03990000
+                                                                        04000000
+         DROP  R4                 TMRESP                                04010000
+                                                                        04020000
+*--------------------------------------------------------------  137148 04030000
+*   RETAIN CURRENT ROW IMAGE AS MODEL FOR DITTO COMPARISONS.     137148 04040000
+*   NOTE THAT ONLY THE FIXED PORTION OF THE ROW IS RETAINED,     137148 04050000
+*   VARDATA / VARDATAX EXTENSIONS ARE NOT                        137148 04060000
+*--------------------------------------------------------------  137148 04070000
+         LM    R0,R1,PREDROW      AGED ROW BUFFER (PTR,LEN)      137148 04080000
+         LM    R2,R3,TIBROW       CURR ROW BUFFER (PTR,LEN)      137148 04090000
+         STM   R0,R1,TIBROW       EXCHANGE BUFFERS               137148 04100000
+         STM   R2,R3,PREDROW                                     137148 04110000
+                                                                        04120000
+         MVC   NULLPRED,TIBRNULL  RETAIN NULL INDICATOR MASK            04130000
+         B     READ_TOP                                          137148 04140000
+                                                                        04150000
+*--------------------------------------------------------------         04160000
+*   ROW REJECTED, SIGNAL TERMINATION                                    04170000
+*--------------------------------------------------------------         04180000
+TNK_FULL DS    0H                 TANK FULL                             04190000
+         OI    TRMFLGS,TRM$FULL                                         04200000
+         B     READ_TOP                                                 04210000
+                                                                        04220000
+TNK_ERR  DS    0H                 TANK SERVICE ROUTINE FAILURE          04230000
+         OI    ERRFLGS,ERR$TANK                                         04240000
+         B     READ_TOP                                                 04250000
+                                                                        04260000
+         EJECT                                                          04270000
+***************************************************************         04280000
+*                                                                       04290000
+*   ACQUIRE BUFFER SUITABLE FOR ROW RETRIEVAL                           04300000
+*                                                                       04310000
+***************************************************************         04320000
+READ_BUF DS    0H                                                       04330000
+         L     R2,MINBUF          MINIMUM ROW SIZE / BUFFER LEN  137148 04340000
+         CL    R2,TIBROWBL        REQUIRMENT EXCEEDS CURR CAPACITY?     04350000
+         BNH   RBUF_FIN           DONE IF NOT                           04360000
+         ICM   R0,15,TIBROWBL     CURRENT CAPACITY                      04370000
+         BZ    RBUFREAL           NONE                                  04380000
+                                                                        04390000
+         $RETSTOR *TIBROWBF,OWNER=ITASK                                 04400000
+                                                                        04410000
+RBUFREAL DS    0H                 ALLOCATE NEW ROW BUFFER               04420000
+         $GETSTOR (R2),OWNER=ITASK ACQUIRE SUITABLE STORAGE EXTENT      04430000
+                                                                        04440000
+         ST    R1,TIBROWBF        SAVE BUFFER ADDR                      04450000
+         ST    R2,TIBROWBL        SAVE BUFFER LENGTH                    04460000
+                                                                        04470000
+RBUF_FIN DS    0H                                                       04480000
+                                                                        04490000
+         EJECT                                                          04500000
+***************************************************************         04510000
+*                                                                       04520000
+*   READ NEXT OR PREVIOUS ROW INTO ROW BUFFER                           04530000
+*                                                                       04540000
+***************************************************************         04550000
+GETROW   DS    0H                                                       04560000
+         L     R2,=A(TBG$PREV)    ASSUME GET-PREVIOUS                   04570000
+         CLI   TIRED,TIREDBWD     AS ASSUMED?                           04580000
+         BE    GETROW             READY IF SO                           04590000
+         L     R2,=A(TBG$NEXT)    ASSUME GET-NEXT OTHERWISE             04600000
+                                                                        04610000
+         SR    R3,R3              NO INDEX WILL BE USED                 04620000
+         TM    TIRENDX,BF         INDEX NAME PROVIDED?                  04630000
+         BZ    *+8                SKIP IF NOT                           04640000
+         LA    R3,TIRENDX         ELSE IDENTIFY THE INDEX               04650000
+                                                                        04660000
+*--------------------------------------------------------------         04670000
+*   SEARCH ARGS, IF DEFINED, FOLLOW THE TRUE TIREAD PLIST               04680000
+*--------------------------------------------------------------         04690000
+         SR    R4,R4              PREPARE FOR INSERT                    04700000
+         ICM   R4,3,TIRESARG      SARG DECLARED IN TIREAD PLIST COPY?   04710000
+         BZ    *+8                SKIP IF NOT                           04720000
+         AL    R4,@TIREAD         FOLLOWS TRUE TIREAD PLIST             04730000
+                                                                        04740000
+         LTR   R4,R4              EXPLICIT SARG PROVIDED?               04750000
+         BNZ   *+8                SKIP IF SO                     135096 04760000
+         L     R4,TIBDFTSA        USE PREASSIGNED SARG IF AVAILABLE     04770000
+                                                                        04780000
+*--------------------------------------------------------------         04790000
+*   ACQUIRE TABLE ROW                                                   04800000
+*--------------------------------------------------------------         04810000
+GETREQ   DS    0H                                                       04820000
+         TBGET *TIBROWBF,         TIB-OWNED ROW BUFFER                 X04830000
+               LENGTH=*TIBROWBL,  TIB-OWNED ROW BUFFER LENGTH          X04840000
+               NULLMASK=TIBRNULL, TIB-RESIDENT NULL INDICATOR MASK     X04850000
+               POS=(R2),          NEXT OR PREV                         X04860000
+               INDEX=(R3),        INDEX REF OR ZERO                    X04870000
+               SARGS=(R4),        SEARCH ARGUMENTS OR ZERO             X04880000
+               TTOKEN=TIRETKN,                                         X04890000
+               MF=(E,MFE_LIST)                                          04900000
+                                                                        04910000
+*--------------------------------------------------------------         04920000
+*   ANALYZE TBGET COMPLETION                                            04930000
+*--------------------------------------------------------------         04940000
+         CH    R15,=AL2(RC16)     STANDARD TABLE SERVICES RETC          04950000
+         BH    GET_FAIL           SERVICE ROUTINE FAILURE               04960000
+                                                                        04970000
+         B     *+4(R15)           ANALYZE RETURN CODE                   04980000
+         B     GET_OK                RC00 - ROW READ SUCCESSFULLY       04990000
+         B     GET_RC04              RC04 - MULTIPLE CAUSES             05000000
+         B     GET_FAIL              RC08 - RESERVED                    05010000
+         B     GET_FAIL              RC12 - REQUEST IN ERROR            05020000
+         B     GET_FAIL              RC16 - OBJECT SERVICE FAILURE      05030000
+                                                                        05040000
+GET_OK   DS    0H                 ROW AVAILABLE                         05050000
+         ST    R1,TIBROWLN        SAVE LENGTH OF ROW                    05060000
+         OI    TIBFLAGS,TIB$REC   INDICATE NEW DATA AVAILABLE           05070000
+         B     READ_TOP           RETURN NEW ROW                        05080000
+                                                                        05090000
+GET_FAIL DS    0H                 REQUEST OR OBJECT FAILURE             05100000
+         OI    ERRFLGS,ERR$GET    INDICATE LOGIC FAILURE                05110000
+         B     READ_TOP           SCHEDULE TERMINATION                  05120000
+                                                                        05130000
+GET_RC04 DS    0H                 DETERMINE REASON FOR WARNING          05140000
+         LTR   R0,R0              END OF TABLE ENCOUNTERED              05150000
+         BNZ   GET_BUFR           ELSEWHERE IF NOT                      05160000
+         OI    TRMFLGS,TRM$EOT    INDICATE END OF TABLE                 05170000
+         OI    TIBFLAGS,TIB$EOT   RETAIN LOGICAL END FOR NEXT CALL      05180000
+         B     READ_TOP           SCHEDULE TERMINATION                  05190000
+                                                                        05200000
+GET_BUFR DS    0H                                                       05210000
+         ST    R0,MINBUF          ROW BUFFER TOO SMALL FOR DATA         05220000
+         B     READ_TOP           REPROCESS THE REQUEST                 05230000
+                                                                        05240000
+         EJECT                                                          05250000
+***************************************************************         05260000
+*                                                                       05270000
+*   POST REASON AND RETURN CODES                                        05280000
+*                                                                       05290000
+***************************************************************         05300000
+ENDREAD  DS    0H                 END FLAGGED DURING READ PROCESSING    05310000
+         CLI   ERRFLGS,0          TERMINATION DUE TO FAILURE?           05320000
+         BE    RESPOND            NO, NORMAL END OF PASS                05330000
+         TM    ERRFLGS,ERR$GET    TBGET FAILURE                         05340000
+         BO    ETBSRV             TABLE SERVICES ISSUE IF SO            05350000
+                                                                        05360000
+ESERVICE DS    0H                 SOME SERVICE ROUTINE FAILED           05370000
+         LA    R15,RC16           SEVERE ERROR                          05380000
+         LA    R0,RSN00           TABLE SERVICES                        05390000
+         L     R1,ERR_R1          DIAGNOSTICS FROM SERVICE ROUTINE      05400000
+         LA    R2,MSGSERV                                               05410000
+         LA    R3,L'MSGSERV                                             05420000
+         B     COMNERR                                                  05430000
+                                                                        05440000
+ETBSRV   DS    0H                 TABLE SERVICES ERROR                  05450000
+         LA    R15,RC16           SEVERE ERROR                          05460000
+         LA    R0,RSN04           TABLE SERVICES                        05470000
+         L     R1,ERR_R1          DIAGNOSTICS FROM SERVICE ROUTINE      05480000
+         LA    R2,MSGTBSRV                                              05490000
+         LA    R3,L'MSGTBSRV                                            05500000
+         B     COMNERR                                                  05510000
+                                                                        05520000
+*------- INVALID REQUEST --------------------------------------         05530000
+                                                                        05540000
+ENOTIB   DS    0H                 TIB NOT MATCHED                       05550000
+         LA    R15,RC12           FAIL THE REQUEST                      05560000
+         LA    R0,RSN04           POSSIBLE INVALID TABLE TOKEN          05570000
+         SR    R1,R1                                                    05580000
+         LA    R2,MSGNOTIB                                              05590000
+         LA    R3,L'MSGNOTIB                                            05600000
+         B     COMNERR                                                  05610000
+                                                                        05620000
+ECOLSEL  DS    0H                 INVALID COLUMN SELECTION LIST         05630000
+         LA    R15,RC12           FAIL THE REQUEST                      05640000
+         LA    R0,RSN08                                                 05650000
+         SR    R1,R1                                                    05660000
+         LA    R2,MSGCOLRQ                                              05670000
+         LA    R3,L'MSGCOLRQ                                            05680000
+         B     COMNERR                                                  05690000
+                                                                        05700000
+ERRSTATE DS    0H                 REQUEST BLOCKED BY PRIOR ERROR        05710000
+         LA    R15,RC12           FAIL THE REQUEST                      05720000
+         LA    R0,RSN12                                                 05730000
+         SR    R1,R1                                                    05740000
+         LA    R2,MSGSTATE                                              05750000
+         LA    R3,L'MSGSTATE                                            05760000
+         B     COMNERR                                                  05770000
+                                                                        05780000
+EDBLEOF  DS    0H                 EOT RETURNED BUT NO REPOSITION REQ    05790000
+         LA    R15,RC12           FAIL THE REQUEST                      05800000
+         LA    R0,RSN16                                                 05810000
+         SR    R1,R1                                                    05820000
+         LA    R2,MSGXEOF                                               05830000
+         LA    R3,L'MSGXEOF                                             05840000
+         B     COMNERR                                                  05850000
+                                                                        05860000
+ERNDXREF DS    0H                 INCONSISTENT REFERENCES TO INDEX      05870000
+         LA    R15,RC12           FAIL THE REQUEST                      05880000
+         LA    R0,RSN20                                                 05890000
+         SR    R1,R1                                                    05900000
+         LA    R2,MSGNDXRQ                                              05910000
+         LA    R3,L'MSGNDXRQ                                            05920000
+         B     COMNERR                                                  05930000
+                                                                        05940000
+EPLSTSIZ DS    0H                 SEARCH ARG LIST EXCEEDS CAPACITY      05950000
+         LA    R15,RC12           FAIL THE REQUEST                      05960000
+         LA    R0,RSN24                                                 05970000
+         SR    R1,R1                                                    05980000
+         LA    R2,MSGPLSIZ                                              05990000
+         LA    R3,L'MSGPLSIZ                                            06000000
+         B     COMNERR                                                  06010000
+                                                                        06020000
+ECOLIMIT DS    0H                 COL COUNT EXCEEDS REQ CAPACITY 135096 06030000
+         LA    R15,RC12           FAIL THE REQUEST               135096 06040000
+         LA    R0,RSN28                                          135096 06050000
+         SR    R1,R1                                             135096 06060000
+         LA    R2,MSGCOLIM                                       135096 06070000
+         LA    R3,L'MSGCOLIM                                     135096 06080000
+         B     COMNERR                                           135096 06090000
+                                                                        06100000
+*--------------------------------------------------------------         06110000
+*   COMMON ERROR HANDLING EPILOG: R2 - MSG ADDR, R3 - MSG LENG          06120000
+*--------------------------------------------------------------         06130000
+COMNERR  DS    0H                 COMMON ERROR PROCESSING               06140000
+         ST    R15,RETC                                                 06150000
+         ST    R0,RSNC                                                  06160000
+         ST    R1,DIAGNOSE                                              06170000
+                                                                        06180000
+         XC    ROWCOUNT,ROWCOUNT  CLEAR ROW RETURN COUNT                06190000
+         XC    COLCOUNT,COLCOUNT  SAME FOR COLS PER ROW                 06200000
+                                                                        06210000
+         LTR   R3,R3              RESPONSE STRING PROVIDED?             06220000
+         BNP   EXIT               SKIP IF NOT                           06230000
+                                                                        06240000
+         $XPBUFR ISRT,            ADD MESSAGE TO RESPONSE BUFFER       +06250000
+               DATA=(R2),                                              +06260000
+               DATALEN=(R3),                                           +06270000
+               EXPAND=YES,                                             +06280000
+               MF=(E,MFE_LIST)                                          06290000
+                                                                        06300000
+         LTR   R15,R15            SUCCESS?                              06310000
+         BNZ   ERR_ITXP           DIAGNOSTICS WILL NOT BE RETURNED      06320000
+                                                                        06330000
+         L     R4,@TMRESP         GENERAL RESPONSE HEADER               06340000
+         USING TMRESP,R4          RESPONSE HEADER FORMAT                06350000
+         STH   R3,TMRSDATL        REPL POSTED RESPONSE WITH ERROR MSG   06360000
+         BCTR  R3,0               PREPARE FOR EX                        06370000
+         EX    R3,*+4             OVERLAY PRIOR RETURN AREA WITH MSG    06380000
+         MVC   TMRSDATA(*-*),0(R2)                                      06390000
+         DROP  R4                 TMRESP                                06400000
+                                                                        06410000
+         EJECT                                                          06420000
+***************************************************************         06430000
+*                                                                       06440000
+*   RETURN ACCUMULATED ROWS TO COOPERATIVE PROCESS                      06450000
+*                                                                       06460000
+***************************************************************         06470000
+RESPOND  DS    0H                                                       06480000
+         L     R4,@TMRESP         GENERAL RESPONSE HEADER               06490000
+         USING TMRESP,R4          RESPONSE HEADER FORMAT                06500000
+         CLC   RETC,=A(RC04)      ERROR RETURN?                         06510000
+         BH    RESP_ERR           BYPASS READ RETURN AREA PREP          06520000
+                                                                        06530000
+         LA    R2,TMRESP+TMRESPLN TIRDRET ORIGIN                        06540000
+         USING TIRDRET,R2         READ RETURN AREA HEADER FORMAT        06550000
+         MVC   TIRD#ROW,ROWCOUNT+2   POST READ RETURN ROW COUNT         06560000
+         MVC   TIRD#COL,COLCOUNT+2   POST READ RETURN COLS PER ROW      06570000
+         DROP  R2                 TIRDRET                               06580000
+                                                                        06590000
+RESP_ERR DS    0H                                                       06600000
+         MVC   TMRSTTKN,TIRETKN   TABLE TOKEN RETURNED FOR REQ MATCHUP  06610000
+         MVC   TMRSRC,RETC        ESTABLISH RETCODE                     06620000
+         MVC   TMRSRSN,RSNC       ESTABLISH REASON CODE                 06630000
+         MVC   TMRSINFO,DIAGNOSE  ESTABLISH DIAGNOSTICS, SOMETIMES      06640000
+                                                                        06650000
+*--------------------------------------------------------------         06660000
+*   AUTOMATIC CLOSE OCCURS AT EOT IF REQUESTED DURING OPEN              06670000
+*--------------------------------------------------------------         06680000
+         TM    TIBFLAGS,TIB$EOT   READ TO END/START OF TABLE?           06690000
+         BNO   PREPEXIT           SKIP IF NOT                           06700000
+         MVC   TMRSUPRC,=A(100)   SQL-LIKE NOTIFICATION SCHEME          06710000
+                                                                        06720000
+         TM    TIBFLAGS,TIB$CLS   AUTOMATIC CLOSE AT EOT REQUESTED?     06730000
+         BNO   PREPEXIT           SKIP IF NOT                           06740000
+         MVI   TMRSCLOS,1         TABLE WILL BE CLOSED                  06750000
+                                                                        06760000
+         L     R2,@PREDTIB        PREDECESSOR TIB ON TIB CHAIN          06770000
+         MVC   TIBNEXT-TIBLOCK(,R2),TIBNEXT   DECHAIN OUR TIB           06780000
+                                                                        06790000
+         LA    R1,TIBLOCK         R1 <== TIB SCHEDULED FOR CLEANUP      06800000
+         @CALL ITICLN,CTYPE=STD   CLOSE / DROP THE TABLE VIA RSCRMGR    06810000
+                                                                        06820000
+*--------------------------------------------------------------         06830000
+*   PREPARE COMPLETION STAUTS FOR RETURN AND EXIT                       06840000
+*--------------------------------------------------------------         06850000
+PREPEXIT DS    0H                                                       06860000
+         L     R15,TMRSRC         R15 <== RETURN CODE                   06870000
+         L     R0,TMRSRSN         R0  <== REASON CODE                   06880000
+         L     R1,TMRSINFO        R1  <== DIAGNOSTIC INFO               06890000
+         B     EXIT                                                     06900000
+         DROP  R4                 TMRESP                                06910000
+                                                                        06920000
+         EJECT                                                          06930000
+***************************************************************         06940000
+*                                                                       06950000
+*   ERRORS USUALLY PRECLUDING RESPONSE TO COOPERATIVE PROCESS           06960000
+*                                                                       06970000
+***************************************************************         06980000
+ERR_ITXP DS    0H                                                       06990000
+         LR    R1,R15             TXP SERVICE RETURN CODE               07000000
+         LA    R15,RC04           ASSUME OUT-OF-SPACE                   07010000
+         CR    R1,R15             CORRECT?                              07020000
+         BE    *+8                TERMINATE WITH WARNING                07030000
+         LA    R15,RC20           ELSE MORE SERIOUS PROBLEM             07040000
+         B     EXIT                                                     07050000
+                                                                        07060000
+***************************************************************         07070000
+*                                                                       07080000
+*   CLEANUP, RETURN TO CALLER                                           07090000
+*                                                                       07100000
+***************************************************************         07110000
+EXIT     DS    0H                                                       07120000
+         L     R1,@TMRESP         R1<== TI FUNCTION RESPONSE BLOCK      07130000
+         STM   R15,R1,RETREGS     PRESERVE REGS FOR RETURN              07140000
+                                                                        07150000
+         ICM   R2,15,PREDROWB     AGED ROW BUFFER ALLOCATED?     137148 07160000
+         BZ    FROWB              SKIP IF NOT                    137148 07170000
+                                                                        07180000
+         $RETSTOR (R2),OWNER=ITASK                               137148 07190000
+                                                                        07200000
+FROWB    DS    0H                                                137148 07210000
+                                                                        07220000
+*--------------------------------------------------------------         07230000
+*   DISCHARGE LOCALLY ESTABLISHED TXP BUFFER PTRS                       07240000
+*--------------------------------------------------------------         07250000
+         $XPBUFR REMPTR,PTRS=(@TIREAD,@TMRESP)                          07260000
+                                                                        07270000
+*--------------------------------------------------------------         07280000
+*   RETURN                                                              07290000
+*--------------------------------------------------------------         07300000
+         LM    R15,R1,RETREGS     RESTORE STATUS REGS FOR RETURN        07310000
+                                                                        07320000
+         #EXIT ,                  RETURN                                07330000
+                                                                        07340000
+         EJECT                                                          07350000
+***************************************************************         07360000
+*                                                                       07370000
+* ROUTINE: VCOLMASK - VALIDATE COLUMN SELECTION MASK                    07380000
+*                                                                       07390000
+* ON ENTRY:                                                             07400000
+*                                                                       07410000
+*    R1 - ADDR OF TABLE DESCRIBE AREA (TBFMT)                           07420000
+*                                                                135096 07430000
+*    TIREAD PLIST IS ADDRESSABLE                                 135096 07440000
+*                                                                       07450000
+*                                                                       07460000
+* ON EXIT:                                                              07470000
+*                                                                       07480000
+*    R15 CONTAINS ONE OF THE FOLLOWING RETURN CODES                     07490000
+*                                                                       07500000
+*        RC00 - VALID COLUMN MASK                                       07510000
+*                                                                135096 07520000
+*               R0 - NUMBER OF VDB COLUMNS REQUESTED             135096 07530000
+*                                                                135096 07540000
+*        RC04 - INVALID COLUMN MASK                                     07550000
+*                                                                       07560000
+***************************************************************         07570000
+VCOLMASK DS    0H                                                       07580000
+         BAKR  R14,0              SAVE CALLING ENVIRONMENT              07590000
+                                                                        07600000
+         LR    R6,R1              TABLE DESCRIPTION                     07610000
+         USING TBFMT,R6           LIFE OF FUNCTION               135096 07620000
+         LH    R0,TBF#COLS        R0 <== GET TABLE COLUMN COUNT  135096 07630000
+         LA    R2,L'TIREXCLS*8    MAX COLS SUPPORTED BY SERVICE  135096 07640000
+         CR    R0,R2              COMPARE COLUMN COUNT TO MAX    135096 07650000
+         BH    VCOLFAIL           UNSUPPORTED REQUEST            135096 07660000
+                                                                        07670000
+         MVC   WORKFREE(L'TIREXCLS),TIREXCLS                     135096 07680000
+         OC    WORKFREE(L'TIREXCLS),WORKFREE                     135096 07690000
+         BZ    VCOLVALD           NO TESTS NEEDED, # IN R0       135096 07700000
+                                                                        07710000
+*--------------------------------------------------------------  135096 07720000
+*   ENSURE COLUMN MASK CONTAINED TO DEFINED COLUMNS              135096 07730000
+*--------------------------------------------------------------  135096 07740000
+         LR    R3,R0              NUMBER OF COLUMNS              135096 07750000
+         SR    R2,R2              PREPARE FOR DIVIDE             135096 07760000
+         D     R2,=F'8'           R2 - BITS, R3 - FULL BYTES     135096 07770000
+                                                                        07780000
+         LTR   R15,R3             ANY FULL BYTES?                135096 07790000
+         BZ    VCNFULL            SKIP IF NOT                    135096 07800000
+         BCTR  R15,0              PREPARE FOR EX                 135096 07810000
+         EX    R15,*+4            CLEAR FULL BYTES               135096 07820000
+         XC    WORKFREE(*-*),WORKFREE                            135096 07830000
+VCNFULL  DS    0H                                                135096 07840000
+                                                                        07850000
+         LTR   R2,R2              LAST BYTE IS PARTIAL BYTE?     135096 07860000
+         BZ    VCNFPART           SKIP IF NOT                    135096 07870000
+         IC    R15,BITMASK(R2)                                   135096 07880000
+         STC   R15,BYTE                                          135096 07890000
+         XI    BYTE,FF                                           135096 07900000
+         LA    R14,WORKFREE(R3)                                  135096 07910000
+         NC    0(1,R14),BYTE                                     135096 07920000
+VCNFPART DS    0H                                                135096 07930000
+                                                                        07940000
+         OC    WORKFREE(L'TIREXCLS),WORKFREE                     135096 07950000
+         BNZ   VCOLFAIL           INVALID MASK IF UNDEF BITS     135096 07960000
+                                                                        07970000
+*--------------------------------------------------------------         07980000
+*   COUNT # COLUMNS SELECTED                                            07990000
+*--------------------------------------------------------------         08000000
+         LTR   R2,R2              BITS BEYOND LAST FULL BYTE?    135096 08010000
+         BZ    *+8                SKIP IF NOT                    135096 08020000
+         LA    R3,1(,R3)          TOTAL NUMBER OF USED BYTES     135096 08030000
+                                                                        08040000
+         LA    R14,TIREXCLS       PREPARE FOR MASK SCAN          135096 08050000
+         SR    R0,R0              INITIALIZE COLUMN COUNTER      135096 08060000
+                                                                        08070000
+VCOLTALY DS    0H                                                       08080000
+         ICM   R2,8,0(R14)        FETCH MASK BYTE                135096 08090000
+         BZ    VCOLTADV           NO BITS SET IN THIS BYTE       135096 08100000
+                                                                        08110000
+         LA    R15,8              # BITS PER BYTE                135096 08120000
+VCOLTBIT DS    0H                 COUNT SET BITS IN BYTE         135096 08130000
+         LTR   R2,R2              SELECTION BIT IN HIGHORDER?    135096 08140000
+         BNM   *+8                SKIP IF NOT                    135096 08150000
+         AL    R0,=F'1'           ELSE UPDATE COLUMN COUNT       135096 08160000
+         SLL   R2,1               SHIFT MASK OUT                 135096 08170000
+         BCT   R15,VCOLTBIT       PROCESS MASK BYTE              135096 08180000
+                                                                        08190000
+VCOLTADV DS    0H                                                135096 08200000
+         LA    R14,1(,R14)        ADVANCE TO NEXT MASK BYTE      135096 08210000
+         BCT   R3,VCOLTALY        PROCESS ALL MASK BYTES         135096 08220000
+                                                                        08230000
+*--------------------------------------------------------------         08240000
+*   RETURN COMPLETION STATUS AND COLUMN COUNT TO REQUESTOR              08250000
+*--------------------------------------------------------------         08260000
+VCOLVALD DS    0H                 VALID MASK, COL COUNT IN R0    135096 08270000
+         LA    R15,RC00           COLUMN SELECTION MASK IS VALID        08280000
+         B     VCOLRET            DONE                                  08290000
+                                                                        08300000
+VCOLFAIL DS    0H                                                       08310000
+         SR    R0,R0              NO COUNT RETURNED                     08320000
+         LA    R15,RC04           COLUMN SELECTION MASK IS INVALID      08330000
+                                                                        08340000
+VCOLRET  NOP   0                  RETURN (XDC)                          08350000
+         PR    ,                                                        08360000
+         DROP  R6                 TBFMT                                 08370000
+                                                                        08380000
+         EJECT                                                          08390000
+***************************************************************         08400000
+*                                                                       08410000
+* ROUTINE: LOCTIB - LOCATE TIB BY TABLE TOKEN                           08420000
+*                                                                       08430000
+* ON ENTRY:                                                             08440000
+*                                                                       08450000
+*    R1  - ADDRESS OF TABLE TOKEN                                       08460000
+*                                                                       08470000
+* ON EXIT:                                                              08480000
+*                                                                       08490000
+*    R15 CONTAINS ONE OF THE FOLLOWING RETURN CODES                     08500000
+*                                                                       08510000
+*        RC00 - TIB LOCATED                                             08520000
+*                                                                       08530000
+*               R0 - MATCHING TIB                                       08540000
+*               R1 - PREDECESSOR OF MATCHING TIB ON CHAIN               08550000
+*                                                                       08560000
+*        RC04 - NO CORRESPONDING TIB FOUND                              08570000
+*                                                                       08580000
+***************************************************************         08590000
+LOCTIB   DS    0H                                                       08600000
+         BAKR  R14,0              PRESERVE MAINLINE ENVIRONMENT         08610000
+                                                                        08620000
+         L     R2,PCBUSER         ADDRESS OF IUSER                      08630000
+         USING IUSER,R2           ADDRESSABILITY                        08640000
+                                                                        08650000
+         LA    R15,RC04           ASSUME TABLE IS NOT ACTIVE            08660000
+         LA    R5,USRTIBS-(TIBNEXT-TIBLOCK)                             08670000
+         USING TIBLOCK,R5         PREPARE FOR TIB TRAVERSAL             08680000
+                                                                        08690000
+LTIBNXT  DS    0H                                                       08700000
+         LR    R6,R5              SAVE BACKLINK PTR                     08710000
+         ICM   R5,15,TIBNEXT      ADVANCE TO NEXT TIB                   08720000
+         BZ    LTIBEXIT           END OF CHAIN                          08730000
+         CLC   TIBTOKN,0(R1)      MATCHING TABLE TOKEN?                 08740000
+         BNE   LTIBNXT            CONTINUE SCAN IF NOT                  08750000
+                                                                        08760000
+         LA    R0,TIBLOCK         MATCHING TIB                          08770000
+         LR    R1,R6              LIST PREDECESSOR TIB                  08780000
+         LA    R15,RC00           INDICATE SUCCESS                      08790000
+                                                                        08800000
+LTIBEXIT NOP   0                  RETURN                                08810000
+         PR    ,                                                        08820000
+         DROP  R2,R5              IUSER, TIB                            08830000
+                                                                        08840000
+         EJECT                                                          08850000
+***************************************************************         08860000
+*                                                                       08870000
+*   LOCAL READ ONLY STORAGE                                             08880000
+*                                                                       08890000
+***************************************************************         08900000
+BITMASK  DS    0F                 BIT POSITIONS VS BIT COUNT     135096 08910000
+         DC    B'00000000'           0 BITS                      135096 08920000
+         DC    B'10000000'           1 BIT                       135096 08930000
+         DC    B'11000000'           2 BITS                      135096 08940000
+         DC    B'11100000'           3 BITS                      135096 08950000
+         DC    B'11110000'           4 BITS                      135096 08960000
+         DC    B'11111000'           5 BITS                      135096 08970000
+         DC    B'11111100'           6 BITS                      135096 08980000
+         DC    B'11111110'           7 BITS                      135096 08990000
+                                                                        09000000
+*--------------------------------------------------------------         09010000
+*   MESSAGE FRAGMENTS                                                   09020000
+*--------------------------------------------------------------         09030000
+MSGNOTIB DC    C'INVALID TABLE REFERENCE'                               09040000
+MSGCOLRQ DC    C'COLUMN REQUEST LIST IMPROPER FOR TABLE'                09050000
+MSGTBSRV DC    C'TABLE SERVICES FAILURE - REF DIAGNOSTICS'              09060000
+MSGSERV  DC    C'SERVICE ROUTINE FAILURE - REF DIAGNOSTICS'             09070000
+MSGSTATE DC    C'REQUEST BLOCKED BY PRIOR ERROR CONDITION'              09080000
+MSGXEOF  DC    C'ATTEMPT TO READ BEYOND START OR END OF TABLE'          09090000
+MSGNDXRQ DC    C'INCONSISTENT USE OF INDEX'                             09100000
+MSGPLSIZ DC    C'SEARCH ARGUMENT LIST SIZE EXCEEDS CAPACITY'            09110000
+MSGCOLIM DC    C'THE NUMBER OF COLUMNS REQUESTED EXCEEDS CAPACITY'      09120000
+                                                                        09130000
+         LTORG ,                                                        09140000
+                                                                        09150000
+         PRINT NOGEN                                                    09160000
+         ICVT  ,                                                        09170000
+         ITASK ,                                                        09180000
+         IPCB  ,                                                        09190000
+         IUSER ,                                                        09200000
+         IPROJ ,                                                        09210000
+         PRINT GEN                                                      09220000
+                                                                        09230000
+         END   ,                                                        09240000

@@ -1,0 +1,749 @@
+ITRNXFER TITLE 'INTEGRATOR - PROJECT TRANSFER TRANSACTION'              00010000
+**<DOC-ON>************************************************************* 00020000
+*                                                                       00030000
+* ROUTINE: ITRNXFER - INTER-INTEGRATOR PROJECT TRANSFER TRANSACTION     00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    Itrnxfer imports or exports a project between integrators.         00080000
+*    Each integrator requires exclusive access (workbench) to the       00090000
+*    project.                                                           00100000
+*                                                                       00110000
+*    The exporting integrator controls the transfer.  The exporter      00120000
+*    opens the project to populate a workbench space.  Each ALU         00130000
+*    in the space is space-exported to a buffer which is sent to        00140000
+*    the importing integrator.  The project is exported ALU-by-ALU      00150000
+*    until all ALUs are sent or an error is detected.  An end import    00160000
+*    request is sent to the importer after all ALUs have been exported. 00170000
+*                                                                       00180000
+*    The importing integrator creates the project (new).  The first     00190000
+*    ALU sent (ALU 0) by the exporter determines the characteristics    00200000
+*    of the workbench space created via the project create operation.   00210000
+*    The space is populated ALU-by-ALU with the ALUs sent by the        00220000
+*    the exporter.                                                      00230000
+*                                                                       00240000
+*    If either integrator detects an error, the partner is notified     00250000
+*    via an error-request message.  The transfer is terminated.         00260000
+*                                                                       00270000
+*    A local import request is converted to an export request and sent  00280000
+*    to the remote integrator to begin the transfer.                    00290000
+*                                                                       00300000
+*    The project transfer request block's (PTR) storage location        00310000
+*    is dependent upon the state of the transfer operation as           00320000
+*    illustrated below.                                                 00330000
+*                                                                       00340000
+*    +------+                                                           00350000
+*    | PTR  |<-- "initiate" import/export (PTR) request                 00360000
+*    +------+ (initiate PTR)                                            00370000
+*                                                                       00380000
+*    +--------+                                                         00390000
+*    | ITWA   |<-- importer/exporter's extended ITWA to send some PTR   00400000
+*    |        |    requests ("error", "end import", and start "export") 00410000
+*    |        |    (ITWA's PTR)                                         00420000
+*    |+------+|  +------+                                               00430000
+*    || ISMH ||  | ISMH |<-- exporter allocated buffer                  00440000
+*    || PTR  ||  | PTR  |    or buffer supplied to importer             00450000
+*    |+------+|  | ALU  |    (message's PTR)                            00460000
+*    +--------+  +------+                                               00470000
+*                                                                       00480000
+* NOTE:                                                                 00490000
+*                                                                       00500000
+*    The initial inbound PTR to both the importer and exporter must     00510000
+*    be copied to the ITWA's PTR to fulfill certain requests (e.g       00520000
+*    "ERROR", "END" import).                                            00530000
+*                                                                       00540000
+* ON ENTRY:                                                             00550000
+*                                                                       00560000
+*    R15 = ENTRY POINT ADDRESS                                          00570000
+*    R14 = RETURN ADDRESS                                               00580000
+*    R13 = AVAILABLE SAVE AREA                                          00590000
+*    R11 = ICVT ADDRESS                                                 00600000
+*    R10 = ITASK ADDRESS                                                00610000
+*    R01 = ITWA ADDRESS                                                 00620000
+*    R00 = ISYS ADDRESS                                                 00630000
+*                                                                       00640000
+* ON EXIT:                                                              00650000
+*                                                                       00660000
+*    R15 = 0 RESPOND AND WAIT FOR MORE INPUT                            00670000
+*                                                                       00680000
+*            R00 = 0                                                    00690000
+*            R01 = 0                                                    00700000
+*                                                                       00710000
+*        = 4 RESPOND AND SEND A MESSAGE                                 00720000
+*                                                                       00730000
+*            R00 = LENGTH OF MESSAGE TO SEND                            00740000
+*            R01 = ADDRESS OF MESSAGE TO SEND                           00750000
+*                                                                       00760000
+*        = 8 RESPOND AND END TRANSACTION                                00770000
+*                                                                       00780000
+*            R00 = 0                                                    00790000
+*            R01 = 0                                                    00800000
+*                                                                       00810000
+*        =12 RESPOND AND TERMINATE SYSTEMS CONNECTION                   00820000
+*                                                                       00830000
+*            R00 = 0                                                    00840000
+*            R01 = 0                                                    00850000
+*                                                                       00860000
+*    ALL OTHER REGISTERS ARE RESTORED.                                  00870000
+*                                                                       00880000
+**<DOC-OFF>************************************************************ 00890000
+         EJECT ,                                                        00900000
+*********************************************************************** 00910000
+*                                                                       00920000
+* MAINTENANCE:                                                          00930000
+*                                                                       00940000
+*   03/31/94 TIM WELTZER                                                00950000
+*                                                                       00960000
+*********************************************************************** 00970000
+                                                                        00980000
+         EQUS  ,                                                        00990000
+                                                                        01000000
+RITASK   EQU   R10                                                      01010000
+RITWA    EQU   R9                                                       01020000
+RISM     EQU   R8                                                       01030000
+RPTR     EQU   R7                                                       01040000
+RIPCB    EQU   R6                                                       01050000
+RISYS    EQU   R2                                                       01060000
+                                                                        01070000
+         EJECT ,                                                        01080000
+         PTRH  ,                  PROJECT TRANSFER REQUEST BLOCK        01090000
+         EJECT ,                                                        01100000
+*---------------------------------------------------------------------- 01110000
+* LOCAL VARIABLES                                                       01120000
+*---------------------------------------------------------------------- 01130000
+                                                                        01140000
+WORKAREA #WORK ,                                                        01150000
+         ORG   MFE_LIST                                                 01160000
+WRKTPR   $PRJTRN MF=L             TRANSFER-PROJECT REQUEST PLIST        01170000
+         ORG   MFE_LIST                                                 01180000
+WRK256   DS    XL256              MSG PLIST AREA                        01190000
+         ORG                                                            01200000
+WREGS    DS    16F                SUBROUTINE REGISTER SAVE AREA         01210000
+WREGS1   DS    16F                SUBROUTINE REGISTER SAVE AREA         01220000
+WISYS    DS    F                  ISYS ADDRESS                          01230000
+WTOKLEN  DS    F                  UTOKEN LENGTH                         01240000
+WERRORL  DS    F                  LENGTH OF ERROR DATA                  01250000
+WRKMSGB  DS    XL512              MESSAGE BUFFER                        01260000
+         #ENDWORK ,                                                     01270000
+                                                                        01280000
+         EJECT ,                                                        01290000
+*---------------------------------------------------------------------- 01300000
+* Mainline                                                              01310000
+*---------------------------------------------------------------------- 01320000
+                                                                        01330000
+         $MSGDFT PREFIX=ICTPID,COMPID='PRJ',TABLE=*#MSGS,              +01340000
+               CONID=*ICTCONID,CONNAME=ICTCONNM,                       +01350000
+               MF=(E,WRK256)                                            01360000
+                                                                        01370000
+ITRNXFER #ENTER BASE=R12,                                              +01380000
+               PREG=(RITWA,RISYS),                                     +01390000
+               AMODE=31,                                               +01400000
+               RMODE=ANY                                                01410000
+                                                                        01420000
+         USING ITASK,RITASK       RITASK --> ITASK                      01430000
+         USING ITWA,RITWA         RITWA --> ITWA                        01440000
+                                                                        01450000
+         ST    RISYS,WISYS        SAVE ISYS ADDRESS                     01460000
+         L     R1,ITWPARM         GET PARM WORD                         01470000
+         SLL   R1,2               TIMES 4                               01480000
+         B     PARMJUMP(R1)       JUMP TO APPROPRIATE ROUTINE           01490000
+                                                                        01500000
+PARMJUMP DS 0H                                                          01510000
+         B     INITIATE           0 = TRANSACTION INITIATION ROUTINE    01520000
+         B     REQUEST            1 = REQUEST RECEIVED                  01530000
+         B     RESPONSE           2 = RESPONSE RECEIVED                 01540000
+         BAS   R14,CLEANUP        3 = CLEANUP TRANSACTION               01550000
+         B     RET_RAE            RESPOND AND END                       01560000
+                                                                        01570000
+REQUEST  DS 0H                                                          01580000
+         ICM   RISM,B'1111',ITWDATA@ RISM --> ISMH                      01590000
+         BZ    ABN_ENV            MESSAGE ? NO, TROUBLE                 01600000
+         USING ISMH,RISM                                                01610000
+                                                                        01620000
+         LA    RPTR,L'ISMMAX(,RISM) RPTR --> INBOUND MESSAGE'S PTR      01630000
+         USING PTR,RPTR                                                 01640000
+                                                                        01650000
+         SR    R1,R1              GET PTR REQUEST                       01660000
+         IC    R1,PTRREQ                                                01670000
+         DROP  RPTR                                                     01680000
+         SLL   R1,2                                                     01690000
+         B     REQ_JUMP(R1)       EXECUTE PTR REQUEST                   01700000
+                                                                        01710000
+REQ_JUMP DS 0H                    REQUEST        (TIMES CALLED)         01720000
+         B     IMPORT             IMPORT ALU     (0 OR MORE)            01730000
+         B     INITIATE_EXPORT    START EXPORT   (AT MOST ONCE)         01740000
+*        B     EXPORT             START EXPORT   (AT MOST ONCE)         01750000
+         B     REMOTE_ERROR       REMOTE ERROR   (AT MOST ONCE)         01760000
+         B     IMPORT_END         END IMPORT     (AT MOST ONCE)         01770000
+                                                                        01780000
+RESPONSE DS 0H                                                          01790000
+         ICM   RISM,B'1111',ITWDATA@ RISM --> ISMH                      01800000
+         BZ    ABN_ENV            DATA ? NO, TROUBLE                    01810000
+                                                                        01820000
+         TM    ITWFIECS,#ITWFERR  PRIOR "ERROR" SENT ?                  01830000
+         BO    RET_RAE              YES, END                            01840000
+                                                                        01850000
+         OC    ISMSENSE,ISMSENSE  INCOMING REMOTE "ERROR" ?             01860000
+         BNZ   RET_RAW              YES, AWAIT ERROR REQUEST            01870000
+                                                                        01880000
+         TM    ITWFIECS,#ITWFIMP  IMPORTING ?                           01890000
+         BO    RET_RAW              YES, AWAIT IMPORT REQUEST           01900000
+                                                                        01910000
+         TM    ITWFIECS,#ITWFEND  PRIOR "IMPORT END" SENT ?             01920000
+         BO    RET_END_MSG          YES, END WITH A MESSAGE             01930000
+                                                                        01940000
+         L     RPTR,ITWBUFF@      RPTR --> OUTBOUND MESSAGE'S PTR       01950000
+         LA    RPTR,L'ISMMAX(,RPTR)                                     01960000
+         B     EXPORT             CONTINUE EXPORTING                    01970000
+                                                                        01980000
+         EJECT ,                                                        01990000
+*---------------------------------------------------------------------- 02000000
+* REMOTE ERROR REQUEST SENT                                             02010000
+*---------------------------------------------------------------------- 02020000
+                                                                        02030000
+REMOTE_ERROR DS 0H                                                      02040000
+                                                                        02050000
+         USING PTR,RPTR           RPTR --> PTR                          02060000
+*                                                                       02070000
+* LOG REMOTE ERROR MESSAGE                                              02080000
+*                                                                       02090000
+         $MSG  291,               REMOTE ERROR                         +02100000
+               FIELDS=(PTRRC,PTRRSN,PTRINFO),                          +02110000
+               MSGID=YES                                                02120000
+*                                                                       02130000
+* LOG REMOTE'S ERROR MESSAGES                                           02140000
+*                                                                       02150000
+         ICM   R4,B'1111',PTRMSGC ERROR MESSAGE COUNT                   02160000
+         BZ    REMOTE_CLEANUP     ANY ? NO, CLEAN UP                    02170000
+                                                                        02180000
+         LA    R2,L'PTRH+PTRERRHL(RPTR)                                 02190000
+                                                                        02200000
+REMOTE_MSG DS 0H                                                        02210000
+         LH    R3,0(0,R2)         MESSAGE LENGTH                        02220000
+         LA    R2,2(0,R2)         MESSAGE TEXT                          02230000
+                                                                        02240000
+         $MSG  292,               REMOTE PARTNER'S MESSAGES            +02250000
+               FIELDS=(((R2),(R3))),                                   +02260000
+               MSGID=YES                                                02270000
+                                                                        02280000
+         LA    R2,0(R3,R2)                                              02290000
+         BCT   R4,REMOTE_MSG      NEXT MESSAGE                          02300000
+                                                                        02310000
+REMOTE_CLEANUP DS 0H                                                    02320000
+         BAS   R14,CLEANUP        CLEAN-UP RESOURCES                    02330000
+         B     RET_RAE            RESPOND AND END                       02340000
+                                                                        02350000
+         DROP  RPTR                                                     02360000
+                                                                        02370000
+         EJECT ,                                                        02380000
+*---------------------------------------------------------------------- 02390000
+* INITIATE PROJECT IMPORT/EXPORT                                        02400000
+*---------------------------------------------------------------------- 02410000
+                                                                        02420000
+INITIATE DS 0H                                                          02430000
+         OI    ITWFIECS,#ITWFI    REMEMBER, INITIATOR                   02440000
+                                                                        02450000
+         MVC   ITWOPTR@,ITWDATA@  SAVE ORIGINAL REQUEST AND ...         02460000
+         MVC   ITWOPTRL,ITWDATAL  ... IT'S LENGTH (JUST BECAUSE)        02470000
+                                                                        02480000
+         L     RPTR,ITWDATA@      RPTR --> PTR                          02490000
+         USING PTR,RPTR                                                 02500000
+                                                                        02510000
+         MVC   ITWRNAME,PTRTP     REMOTE EXECUTER = LOCAL EXECUTER      02520000
+         MVI   PTRVERSN,#PTRV1    SET PROJECT TRANSFER VERSION          02530000
+         CLI   PTRREQ,#PTRQIMP    LOCAL IMPORT ?                        02540000
+         BNE   INITIATE_EXPORT      NO, INITIATE EXPORT                 02550000
+                                                                        02560000
+         OI    ITWFIECS,#ITWFIMP  REMEMBER, LOCAL IMPORT                02570000
+*                                                                       02580000
+* Format export request message in ITWA to send to partner              02590000
+*                                                                       02600000
+         MVC   ITWPTRH(L'PTRHNOTK),PTRHNOTK  LOCALIZE PARTIAL PTRH      02610000
+         TM    PTRFLAGS,#PTRFUTK  UTOKEN SUPPLIED ?                     02620000
+         BZ    INI_NOUTOKEN         NO, UTOKEN NOT SUPPLIED             02630000
+                                                                        02640000
+X        USING TOKEN,PTRUTOKN                                           02650000
+         SR    R1,R1              PREPARE FOR IC OF ...                 02660000
+         IC    R1,X.TOKLEN        ... UTOKEN LENGTH                     02670000
+         DROP  X                                                        02680000
+         BCTR  R1,0               COPY UTOKEN TO LOCALIZED PTR          02690000
+         EX    R1,*+4                                                   02700000
+X        USING PTR,ITWPTRH                                              02710000
+         MVC   X.PTRUTOKN(0),PTRUTOKN                                   02720000
+                                                                        02730000
+INI_NOUTOKEN DS 0H                                                      02740000
+         MVI   X.PTRREQ,#PTRQEXP  PARTNER "EXPORT"S                     02750000
+         DROP  X                                                        02760000
+         LA    R1,ITWISMSG        MESSAGE ADDRESS                       02770000
+         LA    R0,L'ITWISMSG      MESSAGE LENGTH                        02780000
+         B     RET_RAS            INITIATE IMPORT                       02790000
+                                                                        02800000
+         DROP  RPTR                                                     02810000
+                                                                        02820000
+         EJECT ,                                                        02830000
+*---------------------------------------------------------------------- 02840000
+* INITIATE EXPORT                                                       02850000
+*---------------------------------------------------------------------- 02860000
+                                                                        02870000
+INITIATE_EXPORT DS 0H                                                   02880000
+                                                                        02890000
+         USING PTR,RPTR                                                 02900000
+*                                                                       02910000
+* Copy inbound PTR to ITWA's PTR                                        02920000
+*                                                                       02930000
+         MVC   ITWPTRH(L'PTRHNOTK),PTRHNOTK  LOCALIZE PARTIAL PTRH      02940000
+                                                                        02950000
+         LA    R2,0               ASSUME NO UTOKEN                      02960000
+         TM    PTRFLAGS,#PTRFUTK  UTOKEN SUPPLIED ?                     02970000
+         BZ    INI_EXP              NO, UTOKEN NOT SUPPLIED             02980000
+                                                                        02990000
+         LA    R2,PTRUTOKN        GET UTOKEN ADDRESS                    03000000
+         USING TOKEN,R2                                                 03010000
+         SR    R1,R1              PREPARE FOR IC OF ...                 03020000
+         IC    R1,TOKLEN          ... UTOKEN LENGTH                     03030000
+         DROP  R2                                                       03040000
+         BCTR  R1,0               COPY UTOKEN TO LOCALIZED PTR          03050000
+         EX    R1,*+4                                                   03060000
+X        USING PTR,ITWPTRH                                              03070000
+         MVC   X.PTRUTOKN(0),PTRUTOKN                                   03080000
+         DROP  X                                                        03090000
+*                                                                       03100000
+* Open project (workbench access) and populate data space               03110000
+*                                                                       03120000
+                                                                        03130000
+INI_EXP  DS 0H                                                          03140000
+         $PRJTRN EXPORT,INIT,     INITIALIZE PROJECT EXPORT            +03150000
+               TPC=ITWTPC,        I/O - TRANSFER-PROJECT CONTROL AREA  +03160000
+               NAME=PTREXPRJ,     I/  - PROJECT NAME                   +03170000
+               UTOKEN=(R2),       I/  - UTOKEN                         +03180000
+               PRJCONF=*PTRCONF,  I/  - REPLACE CONFIRMATION,          +03190000
+               MSGBUFF=WRKMSGB,   I/O - MESSAGE BUFFER                 +03200000
+               MSGBUFFL=L'WRKMSGB, I/  - LENGTH OF MESSAGE BUFFER      +03210000
+               MF=(E,WRK256)                                            03220000
+                                                                        03230000
+         BNZ   ERR_PRJTRN         INITIALIZED ? NO, ERROR               03240000
+*                                                                       03250000
+* Allocate buffer to contain ISMH, PTRH (w/UTOKEN), and ALU data        03260000
+*                                                                       03270000
+X        USING PTR,ITWPTRH                                              03280000
+         ST    R1,X.PTRALUL       SAVE ALU SIZE                         03290000
+         DROP  X                                                        03300000
+                                                                        03310000
+         LA    R1,L'ISMMAX+L'PTRH(0,R1) ALU SIZE + HEADER SIZES         03320000
+         ST    R1,ITWBUFFL        SAVE MESSAGE BUFFER LENGTH            03330000
+                                                                        03340000
+         $GETSTOR (R1),LOC=RES    ALLOCATE BUFFER                       03350000
+                                                                        03360000
+         ST    R1,ITWBUFF@        MESSAGE ADDRESS, ALLOCATED INDICATOR  03370000
+*                                                                       03380000
+* Format message's project transfer request                             03390000
+*                                                                       03400000
+         LA    RPTR,L'ISMMAX(0,R1)  SWITCH TO MESSAGE'S PTR             03410000
+                                                                        03420000
+         LR    R14,RPTR           TARGET - MESSAGE'S PTR                03430000
+         LA    R15,L'ISMMAX+L'PTRH                                      03440000
+         LA    R0,ITWPTRH         SOURCE - ITWA'S PTR                   03450000
+         LR    R1,R15                                                   03460000
+         MVCL  R14,R0             COPY ITWA'S PTR TO MESSAGE'S PTR      03470000
+                                                                        03480000
+         MVI   PTRREQ,#PTRQIMP    PARTNER "IMPORT"S                     03490000
+                                                                        03500000
+         OI    ITWFIECS,#ITWFS    PROJECT AND SPACE EXPORT STARTED      03510000
+                                                                        03520000
+         DROP  RPTR                                                     03530000
+                                                                        03540000
+         EJECT ,                                                        03550000
+*---------------------------------------------------------------------- 03560000
+* EXPORT - export an ALU to the message area                            03570000
+*---------------------------------------------------------------------- 03580000
+                                                                        03590000
+EXPORT   DS 0H                                                          03600000
+                                                                        03610000
+         USING PTR,RPTR           RPTR --> MESSAGE'S PTR                03620000
+                                                                        03630000
+         $PRJTRN DATA=PTRALU,      /O - TARGET BUFFER                  +03640000
+               ALU=PTRALU#,        /O - ALU NUMBER                     +03650000
+               TPC=ITWTPC,        I/O - TRANSFER-PROJECT CONTROL       +03660000
+               MSGBUFF=WRKMSGB,   I/O - MESSAGE BUFFER                 +03670000
+               MSGBUFFL=L'WRKMSGB, I/  - LENGTH OF MESSAGE BUFFER      +03680000
+               MF=(E,WRKTPR)                                            03690000
+                                                                        03700000
+         C     R15,=F'4'  -->-+   ERROR ? OR ...                        03710000
+         BH    ERR_PRJTRN     |     YES, ERROR                          03720000
+         L     R1,ITWBUFF@    |   ASSUME NOT END-OF-SPACE. MESSAGE      03730000
+         L     R0,ITWBUFFL    |   MESSAGE LENGTH                        03740000
+         BNE   RET_RAS    <---+   ... END-OF-SPACE ? NO, SEND MESSSAGE  03750000
+                                                                        03760000
+         EJECT ,                                                        03770000
+*---------------------------------------------------------------------- 03780000
+* End project EXPORT                                                    03790000
+*---------------------------------------------------------------------- 03800000
+*                                                                       03810000
+* Close project and release data space.                                 03820000
+*                                                                       03830000
+         $PRJTRN EXPORT,END,      END EXPORT                           +03840000
+               TPC=ITWTPC,        I/O - PROJECT TRANSFER CONTROL       +03850000
+               MSGBUFF=WRKMSGB,   I/O - MESSAGE BUFFER                 +03860000
+               MSGBUFFL=L'WRKMSGB, I/  - LENGTH OF MESSAGE BUFFER      +03870000
+               MF=(E,WRKTPR)                                            03880000
+                                                                        03890000
+         BNZ   ERR_PRJTRN         ENDED ? NO, ERROR                     03900000
+         DROP  RPTR                                                     03910000
+                                                                        03920000
+         BAS   R14,FREEBUFF       FREE ALU BUFFER                       03930000
+                                                                        03940000
+         OI    ITWFIECS,#ITWFEND  REMEMBER, ENDED                       03950000
+*                                                                       03960000
+* Format and send "END" request via ITWA'S PTR                          03970000
+*                                                                       03980000
+X        USING PTR,ITWPTRH                                              03990000
+         MVI   X.PTRREQ,#PTRQEND  "END" REQUEST                         04000000
+         DROP  X                                                        04010000
+         LA    R1,ITWISMSG        MESSAGE ADDRESS                       04020000
+         LA    R0,L'ITWISMSG      MESSAGE LENGTH                        04030000
+         B     RET_RAS            SEND MESSAGE                          04040000
+                                                                        04050000
+*---------------------------------------------------------------------- 04060000
+         EJECT ,                                                        04070000
+*---------------------------------------------------------------------- 04080000
+* INITIATE IMPORT                                                       04090000
+*---------------------------------------------------------------------- 04100000
+                                                                        04110000
+INITIATE_IMPORT DS 0H                                                   04120000
+                                                                        04130000
+         USING PTR,RPTR                                                 04140000
+*                                                                       04150000
+* Copy inbound PTR to ITWA's PTR                                        04160000
+*                                                                       04170000
+         MVC   ITWPTRH(L'PTRHNOTK),PTRHNOTK  LOCALIZE PARTIAL PTRH      04180000
+                                                                        04190000
+         LA    R2,0               ASSUME NO UTOKEN                      04200000
+         TM    PTRFLAGS,#PTRFUTK  UTOKEN SUPPLIED ?                     04210000
+         BZ    INI_IMP              NO, UTOKEN NOT SUPPLIED             04220000
+                                                                        04230000
+         LA    R2,PTRUTOKN        GET UTOKEN ADDRESS                    04240000
+         USING TOKEN,R2                                                 04250000
+         SR    R1,R1              PREPARE FOR IC OF ...                 04260000
+         IC    R1,TOKLEN          ... UTOKEN LENGTH                     04270000
+         DROP  R2                                                       04280000
+                                                                        04290000
+         BCTR  R1,0               COPY UTOKEN TO LOCALIZED PTR          04300000
+         EX    R1,*+4                                                   04310000
+X        USING PTR,ITWPTRH                                              04320000
+         MVC   X.PTRUTOKN(0),PTRUTOKN                                   04330000
+         DROP  X                                                        04340000
+                                                                        04350000
+INI_IMP  DS 0H                                                          04360000
+*                                                                       04370000
+* Open project (NEW - workbench access) and populate data space         04380000
+*                                                                       04390000
+         $PRJTRN IMPORT,INIT,     INITIALIZE PROJECT IMPORT            +04400000
+               TPC=ITWTPC,        I/O - TRANSFER-PROJECT CONTROL       +04410000
+               NAME=PTRIMPRJ,     I/  - PROJECT NAME                   +04420000
+               UTOKEN=(R2),       I/  - UTOKEN                         +04430000
+               DATA=PTRALU,       I/  - SOURCE BUFFER                  +04440000
+               ALUSIZE=*PTRALUL,  I/  - ALU SIZE                       +04450000
+               PRJCONF=*PTRCONF,   I/  - REPLACE CONFIRMATION,         +04460000
+               MSGBUFF=WRKMSGB,   I/O - MESSAGE BUFFER                 +04470000
+               MSGBUFFL=L'WRKMSGB, I/  - LENGTH OF MESSAGE BUFFER      +04480000
+               MF=(E,WRKTPR)                                            04490000
+                                                                        04500000
+         BNZ   ERR_PRJTRN         INITIALIZED ? NO, ERROR               04510000
+                                                                        04520000
+         OI    ITWFIECS,#ITWFS    PROJECT AND SPACE IMPORT STARTED      04530000
+                                                                        04540000
+         DROP  RPTR                                                     04550000
+                                                                        04560000
+         EJECT ,                                                        04570000
+*---------------------------------------------------------------------- 04580000
+* Import - insert ALU from inbound message into data space.             04590000
+*---------------------------------------------------------------------- 04600000
+                                                                        04610000
+IMPORT   DS 0H                                                          04620000
+                                                                        04630000
+         USING PTR,RPTR           RPTR --> PTR                          04640000
+                                                                        04650000
+         TM    ITWFIECS,#ITWFS    INITIATED ?                           04660000
+         BZ    INITIATE_IMPORT      NO, INITIATE IMPORT                 04670000
+         $PRJTRN TPC=ITWTPC,      I/  - PROJECT TRANSFER CONTROL       +04680000
+               DATA=PTRALU,       I/  - SOURCE BUFFER                  +04690000
+               ALU=PTRALU#,       I/  - ALU NUMBER                     +04700000
+               MSGBUFF=WRKMSGB,   I/O - MESSAGE BUFFER                 +04710000
+               MSGBUFFL=L'WRKMSGB, I/  - LENGTH OF MESSAGE BUFFER      +04720000
+               MF=(E,WRKTPR)                                            04730000
+                                                                        04740000
+         BNZ   ERR_PRJTRN         IMPORTED ? NO, ERROR                  04750000
+         B     RET_RAW            RESPOND AND WAIT FOR MORE             04760000
+                                                                        04770000
+                                                                        04780000
+         EJECT ,                                                        04790000
+*---------------------------------------------------------------------- 04800000
+*                                                                       04810000
+* END PROJECT IMPORT                                                    04820000
+*                                                                       04830000
+*---------------------------------------------------------------------- 04840000
+                                                                        04850000
+IMPORT_END DS 0H                                                        04860000
+*                                                                       04870000
+* Save project to database, close project, and release data space.      04880000
+*                                                                       04890000
+         $PRJTRN IMPORT,END,      END EXPORT                           +04900000
+               TPC=ITWTPC,        I/O - PROJECT TRANSFER CONTROL       +04910000
+               MSGBUFF=WRKMSGB,   I/O - MESSAGE BUFFER                 +04920000
+               MSGBUFFL=L'WRKMSGB, I/  - LENGTH OF MESSAGE BUFFER      +04930000
+               MF=(E,WRKTPR)                                            04940000
+                                                                        04950000
+         BNZ   ERR_PRJTRN         ENDED ? NO, ERROR                     04960000
+         DROP  RPTR                                                     04970000
+                                                                        04980000
+         L     RISYS,WISYS                                              04990000
+         USING ISY,RISYS          RISYS --> ISY                         05000000
+X        USING PTR,ITWPTRH                                              05010000
+                                                                        05020000
+         $MSG  293,               PROJECT IMPORTED                     +05030000
+               FIELDS=(X.PTRIMPRJ,                                     +05040000
+               =C'imported from',ISYAPPID,X.PTREXPRJ)                   05050000
+                                                                        05060000
+         DROP  RISYS                                                    05070000
+         DROP  X                                                        05080000
+                                                                        05090000
+         B     RET_RAE            RESPOND AND END                       05100000
+                                                                        05110000
+         EJECT ,                                                        05120000
+*---------------------------------------------------------------------- 05130000
+* FREE MESSAGE BUFFER                                                   05140000
+*---------------------------------------------------------------------- 05150000
+                                                                        05160000
+FREEBUFF DS 0H                                                          05170000
+         STM   R0,R15,WREGS       SAVE CALLER'S REGISTERS               05180000
+                                                                        05190000
+         ICM   R2,B'1111',ITWBUFF@ STORAGE ALLOCATED ?                  05200000
+         BZ    FREE_END             NO, DONE (CC SET)                   05210000
+                                                                        05220000
+         $RETSTOR (R2)                                                  05230000
+                                                                        05240000
+         XC    ITWBUFF@,ITWBUFF@  STORAGE RELEASED                      05250000
+         LTR   R15,R15            SET CC                                05260000
+                                                                        05270000
+FREE_END DS 0H                                                          05280000
+         LM    R0,R15,WREGS       RESTORE CALLER'S REGISTERS            05290000
+         BR    R14                RETURN TO CALLER W/CC SET             05300000
+                                                                        05310000
+         EJECT ,                                                        05320000
+*---------------------------------------------------------------------- 05330000
+* RESOURCE CLEAN UP                                                     05340000
+*---------------------------------------------------------------------- 05350000
+*                                                                       05360000
+* Close project, and release data space.  The project is NOT saved.     05370000
+*                                                                       05380000
+CLEANUP  DS 0H                                                          05390000
+         STM   R0,R15,WREGS1      SAVE CALLERS' REGISTERS               05400000
+                                                                        05410000
+         TM    ITWFIECS,#ITWFIMP  IMPORTING ?                           05420000
+         BO    CLN_IMPORT           YES, END IMPORT                     05430000
+                                                                        05440000
+         $PRJTRN EXPORT,TERM,     TERMINATE EXPORT                     +05450000
+               TPC=ITWTPC,        I/O - PROJECT TRANSFER CONTROL       +05460000
+               MF=(E,WRKTPR)                                            05470000
+                                                                        05480000
+         BAS   R14,FREEBUFF       FREE BUFFER                           05490000
+         B     CLN_EXIT                                                 05500000
+                                                                        05510000
+CLN_IMPORT DS 0H                                                        05520000
+         $PRJTRN IMPORT,TERM,     TERMINATE IMPORT                     +05530000
+               TPC=ITWTPC,        I/O - PROJECT TRANSFER CONTROL       +05540000
+               MF=(E,WRKTPR)                                            05550000
+                                                                        05560000
+CLN_EXIT DS 0H                                                          05570000
+         LM    R0,R15,WREGS1      RESTORE CALLERS' REGISTERS            05580000
+         BR    R14                RETURN TO CALLER                      05590000
+                                                                        05600000
+         EJECT ,                                                        05610000
+*---------------------------------------------------------------------- 05620000
+* ERROR ROUTINES                                                        05630000
+*---------------------------------------------------------------------- 05640000
+                                                                        05650000
+ERR_PRJTRN DS 0H                  MESSAGES ARE IN MESSAGE BUFFER        05660000
+*                                                                       05670000
+* COPY MESSAGE LENGTH(S) AND TEXT FROM MESSAGE BUFFER TO PTR'S ERROR    05680000
+* REQUEST DATA AREA WHICH WILL BE SENT TO THE REMOTE PARTNER.           05690000
+*                                                                       05700000
+* REGISTER USAGE                                                        05710000
+*                                                                       05720000
+* R14 - PTR TARGET BUFFER ADDRESS                                       05730000
+* R15 - CURRENT SOURCE MESSAGE LENGTH                                   05740000
+* R0  - CURRENT SOURCE MESSAGE TEXT ADDRESS                             05750000
+* R1  - AVAILABLE PTR TARGET BUFFER SPACE                               05760000
+* R2  - MESSAGE HEADER BASE ADDRESS                                     05770000
+* R3  - MESSAGE COUNT DOWN                                              05780000
+* R4  - PTR TARGET BUFFER STORAGE CONSUMPTION ACCUMULATOR               05790000
+*                                                                       05800000
+                                                                        05810000
+X        USING PTR,ITWPTRH                                              05820000
+                                                                        05830000
+Y        USING TPC,ITWTPC                                               05840000
+         MVC   X.PTREREGS,Y.TPCEREGS COPY ERROR REGISTERS' VALUES       05850000
+         DROP  Y                                                        05860000
+                                                                        05870000
+Y        USING $MSGBUF,WRKMSGB                                          05880000
+         SR    R4,R4              STORAGE CONSUMPTION ACCUMULATOR       05890000
+         ST    R4,X.PTRMSGC       NO MESSAGES COPIED YET                05900000
+         LR    R3,R4              CLEAR TO GET ...                      05910000
+         ICM   R3,B'0011',Y.$MSGCNT ... MESSAGE COUNT                   05920000
+         BZ    ERR_MSGDONE        ANY ? NO, NO MESSAGES                 05930000
+         ICM   R2,B'1111',Y.$MSGQF FIRST MESSAGE HEADER                 05940000
+         BZ    ERR_MSGDONE        EXIST ? NO, NO MESSAGES               05950000
+                                                                        05960000
+         DROP  Y                                                        05970000
+                                                                        05980000
+         LA    R14,X.PTRMSG       INITIAL TARGET ADDRESS                05990000
+         LA    R1,ITW$MSGL        CONSUMABLE STORAGE LENGTH             06000000
+                                                                        06010000
+ERR_NEXT DS 0H                                                          06020000
+                                                                        06030000
+Y        USING $MSBHDR,R2            R2 --> $MSGBHDR                    06040000
+                                                                        06050000
+         LA    R0,Y.$MSBTEXT         CURRENT SOURCE                     06060000
+         LH    R15,Y.$MSBLEN         CURRENT SOURCE LENGTH ...          06070000
+         S     R1,=A(L'$MSBLEN)      ... CONSUMES 2                     06080000
+         CR    R1,R15                ENOUGH REMAINING ?                 06090000
+         BL    ERR_MSGDONE             NO, OUT OF SPACE                 06100000
+         LA    R4,L'$MSBLEN(R4,R15)  BUMP CONSUMPTION                   06110000
+         STH   R15,0(R14)            COPY MESSAGE LENGTH                06120000
+         LA    R14,L'$MSBLEN(0,R14)  SKIP PAST LENGTH                   06130000
+         MVCL  R14,R0                COPY. SET NEW TARGET & CONSUMABLE  06140000
+         L     R2,Y.$MSBLINK         NEXT POTENTIAL MESSAGE HEADER      06150000
+         BCT   R3,ERR_NEXT           MORE ? YES, COPY NEXT MESSAGE      06160000
+                                                                        06170000
+         DROP  Y                                                        06180000
+                                                                        06190000
+ERR_MSGDONE DS 0H                                                       06200000
+         LNR   R3,R3              UNCOPIED MESSAGES                     06210000
+Y        USING $MSGBUF,WRKMSGB                                          06220000
+         AH    R3,Y.$MSGCNT       TOTAL MESSAGES                        06230000
+         DROP  Y                                                        06240000
+         ST    R3,X.PTRMSGC       TOTAL COPIED MESSAGES                 06250000
+         ST    R4,WERRORL         SAVE LENGTH OF ERROR MESSAGES         06260000
+*                                                                       06270000
+* Release resources.                                                    06280000
+*                                                                       06290000
+         BAS   R14,CLEANUP        LOCAL CLEAN UP                        06300000
+*                                                                       06310000
+* Format and send "ERROR" request in ITWA's PTR.                        06320000
+*                                                                       06330000
+         OI    ITWFIECS,#ITWFERR     REMEMBER ERROR                     06340000
+         MVC   ITWSENSE,=X'FFFFFFFF' REMOTE "ERROR" ON ITS WAY          06350000
+         MVI   X.PTRREQ,#PTRQERR     "ERROR" REQUEST                    06360000
+                                                                        06370000
+         DROP  X                                                        06380000
+                                                                        06390000
+         LA    R1,ITWISMSG        SEND ERROR REQUEST TO PARTNER         06400000
+         LA    R0,L'ITWISMSG+PTRERRHL ISMH, PTRH, ERROR HEADER ...      06410000
+         A     R0,WERRORL         ... AND ERROR MESSAGES (IF ANY)       06420000
+         B     RET_RAS                                                  06430000
+                                                                        06440000
+         EJECT ,                                                        06450000
+*---------------------------------------------------------------------- 06460000
+* RETURN                                                                06470000
+*---------------------------------------------------------------------- 06480000
+                                                                        06490000
+RET_END_MSG DS 0H                                                       06500000
+         L     RISYS,WISYS                                              06510000
+         USING ISY,RISYS          RISYS --> ISY                         06520000
+X        USING PTR,ITWPTRH                                              06530000
+                                                                        06540000
+         $MSG  293,               PROJECT EXPORTED                     +06550000
+               FIELDS=(X.PTREXPRJ,=C'exported to',ISYAPPID,X.PTRIMPRJ)  06560000
+                                                                        06570000
+         DROP  RISYS                                                    06580000
+         DROP  X                                                        06590000
+                                                                        06600000
+         B     RET_RAE                                                  06610000
+                                                                        06620000
+RET_RAW  DS 0H                                                          06630000
+         LA    R15,0              RESPOND AND WAIT                      06640000
+         B     RETURN                                                   06650000
+                                                                        06660000
+RET_RAE  DS 0H                                                          06670000
+         LA    R15,8              RESPOND AND END                       06680000
+         B     RETURN                                                   06690000
+                                                                        06700000
+RET_RAT  DS 0H                    CURRENTLY, NOT USED                   06710000
+         LA    R15,12             RESPOND AND TERMINATE                 06720000
+         B     RETURN                                                   06730000
+                                                                        06740000
+RET_RAS  DS 0H                    R0 = MSG LENGTH, R1 = MSG ADDRESS     06750000
+         LA    R15,4              RESPOND AND SEND MESSAGE              06760000
+                                                                        06770000
+RETURN   DS 0H                                                          06780000
+         #EXIT R1=YES             RETURN W/R15,R0,R1                    06790000
+                                                                        06800000
+ABN_ENV  DS 0H                                                          06810000
+         $ABEND ABE_VTDIAG,                                            +06820000
+               DUMP=YES,                                               +06830000
+               TITLE='ENVIRONMENTAL ERROR IN ITRNXFER'                  06840000
+                                                                        06850000
+         EJECT ,                                                        06860000
+*---------------------------------------------------------------------- 06870000
+* CONSTANTS AND LITERALS                                                06880000
+*---------------------------------------------------------------------- 06890000
+         LTORG ,                                                        06900000
+                                                                        06910000
+         EJECT ,                                                        06920000
+*---------------------------------------------------------------------- 06930000
+         PRINT NOGEN                                                    06940000
+         ICVT  ,                                                        06950000
+         IPROJ ,                                                        06960000
+         ITASK ,                                                        06970000
+         IPCB  ,                                                        06980000
+         ICHRUTKN ,               MVS UTOKEN                            06990000
+         $PRJREQ DSECT=YES        PROJECT REQUEST                       07000000
+         $PRJTRN DSECT=YES        TRANSFER-PROJECT BLOCKS               07010000
+         $SYSTEMS DSECT=YES                                             07020000
+         ABCODES PRINT=NOGEN                                            07030000
+         PRINT GEN                                                      07040000
+                                                                        07050000
+         EJECT ,                                                        07060000
+*---------------------------------------------------------------------- 07070000
+*                                                                       07080000
+* ITWA EXTENSION DESCRIPTION                                            07090000
+*                                                                       07100000
+* Maintains local project-transfer status and control information       07110000
+* during project transfer requests within a session.                    07120000
+*                                                                       07130000
+*---------------------------------------------------------------------- 07140000
+                                                                        07150000
+ITWA     LOCTR ,                  RESUME ITWA DESCRIPTION               07160000
+         ORG   ITWWORK                                                  07170000
+ITWAX    DS    0X                 ITWA EXTENSION                        07180000
+                                                                        07190000
+ITWFIECS DS    X                  IMPORT/EXPORT CONTROL/STATUS FLAGS    07200000
+#ITWFI   EQU   X'01'                INITIATOR                           07210000
+#ITWFIMP EQU   X'02'                IMPORTER (0 = EXPORTER)             07220000
+#ITWFS   EQU   X'04'                IMPORT/EXPORT STARTED               07230000
+#ITWFERR EQU   X'08'                LOCAL ERROR DETECTED                07240000
+#ITWFEND EQU   X'10'                "END-IMPORT" REQUEST SENT           07250000
+                                                                        07260000
+ITWOPTR@ DS    A                  ORIGINAL REQUEST ADDRESS              07270000
+ITWOPTRL DS    A                  ORIGINAL REQUEST LENGTH               07280000
+ITWBUFF@ DS    A                  EXPORT MESSAGE BUFFER ADDRESS         07290000
+ITWBUFFL DS    F                  EXPORT MESSAGE BUFFER LENGTH          07300000
+ITWTPC   DS    XL(TPCLEN)         TRANSFER-PROJECT CONTROL AREA         07310000
+*                                                                       07320000
+* INTEGRATOR-TO-INTEGRATOR "ERROR" AND "END IMPORT" REQUEST PTR AREA    07330000
+* AND AN "INITIATE"-ING "IMPORT"ER'S PTR AREA REQUESTING THE REMOTE     07340000
+* PARTNER TO "EXPORT"                                                   07350000
+*                                                                       07360000
+ITWISMSG DS    XL(L'ISMMAX+L'PTRH) ISMH AND PTRH                        07370000
+                                                                        07380000
+         ORG   ITWISMSG                                                 07390000
+ITWISMH  DS    XL(L'ISMMAX)       MESSAGE HEADER                        07400000
+ITWPTRH  DS    XL(L'PTRH)         PROJECT TRANSFER REQUEST              07410000
+                                                                        07420000
+         ORG   ITWPTRH+(PTRMSG-PTR) $MSGBUF ORIGIN                      07430000
+ITW$MSGB DS    0X                                                       07440000
+                                                                        07450000
+         ORG   ,                                                        07460000
+ITW$MSGL EQU   *-ITW$MSGB         REMAINDER OF ITWA                     07470000
+*---------------------------------------------------------------------- 07480000
+         END   ,                                                        07490000

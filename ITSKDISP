@@ -1,0 +1,418 @@
+ITSKDISP TITLE '- TASK MANAGER WORKUNIT DISPATCHER'                     00010000
+**<DOC-ON>******************************************************        00020000
+*                                                                       00030000
+* ROUTINE: ITSKDISP - Task Manager Workunit Dispatcher                  00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This routine will dispatch the next ready process on the           00080000
+*    ITASK workunit dispatch queue.  If a wait occurred in the          00090000
+*    taskmgr,  the ITASK has been marked non-dispatchable and           00100000
+*    will remain non-dispatchable until the event blocking the          00110000
+*    task manager completes.  A test is initially performed to          00120000
+*    determine if the task manager is currently in a wait               00130000
+*    state.  If so, the task wait flag is reset and the resume          00140000
+*    EPB address is cleared.                                            00150000
+*                                                                       00160000
+*    If the current ITASK is a standard ITASK and if no PCB's           00170000
+*    exist on the task dispatch queue (all processes deleted),          00180000
+*    then the taskmgr epilog routine is dispatched.  If PCB's           00190000
+*    exist but none ready, control returns to the caller and            00200000
+*    the task will be placed in a wait state.                           00210000
+*                                                                       00220000
+*    When a PCB is marked ready,  the resume registers are              00230000
+*    restored and the process is resumed.  If the resume EPB            00240000
+*    contains an EPBRTN, this async routine is dispatched.              00250000
+*                                                                       00260000
+* ON ENTRY:                                                             00270000
+*                                                                       00280000
+*    R10 Contains the address of the current ITASK                      00290000
+*    R11 Contains the address of the ICVT                               00300000
+*                                                                       00310000
+* ON EXIT:                                                              00320000
+*                                                                       00330000
+*    Control is passed to the next readt process to be                  00340000
+*    dispatched.  If no PCBs are ready, control is returned to          00350000
+*    the caller.                                                        00360000
+*                                                                       00370000
+*    DISPATCH REGISTERS:                                                00380000
+*                                                                       00390000
+*        R2-R12 Restored from resume registers                          00400000
+*        R14    Resume address                                          00410000
+*        R15    Event code                                              00420000
+*        R0     Event (POST) completion code                            00430000
+*        R1     EPB Address/Token                                       00440000
+*                                                                       00450000
+*    ASYNC EVENT DISPATCH:                                              00460000
+*                                                                       00470000
+*        R15    Entry Address                                           00480000
+*        R10    ITASK Address                                           00490000
+*        R0     EPB   Address                                           00500000
+*        R1     EPB Async routine parms                                 00510000
+*                                                                       00520000
+* MODE:                                                                 00530000
+*                                                                       00540000
+*    TASK                                                               00550000
+*    APF/NON-APF                                                        00560000
+*    SUP/PROB                                                           00570000
+*    AMODE 31, RMODE ANY                                                00580000
+*                                                                       00590000
+**<DOC-OFF>*****************************************************        00600000
+                                                                        00610000
+         EJECT ,                                                        00620000
+****************************************************************        00630000
+*                                                                       00640000
+* MAINTENANCE:                                                          00650000
+*                                                                       00660000
+*   04/26/93 RON COLMONE                                                00670000
+*            INITIAL VERSION                                            00680000
+*                                                                       00690000
+*   12/13/94 TIM WELTZER                                                00700000
+*            MOVED SAS/C CLEAN UP INTO IPRCRETN                         00710000
+*                                                                       00720000
+*   12/27/94 Ron Colmone          Par# 159456                           00730000
+*            Added support for task manager server.                     00740000
+*                                                                       00750000
+****************************************************************        00760000
+                                                                        00770000
+         EJECT ,                                                        00780000
+         EQUS  ,                  GENERAL EQUATES                       00790000
+         EJECT ,                                                        00800000
+         ABCODES ,                ABEND CODES                           00810000
+         EJECT ,                                                        00820000
+         EVCODES ,                EVENT CODES                           00830000
+         EJECT ,                                                        00840000
+         TRACODES ,               TRACE CODES                           00850000
+         EJECT ,                                                        00860000
+         $TASK DSECT=YES          TASK MANAGER PLIST MAPPING            00870000
+         EJECT ,                                                        00880000
+         @EPB  TYPE=DSECT         EVENT PROCESS BLOCK                   00890000
+         EJECT ,                                                        00900000
+         XEPB  ,                  EPB EXTENSION                         00910000
+                                                                        00920000
+         EJECT ,                                                        00930000
+         #WORK LENGTH=256         READ/WRITE WORKAREA                   00940000
+RETINFO  DS    0F                 RETURN INFO                           00950000
+ERESUME  DS    A                  RESUME ADDRESS                        00960000
+EVCODE   DS    F                  EVENT CODE                            00970000
+ECCODE   DS    F                  EVENT COMPLETION CODE                 00980000
+ETOKEN   DS    F                  EPB TOKEN / ADDRESS                   00990000
+                                                                        01000000
+$TSK_MFL $TASK MF=(L,*)           $TASK PLIST CONSTRUCTION AREA         01010000
+                                                                        01020000
+         #ENDWORK                 END OF WORKAREA                       01030000
+                                                                        01040000
+         EJECT ,                                                        01050000
+ITSKDISP #ENTER BASE=R12,         ENTRY LINKAGE                        +01060000
+               WAPASS=YES                                               01070000
+                                                                        01080000
+         USING ITASK,R10          ESTABLISH ADDRESSABILITY              01090000
+                                                                        01100000
+         EJECT ,                                                        01110000
+****************************************************************        01120000
+*                                                                       01130000
+* TASK/PROCESS DISPATCH                                                 01140000
+*                                                                       01150000
+****************************************************************        01160000
+         TM    TSKFLGS3,TSK3$KIL  TASK KILL REQUESTED                   01170000
+         BO    DSP_KILL           CALL GENERIC KILL ROUTINE             01180000
+                                                                        01190000
+         TM    TSKFLGS,TSK$NDSP   TASK NON-DISPATCHABLE?                01200000
+         BO    RETURN             YES,  FORGET DISPATCHING              01210000
+         TM    TSKFLGS,TSK$TMW    TASK MANAGER WAITING                  01220000
+         BZ    DSP_PCBQ           NO, CHECK FOR READY WORKUNIT          01230000
+         ICM   R6,15,TSKREPB@     RESUME EPB AVAILABLE                  01240000
+         BNZ   DSP_TMGR           YES, DISPATCH TASKMGR                 01250000
+         B     RETURN             NO,  RETURN                           01260000
+                                                                        01270000
+*---------------------------------------------------------------        01280000
+* SELECT THE FIRST ELIGIBLE PCB ON THE TASK DISPATCH QUEUE              01290000
+*---------------------------------------------------------------        01300000
+DSP_PCBQ DS    0H                                                       01310000
+         ICM   R0,15,TSKPCB       DOES STD TASK HAVE ANY WORKUNITS      01320000
+         BZ    DSP_EPLG           ALL PROC DELETED, SCHED EPILOG        01330000
+         ICM   R7,15,TSKDISPQ     ADDRESS OF FIRST READY WU             01340000
+         BZ    RETURN             NO READY PCBS                         01350000
+         USING IPCB,R7            ADDRESSABILITY                        01360000
+                                                                        01370000
+DSP_REDY DS    0H                                                       01380000
+         TM    PCBFLGS2,PCB2$END  PROCESS TERMINATING                   01390000
+         BO    DSP_NEXT           YES, SKIP THIS PCB                    01400000
+         ICM   R0,15,TSKTWPCB     IS SCOPE OF WAIT TASK                 01410000
+         BZ    DSP_PCB            NO, DISPATCH THIS PCB                 01420000
+         CR    R0,R7              RESUME PCB READY?                     01430000
+         BE    DSP_PCB            YES,  RESUME THIS TWAIT PCB           01440000
+                                                                        01450000
+DSP_NEXT DS    0H                                                       01460000
+         ICM   R7,15,PCBDNEXT     ADDR OF NEXT PCB ON DSP QUEUE         01470000
+         BNZ   DSP_REDY           LOCATE READY PCB                      01480000
+         B     RETURN             NONE READY, RETURN                    01490000
+                                                                        01500000
+DSP_PCB  DS    0H                                                       01510000
+         @CALL ITSKDPDQ,(TSKDISPQ,IPCB),CTYPE=CVT,MF=(E,MFE_LIST)       01520000
+                                                                        01530000
+*---------------------------------------------------------------        01540000
+* DETERMINE IF PROCESS SHOULD BE DRAINED (FLUSHED)                      01550000
+*---------------------------------------------------------------        01560000
+         XC    TSKTWPCB,TSKTWPCB     RESET TWAIT RESUME PCB ADDR        01570000
+         NI    TSKFLGS3,FF-TSK3$TWA  RESET TWAIT=YES INDICATOR          01580000
+         TM    PCBFLGS2,PCB2$FLS     IS PCB CURRENTLY FLUSHING          01590000
+         BO    DSP_INIT              YES,  DON'T ATTEMPT TO REDRAIN     01600000
+         TM    PCBFLGS2,PCB2$DRN     DRAIN PCB REQUESTED?               01610000
+         BZ    DSP_INIT              NO, CHECK IF INITIAL DISPATCH      01620000
+         ICM   R0,15,PCBREPB         RESUME EPB ALREADY SPECIFIED       01630000
+         BZ    DSP_TERM              NO, DRAIN THE PROCESS              01640000
+                                                                        01650000
+         EJECT ,                                                        01660000
+*---------------------------------------------------------------        01670000
+* IF THIS IS INITIAL DISPATCH, ENTRY ADDRESS IS IN R15                  01680000
+*---------------------------------------------------------------        01690000
+DSP_INIT DS    0H                                                       01700000
+         TM    PCBFLGS,PCB$INIT   INITIAL DISPATCH?                     01710000
+         BZ    DSP_ASYN           NO, CHECK FOR ASYNC EVENT             01720000
+         ST    R7,TSKPCBC         SET ACTIVE PCB ADDRESS                01730000
+         NI    PCBFLGS,FF-PCB$WAIT-PCB$INIT                             01740000
+                                                                        01750000
+         $TRACE TRC_DISPINIT,4*4                                        01760000
+         BNZ   DSP_TRC1                                                 01770000
+         MVC   0(8,R1),PCBREGS+(R14*4)                                  01780000
+         MVC   8(8,R1),PCBREGS    R0,R1                                 01790000
+                                                                        01800000
+DSP_TRC1 DS    0H                                                       01810000
+         LM    R0,R15,PCBREGS     RETRIEVE INITIAL REGS                 01820000
+         BR    R15                DISPATCH PROCESS                      01830000
+                                                                        01840000
+*---------------------------------------------------------------        01850000
+* DETERMINE IF ASYNC PROCESSING ROUTINE IS ASSOCIATED WITH              01860000
+* COMPLETED EVENT.  IF SO, SCHEDULE DISPATCH OF ASYNC ROUTINE.          01870000
+*---------------------------------------------------------------        01880000
+DSP_ASYN DS    0H                                                       01890000
+         ICM   R6,15,PCBREPB      ADDR OF READY EPB                     01900000
+         BZ    PCB_REGS           NONE, RESTORE PCB REGS                01910000
+         USING EPB,R6             ADDRESSABILITY                        01920000
+         OI    EPBFLGS,EPB$DISP   EPB DISPATCH TO BE SCHEDULED          01930000
+         ICM   R15,15,EPBRTN@     ADDR OF ASYNC EPB RTN                 01940000
+         BZ    PCB_REGS           RESTORE PCB RESUME ENVIRONMENT        01950000
+                                                                        01960000
+         $TRACE TRC_DISPASYRTN,4*4                                      01970000
+         BNZ   DSP_TRC2                                                 01980000
+         MVC   4(4,R1),EPBRTN@    R15                                   01990000
+         MVC   9(3,R1),EPBECB+1   R0                                    02000000
+         MVC   12(4,R1),EPBPARM   R1                                    02010000
+                                                                        02020000
+DSP_TRC2 DS    0H                                                       02030000
+         L     R15,EPBRTN@        REFRESH ADDR OF ASYNC EPB RTN         02040000
+         SR    R0,R0              PREPARE FOR INSERT                    02050000
+         ICM   R0,7,EPBECB+1      EVENT COMPLETION CODE                 02060000
+         L     R1,EPBPARM         EVENT ASYNC RTN PARMS                 02070000
+         MVC   TSKPCBAS,EPBWU@    ADDRESS OF ASSOC WORKUNIT             02080000
+         XC    PCBREPB,PCBREPB    RESET READY EPB ADDRESS               02090000
+         BR    R15                RESUME ASYNC RTN                      02100000
+                                                                        02110000
+*---------------------------------------------------------------        02120000
+*  STANDARD $TASK WAIT RESUME.  RESTORE PCB REGISTERS AND               02130000
+*  APPROPRIATE RESUME ADDRESS IN R14.  RETURN EVENT CODE                02140000
+*  PCB ADDRESS, COMPLETED EPB ADDRESS.                                  02150000
+*---------------------------------------------------------------        02160000
+PCB_REGS DS    0H                                                       02170000
+         NI    PCBFLGS,FF-PCB$WAIT  RESET WAIT FLAG TO PREVENT          02180000
+*                                 ANOTHER EVENT GETTING POSTED TO       02190000
+*                                 THE PCB UNTIL SUBSEQUENT WAIT         02200000
+                                                                        02210000
+         ICM   R6,15,PCBREPB      EPB ADDRESS                           02220000
+         BZ    PCB_RADR           NONE, CALC RESUME ADDRESS             02230000
+         XC    PCBREPB,PCBREPB    RESET READY EPB ADDRESS               02240000
+         USING EPB,R6             ADDRESSABILITY                        02250000
+X        USING XEPB,R6            ADDRESSABILITY                        02260000
+                                                                        02270000
+         LR    R1,R6              EPB ADDRESS                           02280000
+         TM    EPBFLGS,EPB$XND    EXTENDED EPB                          02290000
+         BZ    *+8                NO, CONTINUE                          02300000
+         LA    R1,1(,R1)          XEPB TOKEN                            02310000
+         ST    R1,ETOKEN          SAVE TOKEN ADDRESS                    02320000
+                                                                        02330000
+         LA    R1,EPBECB          ADDR OF ECB                           02340000
+         TM    EPBFLGS,EPB$RMT    REMOTE ECB                            02350000
+         BZ    *+8                NO CONTINUE                           02360000
+         L     R1,0(,R1)          ADDR OF REMOTE ECB                    02370000
+                                                                        02380000
+         SR    R0,R0              PREPARE FOR INSERT                    02390000
+         ICM   R0,7,1(R1)         EVENT COMPLETION CODE                 02400000
+         ST    R0,ECCODE          SAVE EVENT COMPLETION CODE            02410000
+                                                                        02420000
+         TM    EPBFLGS,EPB$XND    EXTENDED EPB                          02430000
+         BZ    PCB_RADR           NO, CONTINUE                          02440000
+                                                                        02450000
+         $XEPB DELETE,XEPB=(R6)   RELEASE XEPB                          02460000
+                                                                        02470000
+         L     R1,PCBXUSEC        GET CURRENT XEPB USE COUNT            02480000
+         LR    R0,R1              COPY USE COUNT                        02490000
+         BCTR  R0,0               DECREMENT USE COUNT                   02500000
+         CS    R1,R0,PCBXUSEC     UPDATE XEPB USE COUNT                 02510000
+         BNE   *-8                RETRY                                 02520000
+                                                                        02530000
+         DROP  R6,X               EPB, XEPB                             02540000
+                                                                        02550000
+*---------------------------------------------------------------        02560000
+*  DETERMINE RESUME ADDRESS                                             02570000
+*---------------------------------------------------------------        02580000
+PCB_RADR DS    0H                                                       02590000
+         L     R15,PCBREVCD       EVENT CODE                            02600000
+         ST    R15,EVCODE         SET EVENT CODE                        02610000
+         L     R14,PCBEVN@        EVENT RESUME ADDRESS                  02620000
+         C     R15,=A(EC$CNCL)    CANCEL EVENT                          02630000
+         BNE   *+12               NO, CONTINUE                          02640000
+         L     R14,PCBCNL@        CANCEL RESUME ADDRESS                 02650000
+         B     DSP_RESM           SET RESUME ADDRESS                    02660000
+                                                                        02670000
+         C     R15,=A(EC$STOP)    STOP EVENT                            02680000
+         BNE   *+12               NO, CONTINUE                          02690000
+         L     R14,PCBSTP@        STOP RESUME ADDRESS                   02700000
+         B     DSP_RESM           SET RESUME ADDRESS                    02710000
+                                                                        02720000
+         C     R15,=A(EC$MSG)     MESSAGE  EVENT                        02730000
+         BNE   *+12               NO, CONTINUE                          02740000
+         L     R14,PCBMSG@        MESSAGE RESUME ADDRESS                02750000
+         B     DSP_RESM           SET RESUME ADDRESS                    02760000
+                                                                        02770000
+DSP_RESM DS    0H                                                       02780000
+         LTR   R14,R14            RESUME ADDRESS SPECIFIED              02790000
+         BNZ   *+8                YES, CONTINUE                         02800000
+         L     R14,PCBREGS+(14*4) DEFAULT  RESUME ADDRESS               02810000
+         ST    R14,ERESUME        SAVE RESUME ADDRESS                   02820000
+                                                                        02830000
+*---------------------------------------------------------------        02840000
+* SET ADDRESS OF CURRENT PCB AND RESET PCB STATUS                       02850000
+*---------------------------------------------------------------        02860000
+         ST    R7,TSKPCBC         SET ACTIVE PCB ADDRESS                02870000
+                                                                        02880000
+*---------------------------------------------------------------        02890000
+* RESTORE ENVIRONMENT AND RESUME                                        02900000
+*---------------------------------------------------------------        02910000
+         $TRACE TRC_DISPEVENT,4*4                                       02920000
+         BNZ   DSP_TRC3                                                 02930000
+         MVC   0(16,R1),RETINFO   R14-R1                                02940000
+                                                                        02950000
+DSP_TRC3 DS    0H                                                       02960000
+         LM    R14,R1,RETINFO     RESTORE RESUME INFO                   02970000
+         LM    R2,R13,PCBREGS+8   RESTORE PCB REGISTERS                 02980000
+         BR    R14                RESUME PCB                            02990000
+                                                                        03000000
+         EJECT ,                                                        03010000
+*---------------------------------------------------------------        03020000
+* DISPATCH TASK MANAGER.  RESTORE TASKMGR REGISTERS AND                 03030000
+* RESET TASK RESUME EPB.                                                03040000
+*---------------------------------------------------------------        03050000
+DSP_TMGR DS    0H                                                       03060000
+         USING EPB,R6             ADDRESSABILITY                        03070000
+         ST    R6,ETOKEN          EPB   TOKEN/ADDRESS                   03080000
+         MVC   EVCODE,EPBEVNT     EVENT CODE                            03090000
+         SR    R0,R0              PREPARE FOR INSERT                    03100000
+         ICM   R0,7,EPBECB+1      EVENT COMPLETION CODE                 03110000
+         ST    R0,ECCODE          SAVE EVENT COMPLETION CODE            03120000
+         OI    EPBFLGS,EPB$DISP   EPB DISPATCH TO BE SCHEDULED          03130000
+                                                                        03140000
+         XC    TSKREPB@,TSKREPB@  CLEAR TASKMGR RESUME ADDRESS          03150000
+         NI    TSKFLGS,FF-TSK$TMW    RESET TASKMGR WAITING              03160000
+         NI    TSKFLGS3,FF-TSK3$TWA  RESET TWAIT=YES INDICATOR          03170000
+                                                                        03180000
+         $TRACE TRC_DISPTSKMGR,4*4                                      03190000
+         BNZ   DSP_TRC4                                                 03200000
+         MVC   0(4,R1),TSKMREGS+(R14*4)                                 03210000
+         MVC   4(12,R1),RETINFO+4 R15-R1                                03220000
+                                                                        03230000
+DSP_TRC4 DS    0H                                                       03240000
+         LM    R15,R1,RETINFO+4   STANDARD RESUME INFORMATION           03250000
+         LM    R2,R14,TSKMREGS+8  RESTORE TASKMGR REGISTERS             03260000
+         BR    R14                RESUME TASK MANAGER                   03270000
+         DROP  R6                 EPB                                   03280000
+                                                                        03290000
+         EJECT ,                                                        03300000
+*---------------------------------------------------------------        03310000
+* DRAIN PCB THROUGH STANDARD TERMINATION PROCESSING VIA PCBFSA          03320000
+*---------------------------------------------------------------        03330000
+DSP_TERM DS    0H                                                       03340000
+         ST    R7,TSKPCBC         SET ACTIVE PCB ADDRESS                03350000
+         NI    PCBFLGS,FF-PCB$WAIT-PCB$INIT                             03360000
+         OI    PCBFLGS2,PCB2$FLS  INDICATE PROCESS FLUSHING             03370000
+         XC    PCBREPB,PCBREPB    CLEAR RESUME  EPB ADDRESS             03380000
+         XC    PCBWEPB,PCBWEPB    CLEAR WAITING EPB ADDRESS             03390000
+                                                                        03400000
+*---------------------------------------------------------------        03410000
+*  TRACE THE DISPATCH DRAIN EVENT                                       03420000
+*---------------------------------------------------------------        03430000
+DSP_TRAC DS    0H                                                       03440000
+         $TRACE TRC_DISPDRAIN,4*4   ALLOCATE TRACE ENTRY                03450000
+         BNZ   DSP_TRC5             TRACE NOT ACTIVE                    03460000
+         MVC   0(4*4,R1),PCBFSA+12  R14-R1                              03470000
+         MVC   4(4,R1),TSKERC       R15                                 03480000
+                                                                        03490000
+DSP_TRC5 DS    0H                                                       03500000
+         LA    R13,PCBFSA         ADDR OF FIRST SAVEAREA                03510000
+         L     R14,12(,R13)       RESTORE RETURN ADDRESS                03520000
+         L     R15,TSKERC         FAILURE CODE                          03530000
+         LM    R0,R12,20(R13)     RESTORE PROCESS MGR REGS              03540000
+         BR    R14                TERMINATE THE PCB                     03550000
+                                                                        03560000
+         EJECT ,                                                        03570000
+*---------------------------------------------------------------        03580000
+*  ALL PROCESSES DELETED, SCHEDULE TASK EPILOG                          03590000
+*---------------------------------------------------------------        03600000
+DSP_EPLG DS    0H                                                       03610000
+         ICM   R13,15,TSKSAVE@    RESTORE ORIGINAL SAVEAREA ADDR        03620000
+         BZ    ABN_NPLG           NO PROLOG ASSOCIATED WITH TASK        03630000
+         L     R14,12(,R13)       RETURN ADDRESS                        03640000
+         L     R15,#TSKEPLG       EPILOG ENTRY ADDRESS                  03650000
+         BR    R15                SCHEDULE TASKMGR EPILOG               03660000
+                                                                        03670000
+         EJECT ,                                                        03680000
+*---------------------------------------------------------------        03690000
+*  Task KILL has been requested for this ITASK                          03700000
+*---------------------------------------------------------------        03710000
+DSP_KILL DS    0H                                                       03720000
+         IC    R2,TSKFLGS         RETRIEVE TASK FLAG BYTE               03730000
+         N     R2,=A(TSK3$DMP)    RESET NON-DUMP OPTION FLAGS           03740000
+         NI    TSKFLGS3,FF-TSK3$KIL-TSK3$DMP                            03750000
+                                                                        03760000
+         @CALL IGENKILL,((R2),*TSKNAME,*TSKNAME+4),                    +03770000
+               MF=(E,MFE_LIST),CTYPE=CVT                                03780000
+                                                                        03790000
+         B     RETURN                                                   03800000
+                                                                        03810000
+         EJECT ,                                                        03820000
+****************************************************************        03830000
+*                                                                       03840000
+*  CATASTROPHIC ERROR                                                   03850000
+*                                                                       03860000
+****************************************************************        03870000
+ABN_NPLG DS    0H                                                       03880000
+         $ABEND ABE_NOPROLOG,                                          +03890000
+               SCOPE=ITASK,                                            +03900000
+               TITLE='TASK DISPATCH WITH NO PCBS NOR PROLOG'            03910000
+                                                                        03920000
+         EJECT ,                                                        03930000
+****************************************************************        03940000
+*                                                                       03950000
+*  RETURN                                                               03960000
+*                                                                       03970000
+****************************************************************        03980000
+                                                                        03990000
+RETURN   DS    0H                                                       04000000
+         #EXIT ,                  RETURN                                04010000
+                                                                        04020000
+         EJECT ,                                                        04030000
+****************************************************************        04040000
+*                                                                       04050000
+*  CONSTANTS AND LITERALS                                               04060000
+*                                                                       04070000
+****************************************************************        04080000
+                                                                        04090000
+         LTORG ,                                                        04100000
+                                                                        04110000
+         PRINT NOGEN                                                    04120000
+         ICVT  ,                                                        04130000
+         ITASK ,                                                        04140000
+         IPCB  ,                                                        04150000
+         PRINT GEN                                                      04160000
+                                                                        04170000
+         END   ,                                                        04180000

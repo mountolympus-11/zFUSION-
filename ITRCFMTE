@@ -1,0 +1,1057 @@
+ITRCFMTE TITLE '- CONVERT TRACE ENTRY TO PRINT LINES'                   00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE: ITRCFMTE - CONVERT TRACE ENTRY TO PRINT LINES                00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This routine is used to prepare a trace table entry for            00080000
+*    display.  the itrcdef module contains a table of trace             00090000
+*    entries organized by field within event code within enent          00100000
+*    class.  On each call, a print line is constructed in a             00110000
+*    buffer upplied by the caller.  Return and reason codes             00120000
+*    inform the requestor when the formatting is complete.              00130000
+*                                                                       00140000
+*    This routine uses no STDENV functions and is suitable              00150000
+*    for use in an IPCS VERBX exit, etc.                                00160000
+*                                                                       00170000
+*                                                                       00180000
+* ENVIRONMENTS:  STDENV, non-STDENV                                     00190000
+*                                                                       00200000
+*                                                                       00210000
+* ON ENTRY:                                                             00220000
+*                                                                       00230000
+*    R1 - contains the address of a parameter list described            00240000
+*         by the FMTEPARM mapping                                       00250000
+*                                                                       00260000
+*    R0 - optionally, contains the address of a 1K byte workarea        00270000
+*                                                                       00280000
+*                                                                       00290000
+* ON EXIT:                                                              00300000
+*                                                                       00310000
+*    R15 contains one of the following return codes                     00320000
+*                                                                       00330000
+*        RC00  - print line constructed                                 00340000
+*                                                                       00350000
+*                Record formatting has completed. Provide a             00360000
+*                new trace record in subsequent call.                   00370000
+*                                                                       00380000
+*        RC04  - print line constructed                                 00390000
+*                                                                       00400000
+*                Record formatting is not yet completed. Provide        00410000
+*                a trace record address of zero in subsequent           00420000
+*                call to resume formatting.                             00430000
+*                                                                       00440000
+*        RC08  - no print line constructed                              00450000
+*                                                                       00460000
+*                Record formatting has completed. Provide a             00470000
+*                new trace record in subsequent call.                   00480000
+*                                                                       00490000
+*        RC12  - Invalid request                                        00500000
+*                                                                       00510000
+*                                                                       00520000
+*    For RC00 and RC04, R1 contains the addr of the print line          00530000
+*    provided and R0 contains one of the following reason               00540000
+*    codes:                                                             00550000
+*                                                                       00560000
+*        RSN00 - no unusual condition noted                             00570000
+*                                                                       00580000
+*        RSN04 - data truncation occurred because the print             00590000
+*                line is too small                                      00600000
+*                                                                       00610000
+*        RSN08 - data definition error encountered                      00620000
+*                                                                       00630000
+**<DOC-OFF>****************************************************         00640000
+                                                                        00650000
+         EJECT                                                          00660000
+         #WORK LENGTH=1024                                              00670000
+                                                                        00680000
+TABINTVL DS    F                  TAB POSITION / MULTIPLES              00690000
+HICHAR   DS    C                  HIGHLIGHTING CHARACTER                00700000
+                                                                        00710000
+FLAGS    DS    X                  MISC FIELD PROCESSING FLAGS           00720000
+FLAGDATA EQU   X'80'                 DATA CONVERSION ATTEMPTED          00730000
+                                                                        00740000
+LCLRSNC  DS    F                  REASON CODE COMPILIATION              00750000
+                                                                        00760000
+PLINE    DS    0F,0F              PRINT LINE STATUS                     00770000
+PLINEPOS DS    A                  ADDR NEXT INSERTION ADDR              00780000
+PLINERLN DS    F                  LENGTH REMAINING                      00790000
+PLINEMAX DS    F                  SIZE OF DATA AREA AFTER INITIAL TAB   00800000
+                                                                        00810000
+#TEXTA   DS    A                  CONVERTED TEXT STRING ORIGIN          00820000
+#TEXTLN  DS    F                  CONVERTED TEXT STRING LENGTH          00830000
+HSOURCE  DS    A                  HEX CONVERSION - INPUT STRING POS     00840000
+HSLENG   DS    F                  HEX CONVERSION - INPUT STRING REMLEN  00850000
+                                                                        00860000
+INTWORK  DS    CL12               INT CONVERSION WORKAREA               00870000
+HEXWORK  DS    XL4,X              HEX CONVERSION WORKAREA - SOURCE      00880000
+HEXYEILD DS    XL8,X              HEX CONVERSION WORKAREA - RESULT      00890000
+CHR256   DS    CL256              CHR CONVERSION WORKAREA               00900000
+                                                                        00910000
+REGSAVE  DS    16F                LOCAL REGISTER SAVEAREA #1            00920000
+REGSAVEX DS    16F                LOCAL REGISTER SAVEAREA #2            00930000
+                                                                        00940000
+         #ENDWORK ,                                                     00950000
+                                                                        00960000
+         EJECT                                                          00970000
+         FMTEPARM ,               FORMATTER REQUEST LIST                00980000
+                                                                        00990000
+         EJECT                                                          01000000
+         $TRCDEF DSECT=YES        FORMATTER MAPS                        01010000
+                                                                        01020000
+         EJECT                                                          01030000
+         TRTABLE ,                TRACE TABLE MAPS                      01040000
+                                                                        01050000
+         EJECT                                                          01060000
+***************************************************************         01070000
+*                                                                       01080000
+* MAPPING:  CHKPT - TRACE RECORD CHECKPOINT AREA                        01090000
+*                                                                       01100000
+***************************************************************         01110000
+CHKPT    DSECT                                                          01120000
+CHKTREC  DS    A                  ADDR OF TRACE RECORD                  01130000
+CHKHDR   DS    A                  HDR BLOCK                             01140000
+CHKPXORG DS    A                  ORIGIN OF PREFIX FIELD DEF LIST       01150000
+CHKPXFLD DS    A                  CURRENT PREFIX FIELD / RESUMPTION     01160000
+*                                                                       01170000
+CHKCLASS DS    A                  CLASS ENTRY                           01180000
+CHKCODE  DS    A                  CODE ENTRY                            01190000
+CHKUDFLD DS    A                  USERDATA FIELD / RESUMPTION           01200000
+*                                                                       01210000
+CHKUDOFF DS    F                  USERDATA OFFSET IF NO FIELD DEF       01220000
+CHKUDRLN DS    F                  USERDATA LENGTH REMAINING             01230000
+CHKPTLN  EQU   *-CHKPT            LENGTH OF CHECKPOINT AREA             01240000
+                                                                        01250000
+         EJECT                                                          01260000
+         EQUS  ,                                                        01270000
+                                                                        01280000
+         EJECT                                                          01290000
+ITRCFMTE #ENTER PREG=(R8),WAPASS=YES    ENVIRONMENT INDEPENDENT         01300000
+                                                                        01310000
+         EJECT                                                          01320000
+***************************************************************         01330000
+*                                                                       01340000
+*   FETCH PASSED PARAMETERS, GENERAL INITIALIZATION                     01350000
+*                                                                       01360000
+***************************************************************         01370000
+         USING FMTEPARM,R8        FORMATTER PARMS                       01380000
+         ICM   R7,15,FMTECKPT     CHECKPOINT AREA                       01390000
+         BZ    ERR_REQ            INVALID REQUEST                       01400000
+         USING CHKPT,R7           LIFE OF FUNCTION                      01410000
+                                                                        01420000
+         ICM   R2,15,FMTELINE     PRINT LINE                            01430000
+         BZ    ERR_REQ                                                  01440000
+         ICM   R3,15,FMTELINL     PRINT LINE LENGTH                     01450000
+         BNP   ERR_REQ                                                  01460000
+         C     R3,=F'256'         VALIDATE SIZE                         01470000
+         BNH   *+8                                                      01480000
+         LA    R3,256                                                   01490000
+                                                                        01500000
+         STM   R2,R3,PLINE        RETAIN CURRPOS AND LENGTH REMAINING   01510000
+         SR    R15,R15            PREPARE FOR CLEAR                     01520000
+         ICM   R15,8,=C' '        WITH PAD                              01530000
+         MVCL  R2,R14             CLEAR                                 01540000
+                                                                        01550000
+         ICM   R6,15,FMTEREC      NEW RECORD OR RESUMPTION?             01560000
+         BZ    RESUME             RESUMPTION OF FORMATTING OF PRIOR REC 01570000
+                                                                        01580000
+         EJECT ,                                                        01590000
+***************************************************************         01600000
+*                                                                       01610000
+*   INITIAL PASS ON NEW TRACE RECORD, LOCATE DEFINITION                 01620000
+*                                                                       01630000
+***************************************************************         01640000
+         XC    CHKPT(CHKPTLN),CHKPT                                     01650000
+         L     R6,FMTEREC         NEW TRACE RECORD                      01660000
+         USING TRENTRY,R6         COMMON ADDRESSABILITY                 01670000
+                                                                        01680000
+         ST    R6,CHKTREC         CHECKPOINT THE RECORD PTR             01690000
+         LH    R0,TRELENG         LENGTH OF USERDATA AREA               01700000
+         SH    R0,=AL2(TRENTFIX)  BACKOUT LENGTH OF PREFIX              01710000
+         BM    ERR_REQ            INVALID REQUEST                       01720000
+         ST    R0,CHKUDRLN        RETAIN USERDATA LENGTH                01730000
+         C     R0,=F'256'         REASONABLE?                           01740000
+         BH    ERR_REQ            FLUSH IF NOT                          01750000
+                                                                        01760000
+         L     R1,=V(ITRCDEF)     TRACE DEFINITION MODULE               01770000
+         ST    R1,CHKHDR          HEADER ENTRY                          01780000
+         USING TRFHDR,R1          ADDRESSABILITY                        01790000
+         MVC   CHKPXFLD,TRFHDFLD  RESUMING AT THE BEGINNING             01800000
+         MVC   CHKPXORG,TRFHDFLD  RETAIN FIELD DEF LIST ORIGIN          01810000
+                                                                        01820000
+*-------------------------------------------------------------          01830000
+*   LOCATE TRACE EVENT CLASS DEFINITION                                 01840000
+*-------------------------------------------------------------          01850000
+         ICM   R5,15,TRFHDCLS     BEGIN CLASS LIST SCAN                 01860000
+         BZ    UNMAPPED           RECORD FORMAT NOT DEFINED             01870000
+         USING TRFCLS,R5          CLASS ENTRY FORMAT                    01880000
+                                                                        01890000
+CLSSCAN  DS    0H                                                       01900000
+         CLC   TRFCLSID+2(1),TRETYPE+0                                  01910000
+         BE    CLSMATCH           EVENT CLASS MATCH                     01920000
+         ICM   R5,15,TRFCLNXT     ELSE ADVANCE TO NEXT CLASS ENTRY      01930000
+         BNZ   CLSSCAN            AND TRY AGAIN                         01940000
+         B     UNMAPPED           RECORD NOT MAPPED                     01950000
+                                                                        01960000
+CLSMATCH DS    0H                                                       01970000
+         ST    R5,CHKCLASS        RETAIN PTR TO CLASS ENTRY             01980000
+                                                                        01990000
+*-------------------------------------------------------------          02000000
+*   LOCATE TRACE EVENT CODE DEFINITION                                  02010000
+*-------------------------------------------------------------          02020000
+         ICM   R4,15,TRFCLCOD     BEGIN CODE LIST SCAN                  02030000
+         BZ    UNMAPPED           RECORD FORMAT NOT DEFINED             02040000
+         USING TRFCODE,R4         CODE ENTRY FORMAT                     02050000
+                                                                        02060000
+CODSCAN  DS    0H                                                       02070000
+         CLC   TRFCODID+3(1),TRETYPE+1                                  02080000
+         BE    CODMATCH           EVENT CODE MATCH                      02090000
+         ICM   R4,15,TRFCONXT     ELSE ADVANCE TO NEXT CODE ENTRY       02100000
+         BNZ   CODSCAN            AND TRY AGAIN                         02110000
+         B     UNMAPPED           RECORD NOT MAPPED                     02120000
+                                                                        02130000
+CODMATCH DS    0H                                                       02140000
+         ST    R4,CHKCODE         RETAIN PTR TO CODE ENTRY              02150000
+         ICM   R0,15,TRFCOFLD     FIELD LIST                            02160000
+         ST    R0,CHKUDFLD        SAVE PTR                              02170000
+         BZ    *+10               BRANCH IF NO FIELD DEFS               02180000
+         XC    CHKUDRLN,CHKUDRLN  USERDATA WILL NOT BE REFED DIRECTLY   02190000
+                                                                        02200000
+UNMAPPED DS    0H                                                       02210000
+         DROP  R1,R4,R5           TRFHDR, TRFCODE, TRFCLS               02220000
+                                                                        02230000
+         EJECT                                                          02240000
+***************************************************************         02250000
+*                                                                       02260000
+*   RESUME PREVIOUSLY INITIATED FORMATTING OPERATION                    02270000
+*                                                                       02280000
+***************************************************************         02290000
+RESUME   DS    0H                                                       02300000
+         L     R6,CHKTREC         TRACE RECORD                          02310000
+         USING TRENTRY,R6         COMMON ADDRESSABILITY                 02320000
+                                                                        02330000
+         ICM   R2,15,CHKHDR       CLASS/CODE LIST HEADER                02340000
+         BZ    ERR_REQ            REQUEST IN ERROR                      02350000
+         USING TRFHDR,R2          EXTRACT FORMATTING DEFAULTS           02360000
+         MVC   TABINTVL,TRFHDTAB  DEFAULT TAB STOP                      02370000
+         MVC   HICHAR,TRFHDCHR    DEFAULT ENTRY IDENTIFICATION CHAR     02380000
+         DROP  R2                 TRFHDR                                02390000
+                                                                        02400000
+         ICM   R5,15,CHKCLASS     CLASS ENTRY                           02410000
+         BZ    ENDINFO            NOT AVAIL                             02420000
+         USING TRFCLS,R5          EXTRACT FORMATTING DEFAULTS           02430000
+         ICM   R0,15,TRFCLTAB     TAB STOP OVERRIDE GIVEN?              02440000
+         BZ    *+8                SKIP IF NOT                           02450000
+         ST    R0,TABINTVL        POST                                  02460000
+         TM    TRFCLCHR,BF        HILITE ENTRY?                         02470000
+         BZ    *+10               SKIP IF NOT                           02480000
+         MVC   HICHAR,TRFCLCHR    ENTRY ID CHAR                         02490000
+         DROP  R5                                                       02500000
+                                                                        02510000
+         ICM   R4,15,CHKCODE      CODE ENTRY                            02520000
+         BZ    ENDINFO            NOT AVAIL                             02530000
+         USING TRFCODE,R4         EXTRACT FORMATTING DEFAULTS           02540000
+         ICM   R0,15,TRFCOTAB     TAB STOP OVERRIDE GIVEN?              02550000
+         BZ    *+8                SKIP IF NOT                           02560000
+         ST    R0,TABINTVL        POST                                  02570000
+         TM    TRFCOCHR,BF        HILITE ENTRY?                         02580000
+         BZ    *+10               SKIP IF NOT                           02590000
+         MVC   HICHAR,TRFCOCHR    ENTRY ID CHAR                         02600000
+         DROP  R4                                                       02610000
+                                                                        02620000
+ENDINFO  DS    0H                                                       02630000
+                                                                        02640000
+*--------------------------------------------------------------         02650000
+*   INITIALIZE THE OUTPUT LINE                                          02660000
+*--------------------------------------------------------------         02670000
+         TM    HICHAR,BF          ENTRY HILITING?                       02680000
+         BZ    NOHILITE           SKIP IF NOT                           02690000
+         LA    R1,HICHAR          HILITER                               02700000
+         LA    R0,1               LENGTH OF STRING                      02710000
+         BAS   R14,POSTLINE       INSERT IN LINE                        02720000
+                                                                        02730000
+NOHILITE DS    0H                                                       02740000
+         BAS   R14,TAB            TAB, REMAINDER OF LINE FOR DATA       02750000
+         MVC   PLINEMAX,PLINERLN  MAX SIZE OF ANY FIELD OR LABEL        02760000
+                                                                        02770000
+         EJECT                                                          02780000
+***************************************************************         02790000
+*                                                                       02800000
+*   PREFIX FORMATTING                                                   02810000
+*                                                                       02820000
+***************************************************************         02830000
+         ICM   R9,15,CHKPXFLD     PREFIX FORMATTING COMPLETE?           02840000
+         BZ    PFXEND             DONE HERE IF SO                       02850000
+         USING TRFFLD,R9          FIELD DEFINITION                      02860000
+                                                                        02870000
+PFXNEXT  DS    0H                                                       02880000
+         LA    R0,TRENTRY         R0 <== BASE IS TRACE REC PREFIX       02890000
+         LA    R1,TRFFLD          R1 <== FIELD DEFINITION               02900000
+         BAS   R14,FLDFMT         FORMAT CURRENT FIELD                  02910000
+         BNZ   FULLINE            NEW LINE REQUIRED                     02920000
+                                                                        02930000
+         ICM   R9,15,TRFFLNXT     ADVANCE TO NEXT FIELD                 02940000
+         ST    R9,CHKPXFLD        CHECKPOINT CURRENT POSITION           02950000
+         BNZ   PFXNEXT            AGAIN                                 02960000
+                                                                        02970000
+PFXEND   DS    0H                                                       02980000
+         DROP  R9                 TRFFLD                                02990000
+                                                                        03000000
+*--------------------------------------------------------------         03010000
+*   INDENT USER ENTRIES                                                 03020000
+*--------------------------------------------------------------         03030000
+         LA    R1,=C' '           FORCE CHANGE OF POSITION              03040000
+         LA    R0,1                                                     03050000
+         BAS   R14,POSTLINE                                             03060000
+         BNZ   ERR_REQ                                                  03070000
+                                                                        03080000
+         BAS   R14,TAB            DOUBLE INDENT                         03090000
+         MVC   PLINEMAX,PLINERLN  MAX SIZE OF ANY FIELD OR LABEL        03100000
+                                                                        03110000
+         EJECT                                                          03120000
+***************************************************************         03130000
+*                                                                       03140000
+*   USERDATA FORMATTING VIA FIELD DEFINITIONS                           03150000
+*                                                                       03160000
+***************************************************************         03170000
+         ICM   R9,15,CHKUDFLD     USERDATA FIELD DEFS REMAIN?           03180000
+         BZ    FUDEND             FORMATTED USERDATA ENDING             03190000
+         USING TRFFLD,R9          FIELD DEFINITION                      03200000
+                                                                        03210000
+FUDNEXT  DS    0H                                                       03220000
+         L     R2,TRFFLOFF        USERDATA OFFSET TO FIELD ORIGIN       03230000
+         LA    R2,TRENTFIX(,R2)   FROM PERSPECTIVE OF RECORD ORIGIN     03240000
+         A     R2,TRFFLLEN        OFFSET TO END OF USERDATA FIELD       03250000
+         CH    R2,TRELENG         FIELD CONTAINED IN ACTUAL RECORD?     03260000
+         BH    FUDADV             SKIP IF NOT                           03270000
+                                                                        03280000
+         LA    R0,TREUSER         R0 <== BASE IS TRACE REC USERDATA     03290000
+         LA    R1,TRFFLD          R1 <== FIELD DEFINITION               03300000
+         BAS   R14,FLDFMT         FORMAT CURRENT FIELD                  03310000
+         BNZ   FULLINE            NEW LINE REQUIRED                     03320000
+                                                                        03330000
+FUDADV   DS    0H                                                       03340000
+         ICM   R9,15,TRFFLNXT     ADVANCE TO NEXT FIELD                 03350000
+         ST    R9,CHKUDFLD        CHECKPOINT CURRENT POSITION           03360000
+         BNZ   FUDNEXT            AGAIN                                 03370000
+                                                                        03380000
+FUDEND   DS    0H                                                       03390000
+         DROP  R9                 TRFFLD                                03400000
+                                                                        03410000
+         EJECT                                                          03420000
+***************************************************************         03430000
+*                                                                       03440000
+*   USERDATA DUMP WHEN FORMAT NOT DEFINED                               03450000
+*                                                                       03460000
+***************************************************************         03470000
+         ICM   R3,15,CHKUDRLN     LENGTH OF USERDATA AWAITING FORMAT    03480000
+         BZ    COMPLETE           ALL DONE                              03490000
+                                                                        03500000
+         MVI   CHR256,C' '        ASSUME OUTPUT ALREADY LABELLED        03510000
+         MVC   CHR256+1(L'UNFTAG-1),CHR256                              03520000
+         ICM   R2,15,CHKUDOFF     BEGINNING USERDATA DUMP?              03530000
+         BNZ   *+10               SKIP IF NOT                           03540000
+         MVC   CHR256(L'UNFTAG),UNFTAG                                  03550000
+                                                                        03560000
+         LA    R0,L'UNFTAG        R0 <== LENGTH OF TOKEN                03570000
+         LA    R1,CHR256          R1 <== TAG TOKEN                      03580000
+         BAS   R14,POSTLINE       INSERT IN LINE                        03590000
+                                                                        03600000
+*--------------------------------------------------------------         03610000
+*   FORMAT THE USER DATA IN TRACE ENTRY EXTENSION INCREMENTS            03620000
+*--------------------------------------------------------------         03630000
+         LA    R5,TRENUNIT        AMOUNT OF DATA TO FORMAT THIS PASS    03640000
+         LA    R4,4               SIZE OF ENTRY                         03650000
+                                                                        03660000
+UNFNEXT  DS    0H                                                       03670000
+         CR    R3,R4              LAST PIECE?                           03680000
+         BNL   *+6                SKIP IF NOT                           03690000
+         LR    R4,R3              SMALLER SIZE                          03700000
+         CR    R4,R5              EXCEEDS REMAINDER OF ENTRY ALLOC UNIT 03710000
+         BNH   *+6                OK IF NOT                             03720000
+         LR    R4,R5              ELSE LAST PASS                        03730000
+                                                                        03740000
+         LA    R1,TREUSER(R2)     ADDRESS OF USERDATA STORAGE           03750000
+         LR    R0,R4              LENGTH                                03760000
+         BAS   R14,HEXEYE         CONVERT TO EYEBALL                    03770000
+                                                                        03780000
+         BAS   R14,POSTLINE       ADD TO LINE                           03790000
+         BNZ   FULLINE            EXIT IF DID NOT FIT                   03800000
+                                                                        03810000
+         AR    R2,R4              NEXT BLOCK OF DATA                    03820000
+         ST    R2,CHKUDOFF        SAVE FOR RESTART                      03830000
+         SR    R3,R4              REMAINING LENGTH                      03840000
+         ST    R3,CHKUDRLN        SAVE FOR RESTART                      03850000
+         BZ    COMPLETE           REQUEST COMPLETE AT END               03860000
+         SR    R5,R4              MAX AMOUNT THIS PASS                  03870000
+         BNP   FULLINE            SUSPEND IF LIMIT REACHED              03880000
+         B     UNFNEXT            ELSE AGAIN                            03890000
+                                                                        03900000
+*--------------------------------------------------------------         03910000
+*   ENSURE LINE IS NOT RETURNED EMPTY, DEFINITION ERROR IF SO           03920000
+*--------------------------------------------------------------         03930000
+COMPLETE DS    0H                 LINE COMPLETED                        03940000
+         CLC   PLINERLN,PLINEMAX  INSERTION OCCURRED?                   03950000
+         BE    EMPTLINE           DEFINITION IN ERROR                   03960000
+                                                                        03970000
+         EJECT                                                          03980000
+***************************************************************         03990000
+*                                                                       04000000
+*   COMPLETE THE REQUEST                                                04010000
+*                                                                       04020000
+***************************************************************         04030000
+         LA    R15,RC00           LINE READY / RECORD COMPLETE          04040000
+         B     RETURN                                                   04050000
+                                                                        04060000
+FULLINE  DS    0H                 LINE READY / RECORD INCOMPLETE        04070000
+         LA    R15,RC04                                                 04080000
+         B     RETURN                                                   04090000
+                                                                        04100000
+EMPTLINE DS    0H                 NO LINE AVAILABLE / RECORD COMPLETE   04110000
+         LA    R15,RC08                                                 04120000
+         B     RETURN                                                   04130000
+                                                                        04140000
+ERR_REQ  DS    0H                 INVALID REQUEST                       04150000
+         LA    R15,RC12                                                 04160000
+         B     RETURN                                                   04170000
+                                                                        04180000
+RETURN   DS    0H                                                       04190000
+         L     R0,LCLRSNC         REASON CODE                           04200000
+         #EXIT ,                  RETURN                                04210000
+                                                                        04220000
+         EJECT ,                                                        04230000
+***************************************************************         04240000
+*                                                                       04250000
+* ROUTINE: FLDFMT - FORMAT A FIELD                                      04260000
+*                                                                       04270000
+* ON ENTRY:                                                             04280000
+*                                                                       04290000
+*    R1 - FIELD DEFINITION (TRFFLD)                                     04300000
+*    R0 - RECORD BASE                                                   04310000
+*                                                                       04320000
+* ON EXIT:                                                              04330000
+*                                                                       04340000
+*    R15 CONTAINS ONE OF THE FOLLOWING RETURN CODES                     04350000
+*                                                                       04360000
+*        RSN00 - CONVERSION COMPLETE                                    04370000
+*        RSN04 - EXPLICIT NEWLINE                                       04380000
+*        RSN08 - OVERFLOW                                               04390000
+*                                                                       04400000
+***************************************************************         04410000
+FLDFMT   DS    0H                                                       04420000
+         STM   R0,R15,REGSAVE     PRESERVE MAINLINE REGS                04430000
+         LR    R4,R0              ACCEPT RECORD AREA BASE ADDR          04440000
+         LR    R9,R1              ACCEPT FIELD DEFINITION               04450000
+         USING TRFFLD,R9          ADDRESSABILITY                        04460000
+                                                                        04470000
+         SR    R0,R0              INITIALIZER                           04480000
+         ST    R0,#TEXTA          CONVERTED TEXT                        04490000
+         ST    R0,#TEXTLN         TEXT LENGTH                           04500000
+         NI    FLAGS,FF-FLAGDATA  NO DATA CONVERSION ATTEMPTED          04510000
+                                                                        04520000
+         TM    TRFFLOPT,TRFFLONL  NEWLINE REQUESTED?                    04530000
+         BNO   FLDCONT            CONTINUE ELSEWHERE IF NOT             04540000
+         CLC   PLINERLN,PLINEMAX  AT ORIGIN OF NEW LINE?                04550000
+         BNE   FLDOVFLW           CONTINUE ELSEWHERE IF SO              04560000
+                                                                        04570000
+*--------------------------------------------------------------         04580000
+*   LEADING TAB FOR TAGGED OUTPUT                                       04590000
+*--------------------------------------------------------------         04600000
+FLDCONT  DS    0H                                                       04610000
+         ICM   R0,15,TRFFLTGA     IS THERE A DATA TAG?                  04620000
+         BZ    FLDNOTAB           SKIP IF NOT                           04630000
+         BAS   R14,TAB            ELSE MOVE TO TAB STOP                 04640000
+         BNZ   FLDOVFLW           OVERFLOW                              04650000
+                                                                        04660000
+FLDNOTAB DS    0H                                                       04670000
+                                                                        04680000
+*--------------------------------------------------------------         04690000
+*   IF EXTERNAL FORMATTING, ACQUIRE TEXT                                04700000
+*--------------------------------------------------------------         04710000
+         ICM   R15,15,TRFFLRTN    EXTERNAL FORMATTING ROUTINE?          04720000
+         BZ    FLDNPRTN           SKIP IF NOT                           04730000
+         OI    FLAGS,FLAGDATA     ATTEMPTING DATA CONVERSION            04740000
+                                                                        04750000
+         LA    R1,MFE_LIST        TRACE FORMATTER EXIT PLIST            04760000
+         USING TRCFMTX,R1         PREPARE FOR CALL                      04770000
+         MVC   TRCFXCLS,CHKCLASS  EVENT CLASS DEFINITION ADDR           04780000
+         MVC   TRCFXCOD,CHKCODE   EVENT CODE DEFINITION ADDR            04790000
+         ST    R9,TRCFXFLD        FIELD DEFINITION ADDR                 04800000
+         LR    R0,R4              RECORD BASE                           04810000
+         A     R0,TRFFLOFF                                              04820000
+         ST    R0,TRCFXDAT        DATA AREA ORIGIN                      04830000
+         MVC   TRCFXDLN,TRFFLLEN  DATA ITEM LENGTH                      04840000
+                                                                        04850000
+         LA    R0,CHR256          WORKAREA                              04860000
+         XC    CHR256,CHR256      CLEARED                               04870000
+         BASR  R14,R15            ACQUIRE TEXT                          04880000
+         LTR   R15,R15            ERROR?                                04890000
+         BNZ   FLDERROR           FIELD DEFINITION IN ERROR             04900000
+         B     FLDINS             READY FOR PLINE INSER                 04910000
+         DROP  R1                 TRCFMTX                               04920000
+                                                                        04930000
+FLDNPRTN DS    0H                 EXTERNAL FORMATTING NOT USED          04940000
+         ICM   R0,15,TRFFLLEN     ACTUAL DATA PROVIDED?                 04950000
+         BZ    FLDPOST            READY TO POST RESULTS IF NOT          04960000
+         OI    FLAGS,FLAGDATA     ATTEMPTING SOME DATA CONVERSION       04970000
+                                                                        04980000
+*--------------------------------------------------------------         04990000
+*   IF ENUMERATED VALUE-TO-TEXT TRANSLIATION, ACQUIRE TEXT              05000000
+*--------------------------------------------------------------         05010000
+         ICM   R15,15,TRFFLVTT    VALUE TRANSLATION?                    05020000
+         BZ    FLDNVTRN           SKIP IF NOT                           05030000
+                                                                        05040000
+         LR    R2,R4              RECORD BASE                           05050000
+         A     R2,TRFFLOFF        PLUS OFFSET YEILDS ORIGIN             05060000
+         ICM   R3,15,TRFFLLEN     FIELD LENGTH                          05070000
+         BNP   FLDERROR           REQUIRED                              05080000
+         C     R3,=F'4'           SATISFIES REQUIREMENTS?               05090000
+         BH    FLDERROR           ERROR IF NOT                          05100000
+         BCTR  R3,0               CONVERT TO INDEX                      05110000
+         SLL   R3,2               PREPARE FOR N-BYTE FETCH              05120000
+                                                                        05130000
+         SR    R0,R0              RECIPIENT                             05140000
+         EX    *-*,FETCHEX(R3)    R0 <== ARGUMENT INSTANCE              05150000
+         L     R1,TRFFLVTT        R1 <== VALUE ENUMERATION              05160000
+                                                                        05170000
+         @CALL ITRCENUM,CTYPE=STD                                       05180000
+                                                                        05190000
+         LTR   R15,R15            ERROR?                                05200000
+         BNZ   FLDERROR           FIELD DEFINITION IN ERROR             05210000
+         B     FLDINS             READY FOR PLINE INSERT                05220000
+                                                                        05230000
+FLDNVTRN DS    0H                                                       05240000
+                                                                        05250000
+*--------------------------------------------------------------         05260000
+*   CONVERSION BY DATA TYPE - INTEGER, CHAR                             05270000
+*--------------------------------------------------------------         05280000
+         LR    R1,R4              DATA AREA BASE                        05290000
+         A     R1,TRFFLOFF        DATA ITEM ORIGIN                      05300000
+         L     R0,TRFFLLEN        LENGTH OF ITEM                        05310000
+                                                                        05320000
+         CLI   TRFFLTYP,TRFFLT_I  INTEGER?                              05330000
+         BNE   FLDN_INT           SKIP IF NOT                           05340000
+         BAS   R14,INTEYE         CONVERT TO EYEBALL FORM               05350000
+         BNZ   FLDERROR           FIELD DEFINITION IN ERROR             05360000
+         B     FLDINS             DONE OTHERWISE                        05370000
+FLDN_INT DS    0H                                                       05380000
+                                                                        05390000
+         CLI   TRFFLTYP,TRFFLT_C  CHAR STRING?                          05400000
+         BNE   FLDN_CHR           SKIP IF NOT                           05410000
+         BAS   R14,CHREYE         CONVERT TO EYEBALL FORM               05420000
+         BNZ   FLDERROR           FIELD DEFINITION IN ERROR             05430000
+         B     FLDINS             DONE OTHERWISE                        05440000
+FLDN_CHR DS    0H                                                       05450000
+                                                                        05460000
+*--------------------------------------------------------------         05470000
+*   CONVERSION BY DATA TYPE - HEX                                       05480000
+*--------------------------------------------------------------         05490000
+         CLI   TRFFLTYP,TRFFLT_H  HEX DUMP?                             05500000
+         BNE   FLDERROR           ERROR IF NOT                          05510000
+                                                                        05520000
+         C     R0,=A(L'CHR256/2)  HEX CONVERSION DOUBLES INPUT SIZE     05530000
+         BH    FLDERROR           FIELD DEFINITION ERROR IF TOO BIG     05540000
+         ST    R1,HSOURCE         SOURCE DATA ORIGIN                    05550000
+         ST    R0,HSLENG          SOURCE DATA LENGTH                    05560000
+         LA    R5,CHR256          OUTPUT COLLECTION AREA                05570000
+                                                                        05580000
+FLDHEXNX DS    0H                                                       05590000
+         ICM   R15,15,HSLENG      SOURCE LENGTH REMAINING?              05600000
+         BNP   FLDHEXFN           DONE WHEN ZERO                        05610000
+         LR    R0,R15             COPY FOR SERVICE                      05620000
+         C     R0,=F'4'           TOO MUCH TO CARRY?                    05630000
+         BNH   *+8                SKIP IF NOT                           05640000
+         LA    R0,4               ELSE TRUNCATE                         05650000
+         SR    R15,R0             LENGTH REMAINING FOR NEXT PASS        05660000
+         ST    R15,HSLENG         RETAIN                                05670000
+                                                                        05680000
+         L     R1,HSOURCE         NEXT FOUR-BTYE GROUP                  05690000
+         LR    R14,R1             MODIFIABLE COPY                       05700000
+         AR    R14,R0             RESUMPTION POINT NEXT PASS            05710000
+         ST    R14,HSOURCE        RETAIN                                05720000
+                                                                        05730000
+         BAS   R14,HEXEYE         CONVERT TO EYEBALL FORM               05740000
+         BNZ   FLDERROR           FIELD DEFINITION IN ERROR             05750000
+         LR    R2,R0              PREPARE FOR EX                        05760000
+         BCTR  R2,0               360 LENGTH                            05770000
+         EX    R2,*+4             APPEND TO RESULT STRING               05780000
+         MVC   0(*-*,R5),0(R1)    EX OBJECT                             05790000
+         LA    R5,1(R2,R5)        PREPARE FOR NEXT PASS                 05800000
+         B     FLDHEXNX           AGAIN                                 05810000
+                                                                        05820000
+FLDHEXFN DS    0H                 IDENTIFY AGGREGATE RESULT             05830000
+         LR    R0,R5              END OF HEX STRING                     05840000
+         LA    R1,CHR256          STRING ORIGIN                         05850000
+         SR    R0,R1              STRING LENGTH                         05860000
+         B     FLDINS             DONE                                  05870000
+                                                                        05880000
+*--------------------------------------------------------------         05890000
+*   FIELD DEFINITION IN ERROR, GENERATE COARSE DIAGNOSTICS              05900000
+*--------------------------------------------------------------         05910000
+FLDERROR DS    0H                                                       05920000
+         L     R15,FMTELINE       LINE ORIGIN                           05930000
+         MVC   0(1,R15),@ERROR    ERROR INDICATOR                       05940000
+         LA    R0,RSN08           MERITS A SUCCESS QUALIFIER            05950000
+         C     R0,LCLRSNC         HIGHEST ENCOUNTERED?                  05960000
+         BNH   *+8                SKIP IF NOT                           05970000
+         ST    R0,LCLRSNC         ELSE POST                             05980000
+         LA    R0,L'@ERRTAG       LENGTH OF ERROR TAG                   05990000
+         LA    R1,@ERRTAG         ERROR TAG ADDR                        06000000
+                                                                        06010000
+*--------------------------------------------------------------         06020000
+*   POST FORMATTED TEXT                                                 06030000
+*--------------------------------------------------------------         06040000
+FLDINS   DS    0H                 RETAIN TEXT                           06050000
+         ST    R1,#TEXTA          SAVE RETURNED TEXT PTR                06060000
+         ST    R0,#TEXTLN         SAVE RETURNED TEXT LENGTH             06070000
+                                                                        06080000
+***************************************************************         06090000
+*                                                                       06100000
+*   POST FORMATTED TEXT, ACCOUNT FOR SPACE IF TAG AND DATA.             06110000
+*   IF TAG AND DATA BOTH SPECIFED, THE TAG IS SUPPRESSED IF             06120000
+*   THERE IS NO DATA PROVIDED.                                          06130000
+*                                                                       06140000
+***************************************************************         06150000
+FLDPOST  DS    0H                                                       06160000
+         L     R0,TRFFLTGL        TAG LENGTH                            06170000
+         LR    R2,R0              TOTAL OUTPUT REQUIREMENT              06180000
+         A     R2,#TEXTLN         TOTAL DATA LENGTH                     06190000
+         BNP   FLDCPT             DONE IF NOTHING TO DO                 06200000
+                                                                        06210000
+         LTR   R0,R0              TAGGED OUTPUT?                        06220000
+         BZ    FLDNSEP            NO SEPARATOR REQUIRED                 06230000
+         TM    FLAGS,FLAGDATA     DATA CONVERSION ATTEMPTED?            06240000
+         BNO   FLDNSEP            BRANCH IF TAG ONLY                    06250000
+         CR    R0,R2              DATA COMPONENT AVAILABLE?             06260000
+         BE    FLDIFIN            SUPPRESS THE TAG IF NOT               06270000
+         LA    R2,1(,R2)          ELSE ACCOUNT FOR TAG/DATA SEPARATOR   06280000
+                                                                        06290000
+FLDNSEP  DS    0H                                                       06300000
+         C     R2,PLINERLN        LENGTH OF OUTPUT AREA REMAINING       06310000
+         BNH   FLDILINE           BRANCH IF FITS                        06320000
+         CLC   PLINERLN,PLINEMAX  BEST WE CAN DO?                       06330000
+         BNE   FLDOVFLW           GET A CLEAN LINE OTHEWISE             06340000
+                                                                        06350000
+FLDILINE DS    0H                                                       06360000
+         ICM   R0,15,TRFFLTGL     TAGGED OUTPUT?                        06370000
+         BZ    FLDIDATA           SKIP IF NOT                           06380000
+         L     R1,TRFFLTGA        TAG ORIGIN                            06390000
+         BAS   R14,POSTLINE       INSERT                                06400000
+         BNZ   FLDOVFLW           OVERFLOW                              06410000
+                                                                        06420000
+FLDIDATA DS    0H                                                       06430000
+         ICM   R0,15,#TEXTLN      DATA PROVIDED?                        06440000
+         BZ    FLDIFIN            SKIP IF NOT                           06450000
+         L     R1,#TEXTA          TAG ORIGIN                            06460000
+         BAS   R14,POSTLINE       INSERT                                06470000
+                                                                        06480000
+FLDIFIN  DS    0H                                                       06490000
+                                                                        06500000
+*--------------------------------------------------------------         06510000
+*   RETURN TO REQUESTOR                                                 06520000
+*--------------------------------------------------------------         06530000
+FLDCPT   DS    0H                 FEILD TAG AND/OR DATA ACCEPTED        06540000
+         LA    R15,RC00                                                 06550000
+         B     FLDRET                                                   06560000
+                                                                        06570000
+FLDOVFLW DS    0H                 OVERFLOW / NEWLINE REQUIRED           06580000
+         XC    PLINERLN,PLINERLN  PERMANENT CONDITION                   06590000
+         LA    R15,RC04           DONE                                  06600000
+                                                                        06610000
+FLDRET   DS    0H                                                       06620000
+         LM    R0,R14,REGSAVE     RESTORE MAINLINE REGS                 06630000
+         LTR   R15,R15            REFLECT COMPLETION STATUS VIA CC      06640000
+         BR    R14                RETURN                                06650000
+         DROP  R9                 TRFFLD                                06660000
+                                                                        06670000
+         EJECT ,                                                        06680000
+***************************************************************         06690000
+*                                                                       06700000
+* ROUTINE: TAB - ADVANCE TO MULTIPLE OF TAB STOP AMOUNT                 06710000
+*                                                                       06720000
+* ON EXIT:                                                              06730000
+*                                                                       06740000
+*    R15 CONTAINS ONE OF THE FOLLOWING RETURN CODES.                    06750000
+*        THE CONDITION CODE IS SET ACCORDINGLY.                         06760000
+*                                                                       06770000
+*        RC00 - FUNCTION COMPLETE                                       06780000
+*        RC04 - BUFFER OVERFLOW                                         06790000
+*                                                                       06800000
+***************************************************************         06810000
+TAB      DS    0H                                                       06820000
+         STM   R0,R15,REGSAVEX    SAVE MAINLINE REGS                    06830000
+         LA    R15,RC00           ASSUME SUCCESS                        06840000
+                                                                        06850000
+         L     R0,TABINTVL        FETCH TAB INTERVAL                    06860000
+         C     R0,=F'1'           TRIVIAL?                              06870000
+         BNH   TABRET             SKIP IF NOT                           06880000
+                                                                        06890000
+*--------------------------------------------------------------         06900000
+*   PERFORM NONTRIVIAL PLINE REPOSITIONING                              06910000
+*--------------------------------------------------------------         06920000
+         L     R3,PLINEPOS        CURRENT INSERTION ADDR                06930000
+         S     R3,FMTELINE        OFFSET TO INSERTION POINT             06940000
+         LA    R3,1(,R3)          ONE-RELATIVE                          06950000
+         SR    R2,R2              PREPARE FOR DIVIDE                    06960000
+         DR    R2,R0              DETERMINE POSITION VAV REQ            06970000
+         LTR   R2,R2              APPROPRIATELY ALIGNED?                06980000
+         BZ    TABRET             DONE IF SO                            06990000
+                                                                        07000000
+         SR    R0,R2              COMPUTE SIZE OF PAD REQUIRED          07010000
+         ICM   R4,15,PLINERLN     ACQUIRE LENGTH OF LINE REMAINING      07020000
+         BNP   TABFAIL            OVERFLOW                              07030000
+                                                                        07040000
+         SR    R4,R0              RECOMPUTE RESIDUAL LENGTH             07050000
+         ST    R4,PLINERLN        UPDATE FLAGGING OVERFLOW IN SUIT      07060000
+         BM    TABFAIL            CANT COMPLY                           07070000
+         L     R1,PLINEPOS        CURRENT POSITION                      07080000
+         AR    R1,R0              ADVANCE ACCORDINGLY                   07090000
+         ST    R1,PLINEPOS        ESTABLISH NEW POSITION                07100000
+         B     TABRET             SUCCESSFUL COMPLETION                 07110000
+                                                                        07120000
+*--------------------------------------------------------------         07130000
+*   RETURN TO REQUESTOR                                                 07140000
+*--------------------------------------------------------------         07150000
+TABFAIL  DS    0H                 PLINE OVERFLOW                        07160000
+         XC    PLINERLN,PLINERLN  PERMANENT CONDITION                   07170000
+         LA    R15,RC04           INDICATE ERROR                        07180000
+                                                                        07190000
+TABRET   DS    0H                                                       07200000
+         LM    R0,R14,REGSAVEX    RESTORE MAINLINE REGS                 07210000
+         LTR   R15,R15            REFLECT COMPLETION STATUS VIA CC      07220000
+         BR    R14                RETURN                                07230000
+                                                                        07240000
+         EJECT ,                                                        07250000
+***************************************************************         07260000
+*                                                                       07270000
+* ROUTINE: POSTLINE - INSERT TOKEN IN PRINT LINE                        07280000
+*                                                                       07290000
+* DESCRIPTION:                                                          07300000
+*                                                                       07310000
+*    THE DESIGNATED TOKEN IS INSERTED IN THE PRINT LINE IF              07320000
+*    SPACE REMAINS AND IS FOLLOWED BY A SINGLE BLANK.                   07330000
+*                                                                       07340000
+*                                                                       07350000
+* ON ENTRY:                                                             07360000
+*                                                                       07370000
+*    R1 - TOKEN PTR                                                     07380000
+*    R0 - TOKEN LENGTH                                                  07390000
+*                                                                       07400000
+*                                                                       07410000
+* ON EXIT:                                                              07420000
+*                                                                       07430000
+*    R15 CONTAINS ONE OF THE FOLLOWING RETURN CODES.                    07440000
+*        THE CONDITION CODE IS SET ACCORDINGLY.                         07450000
+*                                                                       07460000
+*        RC00 - FUNCTION COMPLETE                                       07470000
+*                                                                       07480000
+*               RSN00 - IMAGE CAPTURED                                  07490000
+*               RSN04 - TRUNCATION; DATA EXCEEDED LINE CAPACITY         07500000
+*                                                                       07510000
+*        RC04 - BUFFER OVERFLOW, NEW LINE REQUIRED                      07520000
+*                                                                       07530000
+***************************************************************         07540000
+POSTLINE DS    0H                                                       07550000
+         STM   R0,R15,REGSAVEX    SAVE MAINLINE REGS                    07560000
+         LR    R3,R1              ORIGIN OF TOKEN                       07570000
+         LR    R2,R0              LENGTH OF TOKEN                       07580000
+         LA    R15,RC00           ASSUME SUCCESS                        07590000
+         LA    R0,RSN00           WITHOUT INCIDENT                      07600000
+                                                                        07610000
+         ICM   R4,15,PLINERLN     LENGTH REMAINING                      07620000
+         BNP   POSTOVFL           OVERFLOW                              07630000
+         CR    R2,R4              SPACE AVAIL FOR NEW TOKEN?            07640000
+         BNH   POSTISRT           ACCEPT IF SO                          07650000
+                                                                        07660000
+         CLC   PLINERLN,PLINEMAX  LARGEST ANTICIPATED FREE AREA SIZE?   07670000
+         BNE   POSTOVFL           INDICATE OVERFLOW TO MINIMIZE TRUNC   07680000
+         L     R2,PLINERLN        TRUNCATE TO FIT PLINE EXTENT          07690000
+         L     R15,FMTELINE       ELSE LOCATE LINE ORIGIN               07700000
+         MVC   0(1,R15),@TRUNC    INDICATE TRUNCATION                   07710000
+         LA    R0,RSN04           MERITS A SUCCESS QUALIFIER            07720000
+         C     R0,LCLRSNC         HIGHEST ENCOUNTERED?                  07730000
+         BNH   *+8                SKIP IF NOT                           07740000
+         ST    R0,LCLRSNC         ELSE POST                             07750000
+                                                                        07760000
+*--------------------------------------------------------------         07770000
+*   INSERT TOKEN IN PRINT LINE                                          07780000
+*--------------------------------------------------------------         07790000
+POSTISRT DS    0H                                                       07800000
+         L     R5,PLINEPOS        FETCH INSERTION ADDR                  07810000
+         BCTR  R2,0               PREPARE FOR EX                        07820000
+         EX    R2,*+4             ACCEPT TOKEN                          07830000
+         MVC   0(*-*,R5),0(R3)    EX OBJECT                             07840000
+         LA    R5,1+1(R2,R5)      PAD & PREPARE FOR NEXT INSERT         07850000
+         ST    R5,PLINEPOS        UPDATE POSITION                       07860000
+         L     R0,PLINERLN        FETCH PLINE AVAIL LENGTH              07870000
+         SR    R0,R2              BACKOUT 360 TOKEN LENGTH              07880000
+         SH    R0,=H'2'           TRUE LENGTH AND SPACE                 07890000
+         ST    R0,PLINERLN        AVAILABLE LENGTH                      07900000
+         B     POSTRET            DONE                                  07910000
+                                                                        07920000
+*--------------------------------------------------------------         07930000
+*   RETURN TO REQUESTOR                                                 07940000
+*--------------------------------------------------------------         07950000
+POSTOVFL DS    0H                 PLINE OVERFLOW                        07960000
+         XC    PLINERLN,PLINERLN  PERMANENT CONDITION                   07970000
+         LA    R15,RC04           INDICATE ERROR                        07980000
+                                                                        07990000
+POSTRET  DS    0H                                                       08000000
+         LM    R0,R14,REGSAVEX    RESTORE MAINLINE REGS                 08010000
+         LTR   R15,R15            REFLECT COMPLETION STATUS VIA CC      08020000
+         BR    R14                RETURN                                08030000
+                                                                        08040000
+         EJECT                                                          08050000
+***************************************************************         08060000
+*                                                                       08070000
+* ROUTINE: INTEYE - PREPARE SIGNED INTEGER FOR DISPLAY                  08080000
+*                                                                       08090000
+* ON ENTRY:                                                             08100000
+*                                                                       08110000
+*    R1  - SOURCE ADDRESS                                               08120000
+*    R0  - LENGTH                                                       08130000
+*                                                                       08140000
+* ON EXIT:                                                              08150000
+*                                                                       08160000
+*    R15 CONTAINS ONE OF THE FOLLOWING RETURN CODES                     08170000
+*                                                                       08180000
+*        RC00 - CONVERSION COMPLETE                                     08190000
+*                                                                       08200000
+*               R1 - TEXT ORIGIN                                        08210000
+*               R0 - TEXT LENGTH                                        08220000
+*                                                                       08230000
+*        RC04 - INVALID DATA LENGTH                                     08240000
+*                                                                       08250000
+***************************************************************         08260000
+INTEYE   DS    0H                                                       08270000
+         STM   R0,R14,REGSAVEX         SAVE MAINLINE REGS               08280000
+                                                                        08290000
+         LTR   R2,R0                   MODIFIABLE COPY OF LENGTH        08300000
+         BNP   INTEYERR                ERROR IF N/A                     08310000
+         CH    R2,=H'4'                REASONABLE INT LENGTH?           08320000
+         BH    INTEYERR                ERROR IF NOT                     08330000
+                                                                        08340000
+         BCTR  R2,0                    CVT LENGTH TO INDEX              08350000
+         SLL   R2,2                    FETCH INSTRUCTIONS ARE RS        08360000
+         SR    R15,R15                 PREPARE FOR INSERT               08370000
+         EX    *-*,INTFETCH(R2)        FETCH VALUE:  ICM R15,????,0(R1) 08380000
+                                                                        08390000
+*--------------------------------------------------------------         08400000
+*   CONVERSION                                                          08410000
+*--------------------------------------------------------------         08420000
+         CVD   R15,DWORD               CONVERT TO DECIMAL               08430000
+         MVC   INTWORK,INTPAT          FETCH PATTERN                    08440000
+         LA    R1,INTWORK+L'INTWORK-1  DEFAULT SIGNIFICANCE             08450000
+         EDMK  INTWORK,DWORD+2         ACQUIRE DIGITS                   08460000
+                                                                        08470000
+         LTR   R15,R15                 NEGATIVE NUMBER?                 08480000
+         BNM   INTEYE1                 SKIP IF NOT                      08490000
+         BCTR  R1,0                    BACKUP                           08500000
+         MVI   0(R1),C'-'              INSERT SIGN                      08510000
+                                                                        08520000
+INTEYE1  DS    0H                                                       08530000
+         LA    R0,INTWORK+L'INTWORK    END OF RESULT                    08540000
+         SR    R0,R1                   COMPUTE LENGTH                   08550000
+         LA    R15,RC00                INDICATE SUCCESS                 08560000
+         B     INTEYEX                 DONE                             08570000
+                                                                        08580000
+*--------------------------------------------------------------         08590000
+*   RETURN RESULT                                                       08600000
+*--------------------------------------------------------------         08610000
+INTEYERR DS    0H                      LENGTH ERROR                     08620000
+         LA    R15,RC04                                                 08630000
+                                                                        08640000
+INTEYEX  DS    0H                                                       08650000
+         LM    R2,R14,REGSAVEX+8       RESTORE MAINLINE REGS            08660000
+         LTR   R15,R15                 REFLECT COMPLETION STATUS VIA CC 08670000
+         BR    R14                                                      08680000
+                                                                        08690000
+*--------------------------------------------------------------         08700000
+*   LOCAL DATA AREAS                                                    08710000
+*--------------------------------------------------------------         08720000
+INTFETCH DS    0F                                                       08730000
+         ICM   R15,B'0001',0(R1)                                        08740000
+         ICM   R15,B'0011',0(R1)                                        08750000
+         ICM   R15,B'0111',0(R1)                                        08760000
+         ICM   R15,B'1111',0(R1)                                        08770000
+                                                                        08780000
+INTPAT   DC    X'40',9X'20',X'2120'    PATTERN                          08790000
+                                                                        08800000
+         EJECT                                                          08810000
+***************************************************************         08820000
+*                                                                       08830000
+* ROUTINE: HEXEYE - PREPARE UNSIGNED INTEGER FOR HEX DISPLAY            08840000
+*                                                                       08850000
+* ON ENTRY:                                                             08860000
+*                                                                       08870000
+*    R1  - SOURCE ADDRESS                                               08880000
+*    R0  - LENGTH                                                       08890000
+*                                                                       08900000
+* ON EXIT:                                                              08910000
+*                                                                       08920000
+*    R15 CONTAINS ONE OF THE FOLLOWING RETURN CODES                     08930000
+*                                                                       08940000
+*        RC00 - CONVERSION COMPLETE                                     08950000
+*                                                                       08960000
+*               R1 - TEXT ORIGIN                                        08970000
+*               R0 - TEXT LENGTH                                        08980000
+*                                                                       08990000
+*        RC04 - INVALID DATA LENGTH                                     09000000
+*                                                                       09010000
+***************************************************************         09020000
+HEXEYE   DS    0H                                                       09030000
+         STM   R0,R14,REGSAVEX         SAVE MAINLINE REGS               09040000
+                                                                        09050000
+         LTR   R3,R0                   MODIFIABLE COPY OF LENGTH        09060000
+         BNP   HEXEYERR                ERROR IF N/A                     09070000
+         CH    R3,=H'4'                REASONABLE INT LENGTH?           09080000
+         BH    HEXEYERR                ERROR IF NOT                     09090000
+                                                                        09100000
+*--------------------------------------------------------------         09110000
+*   CONVERSION                                                          09120000
+*--------------------------------------------------------------         09130000
+         BCTR  R3,0                    PREPARE FOR EX                   09140000
+         EX    R3,*+4                  MOVE SOURCE, PAD BYTE IN DEST    09150000
+         MVC   HEXWORK(*-*),0(R1)      COPY EX                          09160000
+         UNPK  HEXYEILD(L'HEXYEILD+1),HEXWORK(L'HEXWORK+1)              09170000
+         TR    HEXYEILD,HEXTRT-C'0'    CONVERT TO CHAR FORMAT           09180000
+                                                                        09190000
+         AR    R0,R0                   LENGTH OF RESULT                 09200000
+         LA    R1,HEXYEILD             ORIGIN OF RESULT                 09210000
+         LA    R15,RC00                INDICATE SUCCESS                 09220000
+         B     HEXEYEX                 DONE                             09230000
+                                                                        09240000
+*--------------------------------------------------------------         09250000
+*   RETURN RESULT                                                       09260000
+*--------------------------------------------------------------         09270000
+HEXEYERR DS    0H                      LENGTH ERROR                     09280000
+         LA    R15,RC04                                                 09290000
+                                                                        09300000
+HEXEYEX  DS    0H                                                       09310000
+         LM    R2,R14,REGSAVEX+8       RESTORE MAINLINE REGS            09320000
+         LTR   R15,R15                 REFLECT COMPLETION STATUS VIA CC 09330000
+         BR    R14                                                      09340000
+                                                                        09350000
+HEXTRT   DC    C'0123456789ABCDEF'     CHEAP TRTABLE                    09360000
+                                                                        09370000
+         EJECT                                                          09380000
+***************************************************************         09390000
+*                                                                       09400000
+* ROUTINE: CHREYE - ENSURE CHARACTER STRING IN PRINTABLE FORM           09410000
+*                                                                       09420000
+* ON ENTRY:                                                             09430000
+*                                                                       09440000
+*    R1  - SOURCE ADDRESS                                               09450000
+*    R0  - LENGTH                                                       09460000
+*                                                                       09470000
+* ON EXIT:                                                              09480000
+*                                                                       09490000
+*    R15 CONTAINS ONE OF THE FOLLOWING RETURN CODES                     09500000
+*                                                                       09510000
+*        RC00 - CONVERSION COMPLETE                                     09520000
+*                                                                       09530000
+*               R1 - TEXT ORIGIN                                        09540000
+*               R0 - TEXT LENGTH (EQUAL TO INPUT LENGTH)                09550000
+*                                                                       09560000
+*        RC04 - INVALID DATA LENGTH                                     09570000
+*                                                                       09580000
+***************************************************************         09590000
+CHREYE   DS    0H                                                       09600000
+         STM   R0,R14,REGSAVEX         SAVE MAINLINE REGS               09610000
+                                                                        09620000
+         LTR   R3,R0                   MODIFIABLE COPY OF LENGTH        09630000
+         BNP   CHREYERR                ERROR IF N/A                     09640000
+         CH    R3,=H'256'              REASONABLE LENGTH?               09650000
+         BH    CHREYERR                ERROR IF NOT                     09660000
+                                                                        09670000
+*--------------------------------------------------------------         09680000
+*   CONVERSION                                                          09690000
+*--------------------------------------------------------------         09700000
+         BCTR  R3,0                    PREPARE FOR EX                   09710000
+         EX    R3,*+4                  MOVE SOURCE                      09720000
+         MVC   CHR256,0(R1)            COPY EX                          09730000
+         EX    R3,*+4                  EYEBALLS ONLY                    09740000
+         TR    CHR256(*-*),CHRTRT      EX OBJECT                        09750000
+                                                                        09760000
+         LA    R1,CHR256               RETURN TRANSLATED TEXT           09770000
+         LA    R15,RC00                INDICATE SUCCESS                 09780000
+         B     CHREYEX                 DONE                             09790000
+                                                                        09800000
+*--------------------------------------------------------------         09810000
+*   RETURN RESULT                                                       09820000
+*--------------------------------------------------------------         09830000
+CHREYERR DS    0H                      LENGTH ERROR                     09840000
+         LA    R15,RC04                                                 09850000
+                                                                        09860000
+CHREYEX  DS    0H                                                       09870000
+         LM    R2,R14,REGSAVEX+8       RESTORE MAINLINE REGS            09880000
+         LTR   R15,R15                 REFLECT COMPLETION STATUS VIA CC 09890000
+         BR    R14                                                      09900000
+                                                                        09910000
+*--------------------------------------------------------------         09920000
+*   LOCAL DATA AREAS                                                    09930000
+*--------------------------------------------------------------         09940000
+CHRTRT   DS    0F                                                       09950000
+         DC    256C'.'                 JUNK                             09960000
+         ORG   CHRTRT+0                ZERO                             09970000
+         DC    C'.'                                                     09980000
+                                                                        09990000
+         ORG   CHRTRT+C'A'             UPPER CASE ALPHAS                10000000
+         DC    C'ABCDEFGHI'                                             10010000
+         ORG   CHRTRT+C'J'                                              10020000
+         DC    C'JKLMNOPQR'                                             10030000
+         ORG   CHRTRT+C'S'                                              10040000
+         DC    C'STUVWXYZ'                                              10050000
+                                                                        10060000
+         ORG   CHRTRT+C'a'             LOWER CASE ALPHAS                10070000
+         DC    C'abcdefghi'                                             10080000
+         ORG   CHRTRT+C'j'                                              10090000
+         DC    C'jklmnopqr'                                             10100000
+         ORG   CHRTRT+C's'                                              10110000
+         DC    C'stuvwxyz'                                              10120000
+                                                                        10130000
+         ORG   CHRTRT+C'0'             DIGITS                           10140000
+         DC    C'0123456789'                                            10150000
+                                                                        10160000
+         ORG   CHRTRT+C' '             SPACE                            10170000
+         DC    C' '                                                     10180000
+                                                                        10190000
+         ORG   CHRTRT+C'$'             NATIONALS                        10200000
+         DC    C'$'                                                     10210000
+         ORG   CHRTRT+C'@'                                              10220000
+         DC    C'@'                                                     10230000
+         ORG   CHRTRT+C'#'                                              10240000
+         DC    C'#'                                                     10250000
+                                                                        10260000
+         ORG   CHRTRT+C'_'                                              10270000
+         DC    C'_'                                                     10280000
+         ORG   CHRTRT+C'+'                                              10290000
+         DC    C'+'                                                     10300000
+         ORG   CHRTRT+C'*'                                              10310000
+         DC    C'*'                                                     10320000
+                                                                        10330000
+         ORG   ,                                                        10340000
+                                                                        10350000
+         EJECT ,                                                        10360000
+***************************************************************         10370000
+*                                                                       10380000
+*   LOCAL READ ONLY WORKING STORAGE                                     10390000
+*                                                                       10400000
+***************************************************************         10410000
+FETCHEX  DS    0H                      FETCH UNSIGNED INTEGER           10420000
+         ICM   R0,B'0001',0(R2)                                         10430000
+         ICM   R0,B'0011',0(R2)                                         10440000
+         ICM   R0,B'0111',0(R2)                                         10450000
+         ICM   R0,B'1111',0(R2)                                         10460000
+                                                                        10470000
+UNFTAG   DC    C'USERDATA:'            UNFORMATTED USERDATA LABEL       10480000
+@TRUNC   DC    C'T'                    TRUNCATION TAG                   10490000
+@ERROR   DC    C'?'                    ERROR TAG                        10500000
+@ERRTAG  DC    C' **ERROR** '          EYECATCHER                       10510000
+                                                                        10520000
+         LTORG ,                                                        10530000
+                                                                        10540000
+         PRINT NOGEN                                                    10550000
+         ICVT ,                                                         10560000
+         END   ,                                                        10570000

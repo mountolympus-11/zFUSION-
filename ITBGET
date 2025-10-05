@@ -1,0 +1,858 @@
+ITBGET   TITLE 'TABLE SERVICES - ROW GET'                               00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE:  ITBGET - Table services, row get                            00040000
+*                                                                       00050000
+* NOTES:                                                                00060000
+*                                                                       00070000
+*    DOCUMENT CRP IMPACTS, PARTICULARLY THAT CRP IS NOT UPDATED         00080000
+*    IF THE ROW CANNOT BE DELIVERED BECAUSE OF AN UNDER-ALLOCED         00090000
+*    BUFFER.  THIS ALLOWS REALLOC AND REDRIVE OF GET NEXT/PREV.         00100000
+*                                                                       00110000
+*                                                                       00120000
+* ON ENTRY:                                                             00130000
+*                                                                       00140000
+*    R1  contains the address of a parameter list described by          00150000
+*        the @TBGET mapping                                             00160000
+*                                                                       00170000
+*                                                                       00180000
+* ON EXIT:                                                              00190000
+*                                                                       00200000
+*    R15 contains one of the following return codes                     00210000
+*    R0  may contain an associated reason code or other data            00220000
+*                                                                       00230000
+*        RC00 - row acquired and returned in user supplied buffer       00240000
+*                                                                       00250000
+*               R0 - row (slot) number of returned row                  00260000
+*               R1 - total size of returned row                         00270000
+*                                                                       00280000
+*        RC04 - a row could not be returned for one of the              00290000
+*               following reasons - identify by testing R0              00300000
+*                                                                       00310000
+*               RSN00 - end of table reached                            00320000
+*                                                                       00330000
+*               RSNnn - the row at CRP does not fit in the              00340000
+*                       return area provided by the caller. In          00350000
+*                       place of a reason code, R0 contains the         00360000
+*                       total amount of user buffer storage             00370000
+*                       required to complete the call. CRP              00380000
+*                       remains unaltered allowing the call to          00390000
+*                       be reissued after suitable storage is           00400000
+*                       acquired.                                       00410000
+*                                                                       00420000
+*        RC08 - reserved                                                00430000
+*                                                                       00440000
+*        RC12 - request in error                                        00450000
+*                                                                       00460000
+*               RSN04 - invalid table token supplied                    00470000
+*                                                                       00480000
+*               RSN08 - conflicting use of TBGET INDEX= and the         00490000
+*                       row number form of the POS= operand             00500000
+*                                                                       00510000
+*               RSN12 - invalid CRP given or encountered                00520000
+*                                                                       00530000
+*               RSN16 - the index name provided via the TBGET           00540000
+*                       INDEX= operand is invalid or not defined        00550000
+*                                                                       00560000
+*               RSN20 - the row designated for retrieval has been       00570000
+*                       identified by an implicit reference to CRP      00580000
+*                       but the CRP is not set                          00590000
+*                                                                       00600000
+*               RSN24 - invalid search argument supplied                00610000
+*                                                                       00620000
+*        RC16 - object management error encountered                     00630000
+*                                                                       00640000
+*               R1 - @PUSHERR summary of service rtn failure            00650000
+*                                                                       00660000
+*               RSN04 - table slot locator not accessable               00670000
+*               RSN08 - index not accessable                            00680000
+*               RSN12 - base table not accessable                       00690000
+*                                                                       00700000
+*        RC20 - object space storage management failure                 00710000
+*                                                                       00720000
+**<DOC-OFF>****************************************************         00730000
+                                                                        00740000
+         EJECT                                                          00750000
+***************************************************************         00760000
+*                                                                       00770000
+* MAINTENANCE:                                                          00780000
+*                                                                       00790000
+*    05/xx/92 R. Turgeon                                                00800000
+*             Initial version                                           00810000
+*                                                                       00820000
+*    02/25/95 R. Turgeon                                                00830000
+*             Null support                                              00840000
+*                                                                       00850000
+*    10/23/95 R. Turgeon                                                00860000
+*             Implement the NOLOCATOR property                          00870000
+*                                                                       00880000
+***************************************************************         00890000
+                                                                        00900000
+         EJECT                                                          00910000
+***************************************************************         00920000
+*                                                                       00930000
+*   Working storage area                                                00940000
+*                                                                       00950000
+***************************************************************         00960000
+                                                                        00970000
+WORKAREA DSECT                                                          00980000
+                                                                        00990000
+         @WORK ,                  STANDARD WORKAREA                     01000000
+                                                                        01010000
+ALETTABL DS    F                  BASE TABLE OBJECT ALET                01020000
+BASETABL DS    A                  BASE TABLE ORIGIN                     01030000
+BASESIZE DS    F                  BASE TABLE SIZE (USED EXTENT LENGTH)  01040000
+                                                                        01050000
+ALETLOCR DS    F                  LOCATOR OBJECT ALET                   01060000
+BASELOCR DS    A                  LOCATOR BASE                          01070000
+                                                                        01080000
+ALETNDX  DS    F                  INDEX LOCATOR ALET                    01090000
+BASENDX  DS    A                  INDEX LOCATOR BASE                    01100000
+                                                                        01110000
+ROWPTR   DS    A                  ADDRESS OF SELECTED ROW               01120000
+NDXTOKEN DS    A                  LOCATION OF INDEX OBJECT TOKEN        01130000
+NDXCRP   DS    F                  INDEX CRP POSTED UPON COMPLETION      01140000
+                                                                        01150000
+TARGADDR DS    A                  TARGET DATA ADDRESS IN PRIMARY        01160000
+SRCADDR  DS    A                  SOURCE DATA ADDRESS IN TABLE SPACE    01170000
+STGRQMT  DS    F                  SIZE RQMT FOR REQUESTERS ROW BUFFER   01180000
+VARBUFP  DS    A                  ADDR FREE SPACE FOR VARYING DATA      01190000
+                                                                        01200000
+WORKFREE DS    0D                 AVAILABLE TO SERVICE ROUTINES         01210000
+WORKLEN  EQU   *-WORKAREA         LENGTH OF WORKAREA                    01220000
+                                                                        01230000
+         EJECT                                                          01240000
+         @TBGET ,                 PARAMETER LIST FORMAT                 01250000
+                                                                        01260000
+         EJECT                                                          01270000
+         @TBSARGS ,               SEARCH ARGUMENT LIST                  01280000
+                                                                        01290000
+         EJECT                                                          01300000
+         @TBSET ,                 CURRENT POSITION CODES                01310000
+                                                                        01320000
+         EJECT                                                          01330000
+         $TOKEN ,                 SPACE TOKEN                           01340000
+                                                                        01350000
+         EJECT                                                          01360000
+         TBTOKEN ,                TABLE TOKEN                           01370000
+                                                                        01380000
+         EJECT                                                          01390000
+         $STG TYPE=DSECT          FREE STORAGE MGMT                     01400000
+                                                                        01410000
+         EJECT                                                          01420000
+         @TABLE ,                 TABLE OBJECT PREFIX                   01430000
+                                                                        01440000
+         EJECT                                                          01450000
+         @TBCOLDF ,               COLUMN DEFINITION                     01460000
+                                                                        01470000
+         EJECT                                                          01480000
+         ROWPFX ,                 STORED ROW PREFIX                     01490000
+                                                                        01500000
+         EJECT                                                          01510000
+         COLHDR ,                 COLUMN DEFINITION HEADER / LINKAGE    01520000
+                                                                        01530000
+         EJECT                                                          01540000
+         LOCATOR ,                RECORD LOCATOR ARRAY FORMAT           01550000
+                                                                        01560000
+         EJECT                                                          01570000
+         INDEX ,                  INDEX LOCATOR ENTRY FORMAT            01580000
+                                                                        01590000
+         EJECT                                                          01600000
+         VNDXPARM ,               INDEX VALIDATION                      01610000
+                                                                        01620000
+         EJECT                                                          01630000
+         SARGPARM ,               SEARCH ARGUMENT APPLICATION PLIST     01640000
+                                                                        01650000
+         EJECT                                                          01660000
+         OIE   ,                  OBJECT INDEX ENTRY ($OBJECT INLINE)   01670000
+                                                                        01680000
+         EJECT                                                          01690000
+         SPCBLOCK ,               OBJECT SPACE BLOCK ($OBJECT INLINE)   01700000
+                                                                        01710000
+         EJECT                                                          01720000
+         EQUS  LINKAGE=VCON                                             01730000
+                                                                        01740000
+         EJECT                                                          01750000
+ITBGET   @ENTER WORKA=(WORKAREA,WORKLEN),ASC=AR                         01760000
+                                                                        01770000
+         EJECT                                                          01780000
+***************************************************************         01790000
+*                                                                       01800000
+*   Fetch passed parameters - preliminary validations                   01810000
+*                                                                       01820000
+***************************************************************         01830000
+                                                                        01840000
+         LAM   R1,R7,MFE_LIST     PRIMARY SPACE ADDRESSING              01850000
+                                                                        01860000
+         LR    R7,R1              PARAMETER LIST                        01870000
+         USING TBGET,R7           TBGET SERVICE                         01880000
+                                                                        01890000
+         L     R6,TBGTOKN         LOCATE TABLE TOKEN                    01900000
+         L     R6,0(,R6)          TOKEN IS A PTR                        01910000
+         USING TBTOKEN,R6         TABLE TOKEN ADDRESSABILITY LOF        01920000
+                                                                        01930000
+         CLC   TTOKTAG,=CL8'TBTOKEN'                                    01940000
+         BNE   ETBTOKEN                                                 01950000
+                                                                        01960000
+         EJECT                                                          01970000
+***************************************************************         01980000
+*                                                                       01990000
+*   Acquire address of base table object                                02000000
+*                                                                       02010000
+***************************************************************         02020000
+                                                                        02030000
+         $OBJECT ACCESS,INTENT=READ,OTOKEN=TTOKTABL,                   X02040000
+               INLINE=YES                                               02050000
+                                                                        02060000
+         BZ    TBLOBJOK                                                 02070000
+                                                                        02080000
+         $OBJECT ACCESS,INTENT=READ,OTOKEN=TTOKTABL,                   X02090000
+               SHRPAGE=WORKFREE,MF=(E,MFE_LIST)                         02100000
+                                                                        02110000
+         BNZ   ETABLOBJ           FAIL IF NOT                           02120000
+                                                                        02130000
+*--------------------------------------------------------------         02140000
+*   Table object successfully located                                   02150000
+*--------------------------------------------------------------         02160000
+                                                                        02170000
+TBLOBJOK DS    0H                                                       02180000
+         LAE   R11,0(,R1)         OBJECT ADDRESS                        02190000
+         USING TABLE,R11          TABLE BASE                            02200000
+         CLC   TBLTAG,=CL8'TBTABLE'                                     02210000
+         BNE   ETABLOBJ                                                 02220000
+                                                                        02230000
+         STAM  AR1,AR1,ALETTABL   LOCATOR ALET                          02240000
+         ST    R1,BASETABL        SAVE BASE ADDRESS                     02250000
+         ST    R0,BASESIZE        SIZE OF TABLE                         02260000
+                                                                        02270000
+         EJECT                                                          02280000
+***************************************************************         02290000
+*                                                                       02300000
+*   Acquire address of row locator object if maintained                 02310000
+*                                                                       02320000
+***************************************************************         02330000
+                                                                        02340000
+         TM    TBLPROP1,TBLP_NOLOCATOR                                  02350000
+         BO    LOCFIN                                                   02360000
+                                                                        02370000
+         $OBJECT ACCESS,INTENT=READ,OTOKEN=TTOKLOCR,                   X02380000
+               INLINE=YES                                               02390000
+                                                                        02400000
+         BZ    LOCOBJOK                                                 02410000
+                                                                        02420000
+         $OBJECT ACCESS,INTENT=READ,OTOKEN=TTOKLOCR,                   X02430000
+               SHRPAGE=WORKFREE,MF=(E,MFE_LIST)                         02440000
+                                                                        02450000
+         BNZ   ELOCROBJ           LOCATOR FAILURE IS CATASTROPHIC       02460000
+                                                                        02470000
+*--------------------------------------------------------------         02480000
+*   Locator object successfully located                                 02490000
+*--------------------------------------------------------------         02500000
+                                                                        02510000
+LOCOBJOK DS    0H                                                       02520000
+         USING LOCATOR,R1         ROW SLOT LOCATOR                      02530000
+         CLC   LOCTAG,=CL8'LOCATOR'                                     02540000
+         BNE   ELOCROBJ                                                 02550000
+                                                                        02560000
+         STAM  AR1,AR1,ALETLOCR   LOCATOR ALET                          02570000
+         ST    R1,BASELOCR        SAVE ROW LOCATOR ADDRESS              02580000
+         DROP  R1                 ROW SLOT LOCATOR                      02590000
+                                                                        02600000
+LOCFIN   DS    0H                                                       02610000
+                                                                        02620000
+         EJECT                                                          02630000
+***************************************************************         02640000
+*                                                                       02650000
+*   Identify request source, either index or physical reference         02660000
+*                                                                       02670000
+***************************************************************         02680000
+                                                                        02690000
+         ICM   R1,15,TBGNDXID     TEST FOR INDEX REFERENCE              02700000
+         BZ    PHYSRET            RETRIEVAL WITHOUT KEY                 02710000
+                                                                        02720000
+         ICM   R0,15,TBGPOS       ENSURE ROW ACCESS IS RELATIVE         02730000
+         BP    EPOSCNFL           ROWID CONFLICTS WITH INDEX ACCESS     02740000
+                                                                        02750000
+***************************************************************         02760000
+*                                                                       02770000
+*   Acquire index object for index-based retrievals                     02780000
+*                                                                       02790000
+***************************************************************         02800000
+                                                                        02810000
+         LA    R3,MFE_LIST        PLIST CONSTRUCTION AREA               02820000
+         USING VNDXPARM,R3        FORMATTED                             02830000
+         XC    VNDXPARM(VNDXLN),VNDXPARM                                02840000
+         STAM  AR11,AR11,VNDXALE  TABLE SPACE ALET                      02850000
+         ST    R11,VNDXBASE       BASE TABLE PTR                        02860000
+         LA    R1,TBGNDXID        INDEX NAME ADDRESS                    02870000
+         ST    R1,VNDXLIST        ENTRY                                 02880000
+         MVC   VNDXCNT,=F'1'      SINGLE INDEX                          02890000
+                                                                        02900000
+         @CALL ITBNDXVY,MF=(E,VNDXPARM)                                 02910000
+                                                                        02920000
+         LTR   R15,R15            INDEX VERIFICATION                    02930000
+         BNZ   EKEYNAME           INVALID INDEX                         02940000
+         DROP  R3                 VNDXPARM                              02950000
+                                                                        02960000
+         LR    R2,R0              INDEX SEQUENCE NUMBER                 02970000
+         BCTR  R2,0               CONVERT TO OFFSET                     02980000
+         MH    R2,=AL2($TOKLN)    OFFSET TO NTH TOKEN                   02990000
+         LA    R5,TTOKNDX(R2)     LOCATE INDEX TOKEN WITHIN TABLE TOKEN 03000000
+         ST    R5,NDXTOKEN        RETAIN FOR FUTURE REFERENCE           03010000
+                                                                        03020000
+*--------------------------------------------------------------         03030000
+*   Acquire access to designated index object                           03040000
+*--------------------------------------------------------------         03050000
+                                                                        03060000
+         $OBJECT ACCESS,INTENT=READ,OTOKEN=(R5),                       X03070000
+               INLINE=YES                                               03080000
+                                                                        03090000
+         BZ    NDXOBJOK                                                 03100000
+                                                                        03110000
+         $OBJECT ACCESS,INTENT=READ,OTOKEN=(R5),                       X03120000
+               SHRPAGE=WORKFREE,MF=(E,MFE_LIST)                         03130000
+                                                                        03140000
+         BNZ   ENDXOBJ            INDEX OBJECT NOT AVAILABLE            03150000
+                                                                        03160000
+*--------------------------------------------------------------         03170000
+*   Index object successfully located                                   03180000
+*--------------------------------------------------------------         03190000
+                                                                        03200000
+NDXOBJOK DS    0H                                                       03210000
+         LAE   R10,0(,R1)         OBJECT ADDRESS                        03220000
+NDX      USING LOCATOR,R10        LOCATOR STRUCTURE                     03230000
+         CLC   NDX.LOCTAG,=CL8'LOCATOR'                                 03240000
+         BNE   ENDXOBJ                                                  03250000
+                                                                        03260000
+         STAM  AR1,AR1,ALETNDX    INDEX LOCATOR ALET                    03270000
+         ST    R1,BASENDX         SAVE INDEX BASE                       03280000
+                                                                        03290000
+         EJECT                                                          03300000
+***************************************************************         03310000
+*                                                                       03320000
+*   Extract the base table ROWID from appropriate index entry           03330000
+*                                                                       03340000
+***************************************************************         03350000
+                                                                        03360000
+RUNINDEX DS    0H                                                       03370000
+         L     R10,BASENDX        INDEX OBJECT ORIGIN                   03380000
+         LAM   R10,R10,ALETNDX    OPEN WINDOW TO OBJECT SPACE           03390000
+         LA    R10,NDX.LOCSLOTS   INDEX TREE HEADER NODE                03400000
+         USING INDEX,R10          ENTRY FORMAT                          03410000
+                                                                        03420000
+         L     R5,NDXTOKEN        INDEX OBJECT TOKEN                    03430000
+         USING $TOKEN,R5          INDEX CRP                             03440000
+         ICM   R2,15,$APPLVAR     CURRENTLY TRAVERSING THE TREE?        03450000
+         BNP   TESTREQ            RETAIN POSITION AT HDR IF NOT         03460000
+                                                                        03470000
+         LR    R10,R2             ELSE ESTABLISH CURRENT POSITION       03480000
+         AL    R10,BASENDX        CONVERT OFFLINK TO ADDRESS            03490000
+                                                                        03500000
+TESTREQ  DS    0H                                                       03510000
+         CLC   TBGPOS,=A(TBG$NEXT)   MOVE FORWARD?                      03520000
+         BE    SUCCESSOR             LOCATE SUCCESSOR                   03530000
+         CLC   TBGPOS,=A(TBG$PREV)   MOVE BACKWARD?                     03540000
+         BE    PREDECESSOR           LOCATE PREDECESSOR                 03550000
+         B     ROWNDX                ELSE USE CRP                       03560000
+                                                                        03570000
+*--------------------------------------------------------------         03580000
+*   Locate successor index entry                                        03590000
+*--------------------------------------------------------------         03600000
+                                                                        03610000
+SUCCESSOR      DS   0H                                                  03620000
+         L     R1,NDXRIGHT        MOVE RIGHT THEN ALL THE WAY LEFT      03630000
+         LA    R10,0(,R1)         DISCARD THREAD TAG                    03640000
+         AL    R10,BASENDX        CONVERT OFFLINK TO ADDRESS            03650000
+         LTR   R1,R1              SUCCESSOR PTR VIA THREAD?             03660000
+         BNP   ROWNDX             DONE                                  03670000
+                                                                        03680000
+SUCCESSOR_SRCH DS   0H            MOVE TO LEFTMOST NODE OF SUBTREE      03690000
+         ICM   R1,15,NDXLEFT      MOVE LEFT                             03700000
+         BNP   ROWNDX             CRP IN R10                            03710000
+         LR    R10,R1             ELSE DESCEND                          03720000
+         AL    R10,BASENDX        CONVERT OFFLINK TO ADDRESS            03730000
+         B     SUCCESSOR_SRCH     REDRIVE                               03740000
+                                                                        03750000
+*--------------------------------------------------------------         03760000
+*   Locate predecessor index entry                                      03770000
+*--------------------------------------------------------------         03780000
+                                                                        03790000
+PREDECESSOR    DS   0H                                                  03800000
+         L     R1,NDXLEFT         MOVE LEFT THEN ALL THE WAY RIGHT      03810000
+         LA    R10,0(,R1)         DISCARD THREAD TAG                    03820000
+         AL    R10,BASENDX        CONVERT OFFLINK TO ADDRESS            03830000
+         LTR   R1,R1              PREDECESSOR PTR VIA THREAD?           03840000
+         BNP   ROWNDX             DONE                                  03850000
+                                                                        03860000
+PREDECESSOR_SRCH DS   0H          MOVE TO RIGHTMOST NODE OF SUBTREE     03870000
+         ICM   R1,15,NDXRIGHT     MOVE RIGHT                            03880000
+         BNP   ROWNDX             CRP IN R10                            03890000
+         LR    R10,R1             ELSE DESCEND                          03900000
+         AL    R10,BASENDX        CONVERT OFFLINK TO ADDRESS            03910000
+         B     PREDECESSOR_SRCH   REDRIVE                               03920000
+                                                                        03930000
+*--------------------------------------------------------------         03940000
+*   Examine index entry, identify end of table extent                   03950000
+*--------------------------------------------------------------         03960000
+                                                                        03970000
+ROWNDX   DS    0H                                                       03980000
+         ICM   R2,15,NDXRID       ROW IDENTIFIED?                       03990000
+         BZ    INDEXEOT           END OF INDEX IF NOT                   04000000
+         S     R10,BASENDX        CONVERT INDEX ENTRY PTR TO OFFLINK    04010000
+         ST    R10,NDXCRP         POST INDEX CRP UPDATE VALUE           04020000
+         BNZ   ROWIDCVT           END OF TABLE                          04030000
+                                                                        04040000
+INDEXEOT DS    0H                                                       04050000
+         MVC   $APPLVAR,=A(TBSP$INV)  INVALIDATE INDEX CRP              04060000
+         LA    R15,RC04           END OF ENTRIES                        04070000
+         SR    R0,R0              NO REASON CODE DEFINED                04080000
+         B     GET_RET            DONE                                  04090000
+         DROP  R5,R10             INDEX $TOKEN, INDEX ENTRY             04100000
+                                                                        04110000
+*--------------------------------------------------------------         04120000
+*   Convert index ROWID to a row (prefix) address                       04130000
+*--------------------------------------------------------------         04140000
+                                                                        04150000
+ROWIDCVT DS    0H                                                       04160000
+         ICM   R8,15,BASELOCR     ROW SLOT LOCATOR IN USE?              04170000
+         BNZ   ROWIDRF            ROWID IN SLOT NUMBER FORMAT IF SO     04180000
+                                                                        04190000
+         TBVRO TABLE,*BASESIZE,(R2)                                     04200000
+                                                                        04210000
+         BZ    ROWVADDR           ROWID APPEARS VALID (R1 IS OFFLINK)   04220000
+         B     EROWREF            ROWID IS INVALID                      04230000
+                                                                        04240000
+ROWIDRF  DS    0H                                                       04250000
+         LAM   R8,R8,ALETLOCR     REFRESH ROW LOCATOR ALET              04260000
+                                                                        04270000
+         TBFROW 0(,R8),(R2)       CONVERT ROW ID TO TABLE OFFLINK       04280000
+                                                                        04290000
+         BNZ   EROWREF            INDEX ERROR                           04300000
+                                                                        04310000
+ROWVADDR DS    0H                 R1 <== ROW OFFLINK                    04320000
+         LAE   R10,TABLE(R1)      CONVERT OFFLINK TO ADDRESS            04330000
+         USING ROWPFX,R10         STORED ROW FORMAT                     04340000
+         ST    R10,ROWPTR         PER CONVENTION                        04350000
+         B     ROWSARG            APPLY SEARCH ARGUMENTS, ETC.          04360000
+                                                                        04370000
+         EJECT                                                          04380000
+***************************************************************         04390000
+*                                                                       04400000
+*   Row retrieval by physical position                                  04410000
+*                                                                       04420000
+***************************************************************         04430000
+                                                                        04440000
+PHYSRET  DS    0H                                                       04450000
+         ICM   R2,15,TBGPOS       IDENTIFY REQUESTED RECORD             04460000
+         BP    ROWFETCH           ROW IDENTIFIED BY ID #                04470000
+                                                                        04480000
+         ICM   R2,15,TTOKTABL+($APPLVAR-$TOKEN)                         04490000
+         BZ    ENOPOS             CRP NOT ESTABLISHED                   04500000
+         BP    ROWFETCH           CRP ESTABLISHED AT TRUE TABLE ROW     04510000
+                                                                        04520000
+         CL    R2,=A(TBSP$TOP)    POSITIONED BEFORE FIRST ROW?          04530000
+         BNE   PHYSNTOP           SKIP IF NOT                           04540000
+         CLC   TBGPOS,=A(TBG$NEXT)   MOVING FORWARD?                    04550000
+         BNE   EOF                DONE OTHERWISE                        04560000
+         L     R3,TBLQFRST        GET OFFLINK OF FIRST ROW              04570000
+         B     PHYSGO             SIMPLIFY RELATIVE RETRIEVAL           04580000
+                                                                        04590000
+PHYSNTOP DS    0H                                                       04600000
+         CL    R2,=A(TBSP$BOT)    POSITIONED AFTER LAST ROW?            04610000
+         BNE   ENOPOS             INVALID POSITION CODE IF NOT          04620000
+         CLC   TBGPOS,=A(TBG$PREV)   MOVING BACKWARD?                   04630000
+         BNE   EOF                DONE OTHERWISE                        04640000
+         L     R3,TBLQLAST        GET OFFLINK OF LAST ROW               04650000
+                                                                        04660000
+PHYSGO   DS    0H                                                       04670000
+         LTR   R3,R3              ROW PRESENT                           04680000
+         BZ    EOF                NO ROWS                               04690000
+         LAE   R10,TABLE(R3)      CONVERT OFFLINK TO ADDRESS            04700000
+         USING ROWPFX,R10         STORED ROW IS PREFIXED                04710000
+         B     ROWSARG            PREPARE ROW FOR RETURN                04720000
+                                                                        04730000
+*--------------------------------------------------------------         04740000
+*   Validate ROWID, convert it to a CRP offlink                         04750000
+*--------------------------------------------------------------         04760000
+                                                                        04770000
+ROWFETCH DS    0H                 R2 <== ROWID IN UNKNOWN FORMAT        04780000
+         ICM   R8,15,BASELOCR     ROW SLOT LOCATOR IN USE?              04790000
+         BNZ   CRPSLOT            ROWID IN SLOT NUMBER FORMAT IF SO     04800000
+                                                                        04810000
+         TBVRO TABLE,*BASESIZE,(R2)                                     04820000
+                                                                        04830000
+         BZ    CRPCALC            ROWID APPEARS VALID (R1 IS OFFLINK)   04840000
+         B     EROWREF            ROWID IS INVALID                      04850000
+                                                                        04860000
+CRPSLOT  DS    0H                 ROWID IN SLOT NUMBER FORMAT           04870000
+         LAM   R8,R8,ALETLOCR     REFRESH ROW LOCATOR ALET              04880000
+                                                                        04890000
+         TBFROW 0(,R8),(R2)       CONVERT ROW ID TO TABLE OFFLINK       04900000
+                                                                        04910000
+         BNZ   EROWREF            INDEX ERROR                           04920000
+                                                                        04930000
+CRPCALC  DS    0H                                                       04940000
+         LAE   R10,TABLE(R1)      CONVERT OFFLINK TO ADDRESS            04950000
+         USING ROWPFX,R10         STORED ROW IS PREFIXED                04960000
+                                                                        04970000
+         ICM   R0,15,TBGPOS       IS THIS THE DESIGNATED ROW?           04980000
+         BNM   READROW            FORMAT FOR RETURN IF SO               04990000
+                                                                        05000000
+         EJECT                                                          05010000
+***************************************************************         05020000
+*                                                                       05030000
+*   Physical row traversal                                              05040000
+*                                                                       05050000
+*   Locate the disired row by traversing the forward (next)             05060000
+*   or backward (prev) row chain and then applying the search           05070000
+*   arguments provided, if any.                                         05080000
+*                                                                       05090000
+***************************************************************         05100000
+                                                                        05110000
+RUNLINKS DS    0H                                                       05120000
+         SR    R5,R5              SHIELD FROM GARBAGE POSITIONS         05130000
+         CLC   TBGPOS,=A(TBG$NEXT)    MOVE FORWARD?                     05140000
+         BNE   *+8                SKIP IF NOT                           05150000
+         L     R5,RPLNKF          TRACE FORWARD                         05160000
+                                                                        05170000
+         CLC   TBGPOS,=A(TBG$PREV)    MOVE BACKWARD?                    05180000
+         BNE   *+8                SKIP IF NOT                           05190000
+         L     R5,RPLNKB          TRACE BACKWARD                        05200000
+                                                                        05210000
+         LTR   R5,R5              TABLE EXTREMITY REACHED?              05220000
+         BZ    EOF                VIRTUAL EOF IF SO                     05230000
+         LA    R10,TABLE(R5)      CONVERT OFFLINK TO ADDRESS            05240000
+         ST    R10,ROWPTR         USEFUL DIAGNOSTIC                     05250000
+                                                                        05260000
+***************************************************************         05270000
+*                                                                       05280000
+*   Apply search criteria to provided to the row just located.          05290000
+*   If the row passes, continue by moving it to the requesters          05300000
+*   primary space.  Otherwise, redrive the index and/or                 05310000
+*   physical row traversal logic to acquire another candidate.          05320000
+*                                                                       05330000
+***************************************************************         05340000
+                                                                        05350000
+ROWSARG  DS    0H                                                       05360000
+         ICM   R2,15,TBGSARGS     QUALIFIED RETRIEVAL?                  05370000
+         BZ    READROW            NO ARGUMENTS, ACCEPT THE ROW          05380000
+                                                                        05390000
+         LAE   R1,MFE_LIST        PLIST CONSTRUCTION AREA               05400000
+         USING SARGPARM,R1        ADDRESSABILITY                        05410000
+                                                                        05420000
+         XC    SARGPARM(SARGLN),SARGPARM                                05430000
+         MVC   SARGALET,ALETTABL  OBJECT SPACE ALET                     05440000
+         MVC   SARGTABL,BASETABL  TABLE ORIGIN                          05450000
+         MVC   SARGNDX,TBGNDXID   INDEX NAME PTR OR ZERO                05460000
+         MVC   SARGSARG,TBGSARGS  SEARCH ARGUMENT PREDICATE TREE        05470000
+         LA    R0,ROWPFX+RPFXLN   ORIGIN OF ROW PROPER                  05480000
+         ST    R0,SARGROW         SAVE CANDIDATE ROW ADDRESS            05490000
+                                                                        05500000
+         CLC   TBGPOS,=A(TBG$NEXT)   SCANNING FORWARD?                  05510000
+         BNE   *+10                                                     05520000
+         MVC   SARGDIR,=A(SARGD$F)                                      05530000
+         CLC   TBGPOS,=A(TBG$PREV)   SCANNING BACKWARD?                 05540000
+         BNE   *+10                                                     05550000
+         MVC   SARGDIR,=A(SARGD$B)                                      05560000
+                                                                        05570000
+         @CALL ITBSARG,MF=(E,(R1))   APPLY PREDICATES TO ROW            05580000
+                                                                        05590000
+         B     *+4(R15)              ANALYZE COMPLETION STATUS          05600000
+         B     READROW               00 - SELECT CURRENT ROW            05610000
+         B     NOTSEL                04 - INELIGIBLE                    05620000
+         B     EOF                   08 - NEVER ELIGIBLE                05630000
+         B     ERRSARGS              12 - INVALID SARG DESIGNATION      05640000
+         DROP  R1                 SARGPARM                              05650000
+                                                                        05660000
+*--------------------------------------------------------------         05670000
+*   Search argument not satisfied, update CRP and advance               05680000
+*--------------------------------------------------------------         05690000
+                                                                        05700000
+NOTSEL   DS    0H                                                       05710000
+         ICM   R15,15,TBGNDXID    INDEXED RETRIEVAL?                    05720000
+         BNZ   UCRPNDX            REDRIVE INDEXED GET IF SO             05730000
+         L     R0,RPROWID         ROW # AT CURRENT POSITION             05740000
+         ST    R0,TTOKTABL+($APPLVAR-$TOKEN)                            05750000
+         B     RUNLINKS                                                 05760000
+                                                                        05770000
+UCRPNDX  DS    0H                                                       05780000
+         L     R1,NDXTOKEN        LOCATE TOKEN FOR THIS INDEX           05790000
+         LAE   R1,0(R1,0)         TOKEN RESIDES IN PSPACE               05800000
+         L     R0,NDXCRP          CURRENT POSITION WITHIN INDEX         05810000
+         ST    R0,$APPLVAR-$TOKEN(,R1)                                  05820000
+         B     RUNINDEX           DONE                                  05830000
+                                                                        05840000
+         EJECT                                                          05850000
+***************************************************************         05860000
+*                                                                       05870000
+*   Reconstruct source row in requesters space                          05880000
+*                                                                       05890000
+***************************************************************         05900000
+                                                                        05910000
+READROW  DS    0H                                                       05920000
+         L     R0,TBLSRCSZ        LENGTH OF FIXED ROW                   05930000
+         L     R1,RPVARYSZ        FETCH FLAG / SIZE OF VARDATA          05940000
+         LA    R1,0(,R1)          REMOVE FLAG BIT                       05950000
+         ALR   R0,R1              PLUS VARYING LENGTH IS TOTAL RQMT     05960000
+         ST    R0,STGRQMT         ROW STORAGE REQUIREMENT               05970000
+                                                                        05980000
+         ICM   R1,15,TBGROWLN     LENGTH OF REQUESTERS BUFFER           05990000
+         BZ    READGO             LENGTH VALIDATION SUPPRESSED          06000000
+         CLR   R0,R1              BUFFER ACCOMODATES ROW?               06010000
+         BH    EBUFRLEN           ERROR OTHERWISE                       06020000
+                                                                        06030000
+READGO   DS    0H                                                       06040000
+                                                                        06050000
+*--------------------------------------------------------------         06060000
+*   Return null indicator mask if attached to stored row                06070000
+*--------------------------------------------------------------         06080000
+                                                                        06090000
+         ICM   R2,15,TBGENULL     NULL INDICATOR RETURN AREA PROVIDED?  06100000
+         BZ    READNULL           NO REFLECTION POSSIBLE IF NOT         06110000
+                                                                        06120000
+         L     R15,TBL#COLS       NUMBER OF COLUMNS IN TABLE            06130000
+         BCTR  R15,0              CONVERT COUNT TO BIT INDEX            06140000
+         SRL   R15,3              NUMBER OF BYTES IN MASK / EX READY    06150000
+         EX    R15,*+4            ASSUME NO NULLS STORED                06160000
+         XC    0(*-*,R2),0(R2)    EX OBJECT                             06170000
+                                                                        06180000
+         TM    RPVARYSZ,X'80'     NULL INDICATORS ATTACHED TO ROW       06190000
+         BNO   READNULL           SKIP IF NOT                           06200000
+         LAE   R14,ROWPFX+RPFXLN  STORED ROW ORIGIN                     06210000
+         A     R14,TBLROWSZ       NULL INDICATORS AT END OF STORED ROW  06220000
+         EX    R15,*+4            RETURN IN CALLERS INDICATOR AREA      06230000
+         MVC   0(*-*,R2),0(R14)   EX OBJECT                             06240000
+                                                                        06250000
+READNULL DS    0H                                                       06260000
+                                                                        06270000
+*--------------------------------------------------------------         06280000
+*   Prepare for stored row column scan and source row expansion         06290000
+*--------------------------------------------------------------         06300000
+                                                                        06310000
+         L     R3,TBGROWA         ADDR OF SOURCE ROW (TARGET)           06320000
+         AL    R3,TBLSRCSZ        LOCATE VARYING DATA STORAGE AREA      06330000
+         ST    R3,VARBUFP         SAVE FOR PROCESSING VARYING DATA      06340000
+                                                                        06350000
+         LAE   R9,TBLCOLST-(COLNEXT-COLHDR)                             06360000
+         USING COLHDR,R9                                                06370000
+                                                                        06380000
+*--------------------------------------------------------------         06390000
+*   Copy fixed fields to source row                                     06400000
+*--------------------------------------------------------------         06410000
+                                                                        06420000
+READNXT  DS    0H                                                       06430000
+         ICM   R9,15,COLNEXT      ADVANCE TO NEXT COLUMN                06440000
+         BZ    READFIN            RECONSTRUCTION COMPLETE               06450000
+         LA    R9,TABLE(R9)       CONVERT OFFLINK TO ADDRESS            06460000
+         LAE   R8,COLDEF          COLUMN DEFINITION PROPER              06470000
+         USING TBCOLDEF,R8                                              06480000
+                                                                        06490000
+         L     R4,TBGROWA         ROW ADDRESS IN PRIMARY SPACE          06500000
+         A     R4,TBCDISPL        COLUMN OFFSET IN SOURCE STRUCTURE     06510000
+         ST    R4,TARGADDR        TARGET ADDRESS IN PRIMARY             06520000
+         LAE   R14,ROWPFX+RPFXLN  ORIGIN OF STORED ROW                  06530000
+         AL    R14,COLDISPL       ORIGIN OF COLUMN IN THAT ROW          06540000
+         ST    R14,SRCADDR        SOURCE ADDRESS IN TABLE SPACE         06550000
+                                                                        06560000
+         L     R5,TBCLENG         FIXED LENGTH OF ELEMENT               06570000
+         C     R5,=F'256'         MVC WILL DO?                          06580000
+         BNH   COPYFLD            CHEAPER APPROACH, WE ALLEGE           06590000
+         LR    R15,R5             SOURCE LENGTH = TARGET LENGTH         06600000
+         MVCL  R4,R14             COPY TO SOURCE                        06610000
+         B     READANAL           ONWARD                                06620000
+                                                                        06630000
+COPYMVC  MVC   0(*-*,R4),0(R14)   EX OBJECT                             06640000
+                                                                        06650000
+COPYFLD  DS    0H                                                       06660000
+         BCTR  R5,0               PREPARE FOR EX                        06670000
+         EX    R5,COPYMVC         COPY FIELD                            06680000
+                                                                        06690000
+READANAL DS    0H                                                       06700000
+         CLI   TBCDTYPE,$VCHAR    VARYING DATA?                         06710000
+         BE    READVAR1                                                 06720000
+         CLI   TBCDTYPE,$VBIN     VARYING DATA?                         06730000
+         BE    READVAR1                                                 06740000
+         CLI   TBCDTYPE,$VCHARX   VARYING DATA - ALTERNATE FORMAT?      06750000
+         BE    READVARX                                                 06760000
+         CLI   TBCDTYPE,$VBINX    VARYING DATA - ALTERNATE FORMAT?      06770000
+         BNE   READNXT                                                  06780000
+         DROP  R8                 TBCOLDEF                              06790000
+                                                                        06800000
+*--------------------------------------------------------------         06810000
+*   Varying structure - alternate format                                06820000
+*--------------------------------------------------------------         06830000
+                                                                        06840000
+READVARX DS    0H                 APPEND DATA TO SOURCE BUFFER          06850000
+         L     R14,SRCADDR        VARYING DATA BUFFER PTR               06860000
+         L     R15,0(,R14)        FETCH VARDATA LENGTH                  06870000
+         ICM   R14,15,4(R14)      VARYING COLUMN IS NULL?               06880000
+         BZ    READNXT            DONE IF SO                            06890000
+         LA    R14,TABLE(R14)     CONVERT OFFLINK TO ADDRESS            06900000
+         L     R4,TARGADDR        LOCATION OF VARYING PTR IN IMAGE      06910000
+         MVC   4(4,R4),VARBUFP    MOVING VARDATA TO THIS LOCATION       06920000
+         B     READVMOV           VARDATA COPY                          06930000
+                                                                        06940000
+*--------------------------------------------------------------         06950000
+*   Varying structure - standard format                                 06960000
+*--------------------------------------------------------------         06970000
+                                                                        06980000
+READVAR1 DS    0H                 APPEND DATA TO SOURCE BUFFER          06990000
+         L     R14,SRCADDR        VARYING DATA BUFFER PTR               07000000
+         ICM   R14,15,0(R14)      VARYING COLUMN IS NULL?               07010000
+         BZ    READNXT            DONE IF SO                            07020000
+         LA    R14,TABLE(R14)     CONVERT OFFLINK TO ADDRESS            07030000
+         SR    R15,R15            PREPARE FOR INSERT                    07040000
+         ICM   R15,3,0(R14)       ELSE FETCH DATA LENGTH                07050000
+         LA    R15,2(,R15)        INCLUDE LENGTH OF HEADER              07060000
+         L     R4,TARGADDR        LOCATION OF VARYING PTR IN IMAGE      07070000
+         MVC   0(4,R4),VARBUFP    MOVING VARDATA TO THIS LOCATION       07080000
+                                                                        07090000
+*--------------------------------------------------------------         07100000
+*   Append vardata to end of row                                        07110000
+*--------------------------------------------------------------         07120000
+                                                                        07130000
+READVMOV DS    0H                 APPEND DATA TO SOURCE BUFFER          07140000
+         L     R4,VARBUFP         FREE SPACE PTR IN REQUESTERS BUFFER   07150000
+         LR    R3,R4              VARDATA DESTINATION                   07160000
+         ALR   R3,R15             UPDATE FREE PTR FOR NEXT PASS         07170000
+         ST    R3,VARBUFP         AND SAVE                              07180000
+         LR    R5,R15             SOURCE LENGTH = TARGET LENGTH         07190000
+         MVCL  R4,R14             APPEND VARDATA TO ROW                 07200000
+         B     READNXT            PROCESS NEXT COLUMN                   07210000
+                                                                        07220000
+READFIN  DS    0H                                                       07230000
+         DROP  R9                 COLHDR                                07240000
+                                                                        07250000
+***************************************************************         07260000
+*                                                                       07270000
+*   Reset current position in base table only if the GET was            07280000
+*   directed against the base table without access assisted by          07290000
+*   an index.  Otherwise, CRP is unaffected.                            07300000
+*                                                                       07310000
+***************************************************************         07320000
+                                                                        07330000
+         LA    R15,RC00           REQUEST COMPLETE                      07340000
+         L     R0,RPROWID         ROW # AT CURRENT POSITION             07350000
+         L     R1,STGRQMT         ROW BUFFER STORAGE USED               07360000
+                                                                        07370000
+         ICM   R14,15,TBGNDXID    POSITION DETERMINED BY INDEX?         07380000
+         BNZ   UPNDXCRP           NO BASE TABLE CRP UPDATE IF SO        07390000
+         ST    R0,TTOKTABL+($APPLVAR-$TOKEN)                            07400000
+         B     GET_RET            DONE                                  07410000
+                                                                        07420000
+UPNDXCRP DS    0H                                                       07430000
+         L     R5,NDXTOKEN        LOCATE INDEX TOKEN                    07440000
+         USING $TOKEN,R5          TOKEN ADDRESSABILITY                  07450000
+         MVC   $APPLVAR,NDXCRP    UPDATE INDEX CRP                      07460000
+         B     GET_RET            DONE                                  07470000
+         DROP  R5,R10             TOKEN, ROWPFX                         07480000
+                                                                        07490000
+         EJECT                                                          07500000
+***************************************************************         07510000
+*                                                                       07520000
+*   Error handlers - exit linkage                                       07530000
+*                                                                       07540000
+***************************************************************         07550000
+                                                                        07560000
+                                                                        07570000
+*------- uncompleted requests - warnings ----------------------         07580000
+                                                                        07590000
+EOF      DS    0H                 TABLE EXTREMITY REACHED               07600000
+         LA    R0,TBSP$INV        R0 <== INVALIDATED CRP                07610000
+         ST    R0,TTOKTABL+($APPLVAR-$TOKEN)                            07620000
+         SR    R0,R0              EXPLICIT INDICATION OF TABLE END      07630000
+         SR    R1,R1              NO DATA RETURNED                      07640000
+         LA    R15,RC04           INDICATE END                          07650000
+         B     GET_RET            DONE                                  07660000
+                                                                        07670000
+EBUFRLEN DS    0H                 BUFFER NOT SUFFICIENT FOR DATA        07680000
+         L     R0,STGRQMT         BUFFER RQMT IS REASON CODE            07690000
+         SR    R1,R1              NO DATA RETURNED                      07700000
+         LA    R15,RC04           INDICATE END                          07710000
+         B     GET_RET            DONE                                  07720000
+                                                                        07730000
+                                                                        07740000
+*------- logical request errors -------------------------------         07750000
+                                                                        07760000
+ETBTOKEN DS    0H                 INVALID TABLE TOKEN SUPPLIED          07770000
+         LA    R0,RSN04                                                 07780000
+         B     ERR_REQ                                                  07790000
+                                                                        07800000
+EPOSCNFL DS    0H                 INDEX= CONFLICTS WITH POS=ROW#        07810000
+         LA    R0,RSN08                                                 07820000
+         B     ERR_REQ                                                  07830000
+                                                                        07840000
+EROWREF  DS    0H                 INVALID CRP PROVIDED                  07850000
+         LA    R0,RSN12                                                 07860000
+         B     ERR_REQ                                                  07870000
+                                                                        07880000
+EKEYNAME DS    0H                 NAMED KEY / INDEX DOES NOT EXIST      07890000
+         LA    R0,RSN16                                                 07900000
+         B     ERR_REQ                                                  07910000
+                                                                        07920000
+ENOPOS   DS    0H                 RELATIVE POS REQ, BUT CRP IS NOT SET  07930000
+         LA    R0,RSN20                                                 07940000
+         B     ERR_REQ                                                  07950000
+                                                                        07960000
+ERRSARGS DS    0H                 INVALID SEARCH ARGUMENT DESIGNATION   07970000
+         LA    R0,RSN24                                                 07980000
+         B     ERR_REQ                                                  07990000
+                                                                        08000000
+ERR_REQ  DS    0H                 REQUEST IN ERROR                      08010000
+         LA    R15,RC12                                                 08020000
+         B     GET_RET                                                  08030000
+                                                                        08040000
+                                                                        08050000
+*------- object management failures ---------------------------         08060000
+                                                                        08070000
+ELOCROBJ DS    0H                 COULD NOT ACCESS LOCATOR              08080000
+         LA    R2,RSN04                                                 08090000
+         B     ERR_OBJ                                                  08100000
+                                                                        08110000
+ENDXOBJ  DS    0H                 COULD NOT ACCESS NAMED INDEX          08120000
+         LA    R2,RSN08                                                 08130000
+         B     ERR_OBJ                                                  08140000
+                                                                        08150000
+ETABLOBJ DS    0H                 COULD NOT ACCESS BASE TABLE           08160000
+         LA    R2,RSN12                                                 08170000
+         B     ERR_OBJ                                                  08180000
+                                                                        08190000
+                                                                        08200000
+ERR_OBJ  DS    0H                 OBJECT FALURE                         08210000
+         CH    R15,=AL2(RC12)     SPACE STORAGE OVERCOMMITTED?          08220000
+         BE    ERR_STG            DISTINCT NOTIFICATION IF SO           08230000
+                                                                        08240000
+         @PUSHERR ,               SERVICE ROUTINE FAILURE FDBK          08250000
+                                                                        08260000
+         LR    R0,R2              LOCAL REASON CODE                     08270000
+         LA    R15,RC16                                                 08280000
+         B     GET_RET                                                  08290000
+                                                                        08300000
+*------- storage management failures --------------------------         08310000
+                                                                        08320000
+ERR_STG  DS    0H                 OBJECT SPACE STORAGE NOT AVAILABLE    08330000
+         LA    R15,RC20                                                 08340000
+         B     GET_RET                                                  08350000
+                                                                        08360000
+*--------------------------------------------------------------         08370000
+*   Return results to requester                                         08380000
+*--------------------------------------------------------------         08390000
+                                                                        08400000
+GET_RET  DS    0H                                                       08410000
+         SR    R2,R2                                                    08420000
+         SAR   AR0,R2                                                   08430000
+         SAR   AR1,R2                                                   08440000
+         SAR   AR14,R2                                                  08450000
+         SAR   AR15,R2                                                  08460000
+                                                                        08470000
+         @EXIT ,                                                        08480000
+                                                                        08490000
+         EJECT                                                          08500000
+***************************************************************         08510000
+*                                                                       08520000
+*   Local read-only data areas, etc.                                    08530000
+*                                                                       08540000
+***************************************************************         08550000
+                                                                        08560000
+         LTORG ,                                                        08570000
+         END   ,                                                        08580000

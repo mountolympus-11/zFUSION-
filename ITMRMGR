@@ -1,0 +1,475 @@
+ITMRMGR  TITLE 'ITMRMGR - $TIMER Services Manager'                      00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE: ITMRMGR - $TIMER Services Manager                            00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    The $TIMER manager is responsible for posting TQE additions        00080000
+*    (SET, WAIT) and deletions (CANCEL, TERM) against the               00090000
+*    appropriate timer queue(s).  For SET, WAIT, and CANCEL             00100000
+*    requests the $TIMER ID is used to identify a single timer          00110000
+*    queue and timer request.  These requests deal with a single        00120000
+*    TQE.  For TERM requests all TQEs created on behalf of the          00130000
+*    terminating workunit must be removed from all timer queues.        00140000
+*                                                                       00150000
+*    Whenever the first TQE in a timer queue changes (is added          00160000
+*    or removed) the STIMERM request associated with that queue,        00170000
+*    if any, is stopped.  ITMREXPI is invoked to restart the            00180000
+*    STIMERM for all queues so updated.                                 00190000
+*                                                                       00200000
+*    If SYNC=YES was specified in the $TIMER request the requester      00210000
+*    is posted with a completion code which can convey error            00220000
+*    conditions not otherwise visible to the requester.                 00230000
+*                                                                       00240000
+*                                                                       00250000
+* NOTES:                                                                00260000
+*                                                                       00270000
+*    $RECOVER INTERFACE IS REQUIRED                                     00280000
+*                                                                       00290000
+*                                                                       00300000
+* ON ENTRY:                                                             00310000
+*                                                                       00320000
+*    R1  contains the address of a parameter list constructed           00330000
+*        as follows:                                                    00340000
+*                                                                       00350000
+*           +00 - address of a TMSGSTD $TSEND message header            00360000
+*                                                                       00370000
+* ON EXIT:                                                              00380000
+*                                                                       00390000
+*    If the request is delivered with a reply EPB, that EPB is          00400000
+*    posted with one of the following return codes.  If no EPB          00410000
+*    is provided completion notification does not occur.                00420000
+*                                                                       00430000
+*        RC00 - request complete                                        00440000
+*                                                                       00450000
+*        RC04 - CANCEL request, but designated $TIMER ID not            00460000
+*               matched                                                 00470000
+*                                                                       00480000
+*        RC08 - STIMERM SET failure                                     00490000
+*                                                                       00500000
+**<DOC-OFF>****************************************************         00510000
+                                                                        00520000
+         EJECT                                                          00530000
+***************************************************************         00540000
+*                                                                       00550000
+* MAINTENANCE:                                                          00560000
+*                                                                       00570000
+*    09/13/94 R. Turgeon                                                00580000
+*             Initial version                                           00590000
+*    08/18/95 Randy Witek - support $TIMER EXIT= AND PARM=              00600000
+*                                                                       00610000
+***************************************************************         00620000
+                                                                        00630000
+         EJECT                                                          00640000
+         #WORK ,             BEGIN WORKAREA                             00650000
+                                                                        00660000
+FLAGS    DS    X             CONTROL FLAGS                              00670000
+FRESTART EQU   X'80'            TIMER EXPIRATION NOTIFICATION AND       00680000
+*                               RESTART PASS IS REQUIRED                00690000
+*                                                                       00700000
+FMULTIQ  EQU   X'40'            SET IF A TERM REQUEST IMPACTS MULTIPLE  00710000
+*                               TIMER QUEUES.  IN THIS CASE, ITMREXPI   00720000
+*                               MUST BE DIRECTED TO EXAMINE ALL TIMER   00730000
+*                               QUEUES FOR TIMER RESTART REQUIREMENTS   00740000
+                                                                        00750000
+@TIMEHDR DS    A             ADDRESS OF A SINGLE TIMER Q (HEADER) THAT  00760000
+*                            REQUIRES TIMER NOTIFY/RESTART PROCESSING,  00770000
+*                            OR ZERO IF ALL TIMER QUEUES MUST BE        00780000
+*                            EXAMINED                                   00790000
+                                                                        00800000
+RETC     DS    F             COMPLETION CODE                            00810000
+QCOUNT   DS    F             NUMBER OF TIMER QUEUES                     00820000
+                                                                        00830000
+$STIMMFL STIMERM CANCEL,MF=L                                            00840000
+                                                                        00850000
+$TASKMFL $TASK MF=L          $TASK PLIST CONSTRUCTION AREA              00860000
+                                                                        00870000
+REGSAVE  DS    16F           LOCAL SUBROUTINE SAVEAREA                  00880000
+                                                                        00890000
+         #ENDWORK ,          END WORKAREA                               00900000
+                                                                        00910000
+         EJECT                                                          00920000
+         $TIMER DSECT=YES    REQUEST BLOCK                              00930000
+                                                                        00940000
+         EJECT                                                          00950000
+         $TIMEHDR ,          $TIMER STIMER LINKAGE TABLE                00960000
+                                                                        00970000
+         EJECT                                                          00980000
+         $TQE ,              TIMER QUEUE ENTRY                          00990000
+                                                                        01000000
+         EJECT                                                          01010000
+         TMSG  ,             INTERTASK MSG FORMAT                       01020000
+                                                                        01030000
+         EJECT                                                          01040000
+         $TASK DSECT=YES     $TASK SERVICES                             01050000
+                                                                        01060000
+         EJECT                                                          01070000
+         $TMRTRC ,           $TIMER TRACE RECORDS                       01080000
+                                                                        01090000
+         EJECT                                                          01100000
+         EVCODES ,           EVENT CODES                                01110000
+                                                                        01120000
+         ABCODES ,           $ABEND CODES                               01130000
+                                                                        01140000
+         MSGCODES ,          INTERTASK MESSAGING CODES                  01150000
+                                                                        01160000
+         TRACODES ,          TRACE CODES                                01170000
+                                                                        01180000
+         EQUS  ,                                                        01190000
+                                                                        01200000
+         EJECT                                                          01210000
+ITMRMGR  #ENTER PREG=R8                                                 01220000
+                                                                        01230000
+         USING ITASK,R10          STDENV                                01240000
+                                                                        01250000
+         EJECT                                                          01260000
+***************************************************************         01270000
+*                                                                       01280000
+*   ACCEPT PARAMETERS - IDENTIFY REQUEST TYPE AND ROUTE                 01290000
+*                                                                       01300000
+***************************************************************         01310000
+         L     R7,0(,R8)          FETCH PASSED PARAMETERS               01320000
+         USING TMSGSTD,R7         $TSEND/$TRECV MESSAGE PREFIX          01330000
+         LA    R8,TMSGINFO        INFORMATION SECTION                   01340000
+         USING PTIMP,R8           TIMER SERVICES/MANAGER PLIST          01350000
+                                                                        01360000
+         L     R15,PTIMFUNC       FUNCTION CODE                         01370000
+         B     *+4(R15)           IDENTIFY REQUESTED FUNCTION           01380000
+         B     SET                   SET A TIMER                        01390000
+         B     CANCEL                CANCEL A TIMER                     01400000
+         B     TERM                  CANCEL ALL TIMERS FOR WORKUNIT     01410000
+         B     SET                   AWAIT INTERVAL EXPIRATION (WAIT)   01420000
+         EX    R0,*                  UNIMPLEMENTED FUNCTION             01430000
+                                                                        01440000
+         EJECT                                                          01450000
+***************************************************************         01460000
+*                                                                       01470000
+*   SET AND WAIT REQUESTS                                               01480000
+*                                                                       01490000
+***************************************************************         01500000
+SET      DS    0H                                                       01510000
+         L     R4,TMSGW3          FETCH TQE ADDRESS                     01520000
+         USING TQE,R4             NEW ENTRY                             01530000
+                                                                        01540000
+         SR    R3,R3              PREPARE FOR INSERT                    01550000
+         IC    R3,TQETID          QUEUE IDENTIFIER                      01560000
+         BCTR  R3,0               ZERO RELATIVE                         01570000
+         MH    R3,=AL2(TIMEHDRL)  OFFSET TO TIMER Q HEADER              01580000
+         AL    R3,ICTTIME         TIMER Q ADDRESS                       01590000
+         USING TIMEHDR,R3         QUEUE SELECTION COMPLETE              01600000
+                                                                        01610000
+*--------------------------------------------------------------         01620000
+*   ADD NEW TQE TO EXPIRATION-TOD ORDERED TQE QUEUE                     01630000
+*--------------------------------------------------------------         01640000
+         LA    R5,TIMHTQE         CAST HDR AS LEAD TQE                  01650000
+         SH    R5,=AL2(TQENEXT-TQE)                                     01660000
+                                                                        01670000
+P        USING TQE,R5             PRIOR TQE                             01680000
+Q        USING TQE,R6             CURRENT TQE                           01690000
+                                                                        01700000
+SETSCAN  DS    0H                                                       01710000
+         ICM   R6,15,P.TQENEXT    ADVANCE TO NEXT TQE                   01720000
+         BZ    SETISRT            ADD AT END OF QUEUE                   01730000
+         CLC   TQEITOD,Q.TQEITOD  QUEUE IS ORDERED BY EXPIRATION TOD    01740000
+         BL    SETISRT            INSERTION LOC IDENTIFIED (ADD TO END) 01750000
+         LR    R5,R6              INCH UP THE LIST                      01760000
+         B     SETSCAN            CONTINUE                              01770000
+                                                                        01780000
+SETISRT  DS    0H                 ADD NEW NODE AFTER PRIOR              01790000
+         MVC   TQENEXT,P.TQENEXT  SET FORWARD LINK IN NEW TQE           01800000
+         ST    R4,P.TQENEXT       SET FORWARD LINK TO NEW TQE           01810000
+         L     R1,TIMHQC          CURRENT QUEUE LENGTH                  01820000
+         LA    R1,1(,R1)          ACCOUNT FOR INSERTION                 01830000
+         ST    R1,TIMHQC          UPDATE QUEUE LENGTH                   01840000
+         DROP  P,Q                PRIOR, CURRENT TQES                   01850000
+                                                                        01860000
+*--------------------------------------------------------------         01870000
+*   IF NEW TQE IS FIRST TQE, TIMER RESTART MAY BE REQUIRED              01880000
+*--------------------------------------------------------------         01890000
+         C     R4,TIMHTQE         NEW TQE IS THE NEXT EVENT TQE?        01900000
+         BNE   FINREQ             DONE IF NOT                           01910000
+                                                                        01920000
+         LA    R1,TIMEHDR         R1 <== TIMER QUEUE HDR                01930000
+         ST    R1,@TIMEHDR        IDENTIFY TIMER QUEUE REQUIRING ACTION 01940000
+         BAS   R14,STOPTIME       SIGNIFICANT TIMER QUEUE CHANGE        01950000
+         B     FINREQ             DONE                                  01960000
+         DROP  R4,R3              TQE, TIMEHDR                          01970000
+                                                                        01980000
+         EJECT                                                          01990000
+***************************************************************         02000000
+*                                                                       02010000
+*   CANCEL REQUEST                                                      02020000
+*                                                                       02030000
+***************************************************************         02040000
+CANCEL   DS    0H                 $TIMER ID IN (TMSGW1,TMSGW2)          02050000
+         SR    R3,R3              PREPARE FOR INSERT                    02060000
+         IC    R3,TMSGW1          QUEUE IDENTIFIER                      02070000
+         BCTR  R3,0               ZERO RELATIVE                         02080000
+         MH    R3,=AL2(TIMEHDRL)  OFFSET TO TIMER Q HEADER              02090000
+         AL    R3,ICTTIME         TIMER Q ADDRESS                       02100000
+         USING TIMEHDR,R3         QUEUE SELECTION COMPLETE              02110000
+                                                                        02120000
+*--------------------------------------------------------------         02130000
+*   LOCATE TARGET TQE BY $TIMER ID AND DECHAIN IT                       02140000
+*--------------------------------------------------------------         02150000
+         LA    R5,TIMHTQE         CAST HDR AS LEAD TQE                  02160000
+         SH    R5,=AL2(TQENEXT-TQE)                                     02170000
+         L     R2,TIMHTQE         FIRST TQE                             02180000
+                                                                        02190000
+P        USING TQE,R5             PRIOR TQE                             02200000
+Q        USING TQE,R6             CURRENT TQE                           02210000
+                                                                        02220000
+CANSCAN  DS    0H                                                       02230000
+         ICM   R6,15,P.TQENEXT    ADVANCE TO NEXT TQE                   02240000
+         BZ    CANFAIL            NO MATCH                              02250000
+         CLC   Q.TQETID,TMSGW1    SEARCH FOR MATCHING $TIMER ID         02260000
+         BE    CANRMV             TARGET LOCATED                        02270000
+         LR    R5,R6              INCH UP THE LIST                      02280000
+         B     CANSCAN            CONTINUE                              02290000
+                                                                        02300000
+CANFAIL  DS    0H                 CANCEL BUT $TIMER ID NOT MATCHED      02310000
+         LA    R15,RC04           WARNING                               02320000
+         ST    R15,RETC           POST COMPLETION STATUS                02330000
+         B     FINREQ             DONE                                  02340000
+                                                                        02350000
+CANRMV   DS    0H                 DECHAIN THE MATCHED TQE               02360000
+         LR    R4,R6              STANDARD CURRENT TQE ADDRESSABILITY   02370000
+         USING TQE,R4             ESTABLISH FOCUS                       02380000
+         MVC   P.TQENEXT,TQENEXT  REMOVE TQE FROM QUEUE                 02390000
+         L     R1,TIMHQC          CURRENT QUEUE LENGTH                  02400000
+         BCTR  R1,0               ACCOUNT FOR REMOVAL                   02410000
+         ST    R1,TIMHQC          UPDATE QUEUE LENGTH                   02420000
+         DROP  P,Q                PRIOR, CURRENT TQES                   02430000
+                                                                        02440000
+*--------------------------------------------------------------         02450000
+*   IF DELETED TQE IS FIRST TQE, TIMER RESTART MAY BE REQUIRED          02460000
+*--------------------------------------------------------------         02470000
+         CR    R2,R4              FIRST TQE REMOVED?                    02480000
+         BNE   CANEPB             DONE IF NOT                           02490000
+                                                                        02500000
+         LA    R1,TIMEHDR         R1 <== TIMER QUEUE HDR                02510000
+         ST    R1,@TIMEHDR        IDENTIFY TIMER QUEUE REQUIRING ACTION 02520000
+         BAS   R14,STOPTIME       SIGNIFICANT TIMER QUEUE CHANGE        02530000
+                                                                        02540000
+*--------------------------------------------------------------         02550000
+*   IF NOTIFICATION TECHNIQUE IS 'EPB POST' THE EBP IS REMOVED          02560000
+*--------------------------------------------------------------         02570000
+CANEPB   DS    0H                                                       02580000
+         ICM   R2,15,TQEEPB       EPB NOTIFICATION?                     02590000
+         BZ    CANSTOR            SKIP IF NOT                           02600000
+                                                                        02610000
+         $TASK REMEPB,            DISCHARGE THE EPB                    X02620000
+               EPB=(R2),                                               X02630000
+               MF=(E,$TASKMFL)                                          02640000
+                                                                        02650000
+*--------------------------------------------------------------         02660000
+*   DELETE THE TQE                                                      02670000
+*--------------------------------------------------------------         02680000
+CANSTOR  DS    0H                                                       02690000
+         $RETSTOR (R4),QHDR=0     (FORMERLY QHDR=TIMHSTOR)              02700000
+                                                                        02710000
+         B     FINREQ             DONE                                  02720000
+         DROP  R3,R4              TIMEHDR, TQE                          02730000
+                                                                        02740000
+         EJECT                                                          02750000
+***************************************************************         02760000
+*                                                                       02770000
+*   TERM REQUEST, REMOVE ALL TQE'S ASSOCIATED WITH WORKUNIT             02780000
+*                                                                       02790000
+***************************************************************         02800000
+TERM     DS    0H                                                       02810000
+         L     R3,ICTTIME         TIMER Q TABLE                         02820000
+         USING TIMEHDR,R3         RUN ALL QUEUES                        02830000
+         LA    R0,TIMH#ENT        NUMBER OF QUEUE HDR ENTRIES           02840000
+         ST    R0,QCOUNT          RETAIN FOR COUNT DOWN                 02850000
+                                                                        02860000
+*--------------------------------------------------------------         02870000
+*   SCAN ALL TIMER QUEUES                                               02880000
+*--------------------------------------------------------------         02890000
+TERMQ    DS    0H                                                       02900000
+         LA    R5,TIMHTQE         CAST HDR AS LEAD TQE                  02910000
+         SH    R5,=AL2(TQENEXT-TQE)                                     02920000
+         L     R2,TIMHTQE         FIRST TQE                             02930000
+                                                                        02940000
+P        USING TQE,R5             PRIOR TQE                             02950000
+Q        USING TQE,R6             CURRENT TQE                           02960000
+                                                                        02970000
+*--------------------------------------------------------------         02980000
+*   SCAN ALL TQE'S IDENTIFYING TERMINATING TQE'S BY WU TOKEN            02990000
+*--------------------------------------------------------------         03000000
+TERMSCAN DS    0H                                                       03010000
+         ICM   R6,15,P.TQENEXT    ADVANCE TO NEXT TQE                   03020000
+         BZ    TERMADV            END OF QUEUE                          03030000
+         CLC   Q.TQEWTKN,PTIMWTKN MATCHING WORKUNIT TOKEN?              03040000
+         BE    TERMRMV            TARGET LOCATED                        03050000
+         LR    R5,R6              INCH UP THE LIST                      03060000
+         B     TERMSCAN           CONTINUE                              03070000
+                                                                        03080000
+TERMRMV  DS    0H                 DECHAIN THE MATCHED TQE               03090000
+         LR    R4,R6              STANDARD CURRENT TQE ADDRESSABILITY   03100000
+         USING TQE,R4             ESTABLISH FOCUS                       03110000
+         MVC   P.TQENEXT,TQENEXT  REMOVE TQE FROM QUEUE                 03120000
+         L     R1,TIMHQC          CURRENT QUEUE LENGTH                  03130000
+         BCTR  R1,0               ACCOUNT FOR REMOVAL                   03140000
+         ST    R1,TIMHQC          UPDATE QUEUE LENGTH                   03150000
+         DROP  P,Q                PRIOR, CURRENT TQES                   03160000
+                                                                        03170000
+*--------------------------------------------------------------         03180000
+*   IF FIRST TQE WAS REMOVED, TIMER RESTART MAY BE REQUIRED             03190000
+*--------------------------------------------------------------         03200000
+         C     R2,TIMHTQE         FIRST TQE REMOVED?                    03210000
+         BNE   TERMEPB            DONE IF NOT                           03220000
+                                                                        03230000
+         ICM   R0,15,@TIMEHDR     TIMER Q PREVIOUSLY IMPACTED BY TERM?  03240000
+         BZ    *+8                SKIP IF NOT                           03250000
+         OI    FLAGS,FMULTIQ      ELSE NOTE ALL Q RESTART REQUIREMENT   03260000
+                                                                        03270000
+         LA    R1,TIMEHDR         R1 <== TIMER QUEUE HDR                03280000
+         ST    R1,@TIMEHDR        IDENTIFY TIMER QUEUE REQUIRING ACTION 03290000
+         BAS   R14,STOPTIME       SIGNIFICANT TIMER QUEUE CHANGE        03300000
+                                                                        03310000
+*--------------------------------------------------------------         03320000
+*   IF NOTIFICATION TECHNIQUE IS 'EPB POST' THE EBP IS REMOVED          03330000
+*--------------------------------------------------------------         03340000
+TERMEPB  DS    0H                                                       03350000
+         ICM   R2,15,TQEEPB       EPB NOTIFICATION?                     03360000
+         BZ    TERMSTOR           SKIP IF NOT                           03370000
+                                                                        03380000
+         $TASK REMEPB,            DISCHARGE THE EPB                    X03390000
+               EPB=(R2),                                               X03400000
+               MF=(E,$TASKMFL)                                          03410000
+                                                                        03420000
+*--------------------------------------------------------------         03430000
+*   DELETE THE TQE                                                      03440000
+*--------------------------------------------------------------         03450000
+TERMSTOR DS    0H                                                       03460000
+         $RETSTOR (R4),QHDR=0     (FORMERLY QHDR=TIMHSTOR)              03470000
+                                                                        03480000
+         B     TERMSCAN           TEST ALL TQE'S                        03490000
+         DROP  R4                 TQE                                   03500000
+                                                                        03510000
+*--------------------------------------------------------------         03520000
+*   SCAN ALL TIMER QUEUES                                               03530000
+*--------------------------------------------------------------         03540000
+TERMADV  DS    0H                                                       03550000
+         LA    R3,TIMEHDRL(,R3)   ADVANCE TO NEXT TIMER HEADER ENTRY    03560000
+         L     R1,QCOUNT          NUMBER OF QUEUE HDRS                  03570000
+         SH    R1,=H'1'           REMAINING                             03580000
+         ST    R1,QCOUNT          UPDATE FOR NEXT PASS                  03590000
+         BNZ   TERMQ              AGAIN                                 03600000
+         B     FINREQ             DONE                                  03610000
+         DROP  R3                 TIMEHDR                               03620000
+                                                                        03630000
+         EJECT                                                          03640000
+***************************************************************         03650000
+*                                                                       03660000
+*   RETURN COMPLETION STATUS TO CALLER IF SYNCHRONOUS REQUEST           03670000
+*                                                                       03680000
+***************************************************************         03690000
+FINREQ   DS    0H                                                       03700000
+         ICM   R2,15,TMSGEPB      REPLY REQUESTED?                      03710000
+         BZ    RESTART            REQUEST COMPLETE IF NOT               03720000
+                                                                        03730000
+         $TASK POST,EPB=(R2),     CONVEY COMPLETION STATUS TO SOURCE   X03740000
+               PCODE=*RETC,                                            X03750000
+               MF=(E,$TASKMFL)                                          03760000
+                                                                        03770000
+*--------------------------------------------------------------         03780000
+*   REDRIVE NOTIFY AND TIMER RESTART LOGIC AS NEEDED                    03790000
+*--------------------------------------------------------------         03800000
+RESTART  DS    0H                                                       03810000
+         TM    FLAGS,FRESTART     TIMER RESTART REQUIRED?               03820000
+         BNO   RETURN             SKIP IF NOT                           03830000
+                                                                        03840000
+         L     R1,@TIMEHDR        R1 <== TIMER Q ADDR OR ZERO IF ALLQ   03850000
+         TM    FLAGS,FMULTIQ      ALLQ REQUIREMENT PREVIOUSLY NOTED?    03860000
+         BNO   *+6                SKIP IF NOT                           03870000
+         SR    R1,R1              ALLQ REQUEST                          03880000
+                                                                        03890000
+         @CALL ITMREXPI           NOTIFY COMPLETIONS, RESTART TIMERS    03900000
+                                                                        03910000
+*--------------------------------------------------------------         03920000
+*   TIMER PROCESSING COMPLETE - TRACE THE REQUEST AND EXIT              03930000
+*--------------------------------------------------------------         03940000
+RETURN   DS    0H                                                       03950000
+         $TRACE *=A(TRC_TIMER_REQ),TRTMREQL                             03960000
+         BNZ   EXIT                                                     03970000
+                                                                        03980000
+         USING TRTMREQ,R1        $TIMER REQUEST RECORD FORMAT           03990000
+         MVC   TRTMRFNC,PTIMFUNC FUNCTION                               04000000
+         MVC   TRTMRETC,RETC     COMPLETION CODE                        04010000
+         MVC   TRTMRTID,TMSGW1   TIMER ID IF PROVIDED                   04020000
+         MVC   TRTMRTSK,TMSGORG  REQUESTING ITASK                       04030000
+         MVC   TRTMRPCB,PTIMPNAM REQUESTING PROCESS OR NULL             04040000
+         DROP  R1                                                       04050000
+                                                                        04060000
+EXIT     DS    0H                                                       04070000
+         #EXIT ,                                                        04080000
+                                                                        04090000
+         EJECT                                                          04100000
+***************************************************************         04110000
+*                                                                       04120000
+* ROUTINE:  STOPTIME - terminate STIMER for given timer queue           04130000
+*                                                                       04140000
+* DESCRIPTION:                                                          04150000
+*                                                                       04160000
+*    This routine is used to cancel the active STIMERM request          04170000
+*    whenever a TQE queue change will require that STIMERM to           04180000
+*    run with a different (smaller) value than that currently           04190000
+*    active.                                                            04200000
+*                                                                       04210000
+*    If, after cancelling the STIMERM, queued TQEs remain               04220000
+*    pending FLAGS.FRESTART is raised to schedule ITRMEXPI              04230000
+*    to perform notification and timer restart.                         04240000
+*                                                                       04250000
+*                                                                       04260000
+* ON ENTRY:                                                             04270000
+*                                                                       04280000
+*    R1  contains the address of the timer queue header                 04290000
+*                                                                       04300000
+* ON EXIT:                                                              04310000
+*                                                                       04320000
+*    R15 contains the STIMERM CANCEL return code or zero                04330000
+*                                                                       04340000
+***************************************************************         04350000
+STOPTIME DS    0H                                                       04360000
+         STM   R0,R15,REGSAVE     SAVE MAINLINE REGS                    04370000
+         LR    R3,R1              ACCEPT $TIMER HEADER                  04380000
+         USING TIMEHDR,R3         STANDARD ADDRESSABILITY               04390000
+                                                                        04400000
+*--------------------------------------------------------------         04410000
+*   CANCEL ACTIVE TIMER IF ANY                                          04420000
+*--------------------------------------------------------------         04430000
+         ICM   R2,15,TIMHSYS      STIMER ACTIVE FOR THIS QUEUE?         04440000
+         BZ    STOPNAB            NO TIMER CANCEL OTHERWISE             04450000
+                                                                        04460000
+         STIMERM CANCEL,ID=TIMHSYS,ERRET=STOPNAB,MF=(E,$STIMMFL)        04470000
+                                                                        04480000
+STOPNAB  DS    0H                 ABEND PREVENTION CONTINUATION         04490000
+         XC    TIMHSYS,TIMHSYS    STIMER NOT ACTIVE                     04500000
+         ICM   R0,15,TIMHTQE      TQE'S QUEUED?                         04510000
+         BZ    STOPRET            DONE IF NOT                           04520000
+         OI    FLAGS,FRESTART     INDIATE NOTIFY/RESTART REQUIRED       04530000
+                                                                        04540000
+*--------------------------------------------------------------         04550000
+*   RETURN TO CALLER                                                    04560000
+*--------------------------------------------------------------         04570000
+STOPRET  DS    0H                                                       04580000
+         LM    R0,R14,REGSAVE     RESTORE MAINLINE REGS                 04590000
+         SR    R15,R15            RETURN CODES NOT DEFINED              04600000
+         BR    R14                RETURN                                04610000
+         DROP  R3                 TIMEHDR                               04620000
+                                                                        04630000
+         EJECT                                                          04640000
+***************************************************************         04650000
+*                                                                       04660000
+*   LOCAL READ/ONLY DATA AREAS, ETC.                                    04670000
+*                                                                       04680000
+***************************************************************         04690000
+         LTORG ,                                                        04700000
+                                                                        04710000
+         PRINT NOGEN                                                    04720000
+         ICVT  ,                                                        04730000
+         ITASK ,                                                        04740000
+         END   ,                                                        04750000
