@@ -1,0 +1,279 @@
+ISQPINS  TITLE '- SQL SEMANTIC ANALYSIS - INSERT STATEMENT'             00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE: ISQPINS - SQL semantic analysis - insert statement           00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This routine completes the parsing of a SQL insert stmt by         00080000
+*    resolving the two statement forms (shown below) into a             00090000
+*    single internal representation, where each column of the           00100000
+*    target table is associated with its corresponding value in         00110000
+*    predicate format.  The predicate list is enqueued on               00120000
+*    SQLSEMAL.SQSAINSC which is empty upon entry.                       00130000
+*                                                                       00140000
+*    Additionally, if a column summary list has not been built,         00150000
+*    one is constructed and enqueued on SQLSEMAL.SQSACOLS using         00160000
+*    the VDB table definition as the source of column names.            00170000
+*                                                                       00180000
+*                                                                       00190000
+* STATEMENT FORMS:                                                      00200000
+*                                                                       00210000
+*    INSERT INTO TABLE-NAME VALUES( COL1-VAL, COL2-VAL, ...)            00220000
+*                                                                       00230000
+*    INSERT INTO TABLE-NAME ( COL1-NAME, COL2-NAME, ... )               00240000
+*                     VALUES( COL1-VAL,  COL2-VAL, ... )                00250000
+*                                                                       00260000
+*                                                                       00270000
+* ON ENTRY:                                                             00280000
+*                                                                       00290000
+*    R1  contains the address of a parameter list constructed           00300000
+*        as follows:                                                    00310000
+*                                                                       00320000
+*        +00 - addr of semantic summary (SQLSEMAL)                      00330000
+*        +04 - addr of VDBLOAD result   (VDBLRET)                       00340000
+*                                                                       00350000
+*                                                                       00360000
+*    R0  the address of a 256 byte workarea or zero if no               00370000
+*        workarea is provided                                           00380000
+*                                                                       00390000
+*                                                                       00400000
+* ON EXIT:                                                              00410000
+*                                                                       00420000
+*    R15 contains one of the following return codes                     00430000
+*                                                                       00440000
+*        RC00 - insert statement parse completed w/o error              00450000
+*                                                                       00460000
+*        RC04 - reserved                                                00470000
+*                                                                       00480000
+*        RC08 - insert statement does not satisfy constraints           00490000
+*                                                                       00500000
+*               RSN00 - values clause omitted or exeeds VDB             00510000
+*               RSN04 - values list mismatches the column list          00520000
+*               RSN08 - multiple references to a single column          00530000
+*                                                                       00540000
+*        RC12 - storage management failure                              00550000
+*                                                                       00560000
+**<DOC-OFF>****************************************************         00570000
+                                                                        00580000
+         EJECT                                                          00590000
+***************************************************************         00600000
+*                                                                       00610000
+* MAINTENANCE:                                                          00620000
+*                                                                       00630000
+*    12/16/94 R. Turgeon      PAR# 157382                        157382 00640000
+*             Replaced STGSERV storage management interface      157382 00650000
+*             from prototype with STGGET, eliminating the        157382 00660000
+*             limitations imposed by fixed length workareas.     157382 00670000
+*                                                                       00680000
+*    08/28/95 R. Turgeon                                                00690000
+*             VDBLOAD cache implementation. VDBLOADP parameter          00700000
+*             block split into distinct request/return areas.           00710000
+*                                                                       00720000
+***************************************************************         00730000
+                                                                        00740000
+         EJECT                                                          00750000
+         #WORK LENGTH=256                                               00760000
+         #ENDWORK                                                       00770000
+                                                                        00780000
+         EJECT                                                          00790000
+         SQLSEMAL ,          SQL SEMANTIC SUMMARY                       00800000
+                                                                        00810000
+         EJECT                                                          00820000
+         VDBLOADP  ,         VDB DEFINITION                             00830000
+                                                                        00840000
+         EJECT                                                          00850000
+         @TBCOLDF ,          TABLE COLUMN DEFINITION                    00860000
+                                                                        00870000
+         EJECT                                                          00880000
+         ICATALOG COLUMN     SYSCOLUMNS                                 00890000
+                                                                        00900000
+         EJECT                                                          00910000
+         EQUS  ,                                                        00920000
+                                                                        00930000
+         EJECT                                                          00940000
+ISQPINS  #ENTER PREG=R8,WAPASS=YES                                      00950000
+                                                                        00960000
+         USING ITASK,R10          STDENV                                00970000
+                                                                        00980000
+         EJECT                                                          00990000
+***************************************************************         01000000
+*                                                                       01010000
+*   Accept executor plist and semantic summary                          01020000
+*                                                                       01030000
+***************************************************************         01040000
+                                                                        01050000
+         L     R7,0(,R8)          SEMMANTIC SUMMARY                     01060000
+         USING SQSEMAL,R7         LIFE OF FUNCTION                      01070000
+                                                                        01080000
+         L     R6,4(,R8)          VDB DEFINITION                        01090000
+         USING VDBLRET,R6         LIFE OF FUNCTION                      01100000
+                                                                        01110000
+         CLI   SQSQUERY,SQSQ_INS  INSERT REQUEST?                       01120000
+         BNE   NORMRET            NOT RELAVENT OTHERWISE                01130000
+         ICM   R0,15,SQSAINSC     PREV CONVERTED (FROM PREPARE, ETC)?   01140000
+         BNZ   NORMRET            DONE IF SO                            01150000
+                                                                        01160000
+         EJECT                                                          01170000
+**<DOC-ON>*****************************************************         01180000
+*                                                                       01190000
+*   Column-column-list / values cardinality tests                       01200000
+*                                                                       01210000
+*   All forms of the insert statement include a VALUES clause.          01220000
+*   If a comma-column-list was explicitly provided, its size            01230000
+*   must match that of the values list.  If the comma-column-           01240000
+*   list is omitted, the values correspond in sequence to the           01250000
+*   column order specified in the VDB table.                            01260000
+*                                                                       01270000
+*   In either case, the goal of this routine is to create a             01280000
+*   predicate queue in SQSAINSC that associates column names            01290000
+*   to values in predicate format.                                      01300000
+*                                                                       01310000
+**<DOC-OFF>****************************************************         01320000
+                                                                        01330000
+         MVC   SQSAINSC(3*4),SQSAVALS   VALUES IN PREDICATE FORMAT      01340000
+                                                                        01350000
+         ICM   R2,15,SQSAVALS+8   VALUE LIST PROVIDED?                  01360000
+         BZ    ERR_VALS           VALUES CLAUSE IS REQUIRED             01370000
+                                                                        01380000
+         ICM   R0,15,SQSASELC+8   COLUMN LIST PROVIDED?                 01390000
+         BZ    INSNOCOL           CLASH VALUES WITH VDB DEFINITION      01400000
+                                                                        01410000
+         CR    R2,R0              COLUMN LIST SIZE = VALUE LIST SIZE?   01420000
+         BNE   ERRMATCH           ERROR IF MISMATCH                     01430000
+                                                                        01440000
+*--------------------------------------------------------------         01450000
+*   associate explicitly named columns with their corr values           01460000
+*--------------------------------------------------------------         01470000
+                                                                        01480000
+         L     R5,SQSAINSC        COMPLETE <COLUMN = VALUE> PREDICATES  01490000
+         USING SBPTERM,R5         PREDICATE FORMAT                      01500000
+         L     R4,SQSASELC        COLUMN NAMES AND ORDERING             01510000
+         USING SQREFP,R4          TOKEN REFERENCE LIST                  01520000
+                                                                        01530000
+INSCOLS  DS    0H                 INSERT COL NAMES FROM EXPLICIT LIST   01540000
+         L     R3,SQRNODE         COLUMN REFERENCE                      01550000
+         OI    SQCFLAGS-SQCOLREF(R3),SQCF$VAL  APPEARS IN VALUES CLAUSE 01560000
+         LH    R9,SQCUCNT-SQCOLREF(,R3) GET COLUMN REFERENCE COUNT      01570000
+         SH    R9,=H'1'           COLUMN REFERENCED MULTIPLE TIMES      01580000
+         BP    ERR_DUP            ERROR IF DUPLICATED COLUMN            01590000
+                                                                        01600000
+         MVC   SBPACOL,SQRNODE    PTR TO COLUMN DEFINITION              01610000
+         MVC   SBPCOL@C,SQR@C     RETAIN CLEX REF                       01620000
+                                                                        01630000
+         L     R4,SQRLINK         ADVANCE TO NEXT COLUMN NAME           01640000
+         ICM   R5,15,SBPLINK      # COLUMNS = # VALUES                  01650000
+         BNZ   INSCOLS            COMPLETE THE PREDICATES               01660000
+         B     NORMRET            FUNCTION COMPLETE                     01670000
+         DROP  R4,R5              SQREFP, SBPTERM                       01680000
+                                                                        01690000
+         EJECT                                                          01700000
+**<DOC-ON>*****************************************************         01710000
+*                                                                       01720000
+*   Values associate with columns in VDB column entry sequence.         01730000
+*   The number of values provided must agree with the degree            01740000
+*   of the target VDB table.                                            01750000
+*                                                                       01760000
+**<DOC-OFF>****************************************************         01770000
+                                                                        01780000
+INSNOCOL DS    0H                                                       01790000
+         L     R5,SQSAINSC        COMPLETE <COLUMN = VALUE> PREDICATES  01800000
+         USING SBPTERM,R5         PREDICATE FORMAT                      01810000
+                                                                        01820000
+         L     R3,SQSAINSC+8      NUMBER OF VALUES PROVIDED             01830000
+         CH    R3,LVDB#COL        EQUALS NUMBER OF COLUMNS?             01840000
+         BNE   ERR_VALS           ERROR IF NOT                          01850000
+                                                                        01860000
+*--------------------------------------------------------------         01870000
+*   construct column reference nodes from VDB SYSCOL and value          01880000
+*--------------------------------------------------------------         01890000
+                                                                        01900000
+         L     R4,LVDBACOL        ORIGIN OF COLUMN LIST                 01910000
+         USING SYSCOLS,R4         TRUNCATED COLUMN ENTRIES              01920000
+                                                                        01930000
+INSNMAKE DS    0H                 CREATE COLUMN ENTRIES FROM VDB DEF    01940000
+         STGGET SQCLN,QH=SQSPOOL  ACQUIRE STORAGE FOR COLUMN NODE       01950000
+         BNZ   ERR_STG            STORAGE MANAGEMENT FAILURE            01960000
+                                                                        01970000
+         LR    R2,R1              CONSTRUCT BASIC COLUMN ENTRY          01980000
+         USING SQCOLREF,R2        BASE COLUMN FORMAT                    01990000
+         OI    SQCFLAGS,SQCF$VAL  APPEARS IN VALUES CLAUSE              02000000
+                                                                        02010000
+         LA    R0,L'SQCOLNM       COLUMN NAME LENGTH                    02020000
+         STH   R0,SQCOLNML                                              02030000
+         MVC   SQCOLNM,SCOLNAME   COLUMN NAME                           02040000
+                                                                        02050000
+         MVC   SQCOLINK,SQSACOLS  ADD TO TOP OF UNORDERED LIST          02060000
+         ST    R2,SQSACOLS                                              02070000
+         ST    R2,SBPACOL         COMPLETE <COLUMN = VALUE> PREDICATE   02080000
+         DROP  R2                 SQCOLREF                              02090000
+                                                                        02100000
+*--------------------------------------------------------------         02110000
+*   advance to next column / value pair                                 02120000
+*--------------------------------------------------------------         02130000
+                                                                        02140000
+         AH    R4,LVDBLCOL        ADDRESS NEXT VDB COLUMN               02150000
+         ICM   R5,15,SBPLINK      LOCATE NEXT INCOMPLETE ASSIGNMENT     02160000
+         BNZ   INSNMAKE           ASSOCIATIONS FOR ALL COLUMNS          02170000
+         DROP  R4,R5              SYSCOLS, SBPTERM                      02180000
+                                                                        02190000
+         EJECT                                                          02200000
+***************************************************************         02210000
+*                                                                       02220000
+*   Return completion status to caller                                  02230000
+*                                                                       02240000
+***************************************************************         02250000
+                                                                        02260000
+NORMRET  DS    0H            SUCCESSFUL COMPLETION                      02270000
+         LA    R15,RC00                                                 02280000
+         SR    R0,R0         RSNCODE NOT DEFINED                        02290000
+         B     RETURN                                                   02300000
+                                                                        02310000
+                                                                        02320000
+*------- INSERT STATEMENT VIOLATES CONSTRAINTS ----------------         02330000
+                                                                        02340000
+ERR_VALS DS    0H            NO VALUES CLAUSE OR EXCEEDS VDB CAPACITY   02350000
+         LA    R0,RSN00                                                 02360000
+         SR    R0,R0         RSNCODE NOT DEFINED                        02370000
+         B     ERR_CNFL                                                 02380000
+                                                                        02390000
+ERRMATCH DS    0H            VALUES CLAUSE MISMATCHES COLUMN LIST       02400000
+         LA    R0,RSN04                                                 02410000
+         B     ERR_CNFL                                                 02420000
+                                                                        02430000
+ERR_DUP  DS    0H            MULTIPLE REFERENCES TO A SINGLE COLUMN     02440000
+         LA    R0,RSN08                                                 02450000
+         B     ERR_CNFL                                                 02460000
+                                                                        02470000
+ERR_CNFL DS    0H            INSERT STMT VIOLATES CONSTRAINTS           02480000
+         LA    R15,RC08                                                 02490000
+         B     RETURN                                                   02500000
+                                                                        02510000
+                                                                        02520000
+*------- SOFTWARE ERRORS --------------------------------------         02530000
+                                                                        02540000
+ERR_STG  DS    0H            STORAGE MANAGEMENT ERROR                   02550000
+         LR    R0,R15        STG SERVICE RETCODE IS LOCAL RSNCODE       02560000
+         LA    R15,RC12                                                 02570000
+                                                                        02580000
+*--------------------------------------------------------------         02590000
+*   return to requester                                                 02600000
+*--------------------------------------------------------------         02610000
+                                                                        02620000
+RETURN   DS    0H                                                       02630000
+         #EXIT ,                                                        02640000
+                                                                        02650000
+         EJECT                                                          02660000
+***************************************************************         02670000
+*                                                                       02680000
+*   Local read-only working storage                                     02690000
+*                                                                       02700000
+***************************************************************         02710000
+                                                                        02720000
+         LTORG ,                                                        02730000
+                                                                        02740000
+         EJECT                                                          02750000
+         PRINT NOGEN                                                    02760000
+         ICVT  ,                                                        02770000
+         ITASK ,                                                        02780000
+         END   ,                                                        02790000

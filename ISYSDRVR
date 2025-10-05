@@ -1,0 +1,1079 @@
+ISYSDRVR TITLE 'INTEGRATOR - INTEGRATOR-TO-INTEGRATOR SESSION DRIVER'   00010000
+**<DOC-ON>************************************************************* 00020000
+*                                                                       00030000
+* ROUTINE: ISYSDRVR - INTEGRATOR-TO-INTEGRATOR SESSION DRIVER           00040000
+*                                                                       00050000
+* DESCRIPTION: THE SESSION DRIVER IS STARTED AS A NEW PROC UNDER        00060000
+*              THE SESSION ITASK WHEN A NEW SESSION IS ESTABLISHED.     00070000
+*                                                                       00080000
+* ON ENTRY:                                                             00090000
+*                                                                       00100000
+*    R15 = ENTRY POINT ADDRESS                                          00110000
+*    R14 = RETURN ADDRESS                                               00120000
+*    R13 = AVAILABLE SAVE AREA                                          00130000
+*    R11 = ICVT ADDRESS                                                 00140000
+*    R10 = ITASK ADDRESS                                                00150000
+*    R01 = ADDRESS OF THE SESSION TOKEN                                 00160000
+*                                                                       00170000
+* ON EXIT:                                                              00180000
+*                                                                       00190000
+*    R15 = 0                                                            00200000
+*    R00 = 0                                                            00210000
+*    R01 = 0                                                            00220000
+*                                                                       00230000
+*    ALL OTHER REGISTERS ARE RESTORED.                                  00240000
+*                                                                       00250000
+**<DOC-OFF>************************************************************ 00260000
+                                                                        00270000
+         EJECT ,                                                        00280000
+*********************************************************************** 00290000
+*                                                                       00300000
+* MAINTENANCE:                                                          00310000
+*                                                                       00320000
+*   12/31/93 RANDY WITEK                                                00330000
+*   04/04/95 RANDY WITEK - FIX $SESS_SEND_DATA ERROR DUE TO SLOW SDT    00340000
+*   10/26/95 RANDY WITEK - FIX MVS LEVEL DEPENDENT TIME USAGE           00350000
+*                                                                       00360000
+*********************************************************************** 00370000
+                                                                        00380000
+         EQUS  ,                  GENERAL EQUATES                       00390000
+                                                                        00400000
+RITASK   EQU   R10                                                      00410000
+RIVTAM   EQU   R9                                                       00420000
+RIPCB    EQU   R8                                                       00430000
+RISYS    EQU   R7                                                       00440000
+RMSG     EQU   R6                                                       00450000
+RIQTR    EQU   R5                                                       00460000
+RITWA    EQU   R4                                                       00470000
+                                                                        00480000
+         USING ITASK,RITASK       ESTABLISH ADDRESSIBILITY              00490000
+         USING IVTAMCVT,RIVTAM    ESTABLISH ADDRESSIBILITY              00500000
+         USING IPCB,RIPCB         ESTABLISH ADDRESSIBILITY              00510000
+         USING ISY,RISYS          ESTABLISH ADDRESSIBILITY              00520000
+         USING TMSGSTD,RMSG       ESTABLISH ADDRESSABILITY              00530000
+         USING IQT,RIQTR          ESTABLISH ADDRESSABILITY              00540000
+         USING ITWA,RITWA         ESTABLISH ADDRESSABILITY              00550000
+                                                                        00560000
+WORKAREA #WORK ,                  GENERAL WORKAREA                      00570000
+                                                                        00580000
+SESSPARM DS    F                  $SESS SESSION PARAMETER WORD          00590000
+@SPL     DS    A                  DEDICATED $SESS RECEIVE PLIST PTR     00600000
+                                                                        00610000
+MSGDESC  DS    0A,0F              MESSAGE BUFFER DESCRIPTOR             00620000
+MSGBUFR  DS    F                     MESSAGE BUFFER ADDRESS             00630000
+MSGBUFL  DS    F                     MESSAGE BUFFER LENGTH              00640000
+MSGDESCL EQU   *-MSGDESC          MESSAGE BUFFER DESCRIPTOR LENGTH      00650000
+                                                                        00660000
+SESSTOKN DS    XL8                $SESS TOKEN                           00670000
+                                                                        00680000
+$SESSPL  $SESS MF=L,FIELDS=(,,,,,,,,)   MODEL $SESS PLIST               00690000
+$SESSPLN EQU   *-$SESSPL          LENGTH OF PLIST                       00700000
+                                                                        00710000
+$RMGRMFL $RESMGR MF=L             $RESMGR PLIST CONSTRUCTION            00720000
+                                                                        00730000
+$TASKMFL $TASK MF=L               $TASK REQUEST PLIST                   00740000
+                                                                        00750000
+TIMERMFL DS    XL(L'TSETLIST)     STIMERM PLIST CONSTRUCTION            00760000
+TIMEINTV DS    F                                                        00770000
+                                                                        00780000
+RU       DS    A                  CURRENT MESSAGE ADDRESS               00790000
+RULEN    DS    F                  CURRENT MESSAGE LENGTH                00800000
+                                                                        00810000
+RETR15   DS    F                                                        00820000
+RETR0    DS    F                                                        00830000
+RETR1    DS    F                                                        00840000
+RETREGS  EQU   RETR15,*-RETR15    RETURN REGSITERS                      00850000
+                                                                        00860000
+SUB0SAVE DS    16F                LOCAL SUBROUTINE SAVEAREA #1          00870000
+SUB1SAVE DS    16F                SAVEAREA FOR MESSAGE PROCESSING RTNS  00880000
+WRK256   DS    XL256              GENERAL PURPOSE WORKAREA              00890000
+                                                                        00900000
+FLAG     DS    X                                                        00910000
+FLAGLOCK EQU   X'80'              VTAM GLOBAL LOCK HELD                 00920000
+FLAGLCKD EQU   X'40'              VTAM GLOBAL LOCK HELD ON ENTRY        00930000
+FLAGORIG EQU   X'20'              THIS SIDE IS SESSION ORIGINATOR       00940000
+                                                                        00950000
+WORKLEN  #ENDWORK ,               WORKAREA END                          00960000
+                                                                        00970000
+         $MSGDFT PREFIX=ICTPID,COMPID='VTM',TABLE=*#MSGS,              +00980000
+               CONID=*ICTCONID,CONNAME=ICTCONNM,                       +00990000
+               MF=(E,WRK256)                                            01000000
+                                                                        01010000
+ISYSDRVR #ENTER BASE=R12,                                              +01020000
+               PREG=R3,            R1 --> R3                           +01030000
+               SAVE=(YES,NOFRAME),                                     +01040000
+               AMODE=31,                                               +01050000
+               RMODE=ANY                                                01060000
+                                                                        01070000
+*---------------------------------------------------------------------- 01080000
+* INITIALIZATION                                                        01090000
+*---------------------------------------------------------------------- 01100000
+                                                                        01110000
+         SR    RISYS,RISYS        SHOW NO ISYS YET                      01120000
+         L     RIPCB,TSKPCBC      IPCB ADDRESS                          01130000
+         L     RIVTAM,ICTVTCVT    IVTAMCVT ADDRESS                      01140000
+                                                                        01150000
+         LTR   R3,R3              ASSERT TOKEN PROVIDED                 01160000
+         BZ    ABN_SESS                                                 01170000
+         SR    R2,R2              PREPARE FOR INSERT                    01180000
+         ICM   R2,1,0(R3)         LENGTH OF SESSION TOKEN               01190000
+         BZ    ABN_SESS           INVALID SESSION TOKEN                 01200000
+         C     R2,=A(L'SESSTOKN)  VALIDATE TOKEN LENGTH                 01210000
+         BH    ABN_SESS           INVALID SESSION TOKEN                 01220000
+         BCTR  R2,0               PREPARE FOR COPY                      01230000
+         EX    R2,*+4                                                   01240000
+         MVC   SESSTOKN(*-*),1(R3)                                      01250000
+                                                                        01260000
+         $RETSTOR (R3),                                                +01270000
+               OWNER=ITASK        RELEASE PLIST                         01280000
+                                                                        01290000
+*                                                                       01300000
+* EXTRACT SESSION PARM WORD                                             01310000
+*---------------------------------------------------------------------- 01320000
+                                                                        01330000
+         $SESS $SESS_EXTRACT,     EXTRACT SESSION PARM WORD            +01340000
+               SESSION=SESSTOKN,                                       +01350000
+               FIELDS=((PARM,SESSPARM)),                               +01360000
+               ERRET=ABN_SESS,                                         +01370000
+               MF=(E,$SESSPL)                                           01380000
+                                                                        01390000
+         OC    SESSPARM,SESSPARM  ARE WE THE SESSION ORIGINATOR?        01400000
+         BZ    NOTORIG            BRANCH IF NOT                         01410000
+         OI    FLAG,FLAGORIG      REMEMBER WE ARE ORIGINATOR            01420000
+                                                                        01430000
+NOTORIG  DS    0H                                                       01440000
+                                                                        01450000
+*                                                                       01460000
+* UPDATE ISYS BLOCK TO SHOW SYSTEMS SESSION IS ACTIVE                   01470000
+*---------------------------------------------------------------------- 01480000
+                                                                        01490000
+         $MSG  018,                                                    +01500000
+               FIELDS=(TSKNAME)   ISSUE CONNECTION ESTABLISHED MESSAGE  01510000
+                                                                        01520000
+         BAS   R14,VTAMLOCK       SERIALIZE THE ISYS CHAIN              01530000
+                                                                        01540000
+         $SYSTEMS FIND,                                                +01550000
+               APPLID=TSKNAME,                                         +01560000
+               ERRET=UNSTART,                                          +01570000
+               MF=(E,MFE_LIST)    LOCATE AN ISYS FOR OUR PARTNER        01580000
+                                                                        01590000
+X        USING SYLIST,R1                                                01600000
+         L     RISYS,X.SYLRSNCD   ISYS ADDRESS IS THE REASON CODE       01610000
+         DROP  X                                                        01620000
+                                                                        01630000
+         LA    RITWA,ISYPTWA      PRIMARY-TO-SECONDARY ITWA             01640000
+         MVI   ITWFLOW,X'80'      SET THE FLOW INDICATOR                01650000
+         SR    RITWA,RITWA        NO ITWA                               01660000
+                                                                        01670000
+         TM    ISYF1,ISYF1ACT     IS THERE A RACE TO ACTIVATE?          01680000
+         BO    RACECOND           BRANCH IF YES, WE LOST THE RACE       01690000
+         OI    ISYF1,ISYF1ACT     SHOW THAT IT IS ACTIVE                01700000
+         MVC   ISYTNAME,TSKNAME   SET THE TASK NAME                     01710000
+         ST    RITASK,ISYITASK    SET THE ITASK ADDRESS                 01720000
+         MVC   ISYPNAME,PCBNAME   SET THE PROCESS NAME                  01730000
+         ST    RIPCB,ISYIPCB      SET THE IPCB ADDRESS                  01740000
+         MVC   ISYTK,SESSTOKN     SET THE SESSION TOKEN                 01750000
+         L     R2,ISYTKUSR        GET IVUSER TOKEN WORD                 01760000
+                                                                        01770000
+         $RESMGR ADD,                   ADD A RESOURCE MANAGER         +01780000
+               TOKEN=ISYRMTOK,          PUT RESMGR TOKEN HERE          +01790000
+               OWNER=(RIPCB),           THE NEW IPCB                   +01800000
+               ROUTINE=*ISY@MGR,        ROUTINE IS ISYSMGR             +01810000
+               PARM=(R2),               R1 PARM IS IVUSER TOKEN WORD   +01820000
+               MF=(E,$RMGRMFL)                                          01830000
+                                                                        01840000
+         BAS   R14,VTAMUNLK       DESERIALIZE THE ISYS CHAIN            01850000
+                                                                        01860000
+*                                                                       01870000
+* REMEMBER IF WE ARE THE SESSION ORIGINATOR                             01880000
+*---------------------------------------------------------------------- 01890000
+                                                                        01900000
+         TM    FLAG,FLAGORIG      ARE WE THE SESSION ORIGINATOR?        01910000
+         BNO   QVALTRAN           BRANCH IF NOT, QUEUE VALIDATION TRAN  01920000
+         OI    ISYF1,ISYF1ORI     FLAG SESSION ORIGINATOR               01930000
+         OI    ISYF1,ISYF1SDT     WAITING FOR SDT                       01940000
+                                                                        01950000
+*                                                                       01960000
+* QUEUE A CONNECTION VALIDATION TRANSACTION                             01970000
+*---------------------------------------------------------------------- 01980000
+                                                                        01990000
+QVALTRAN DS    0H                                                       02000000
+                                                                        02010000
+X        USING TMSGSTD,WRK256                                           02020000
+         XC    X.TMSGSTD(TMSGSLN),X.TMSGSTD                             02030000
+         MVC   X.TMSGINFL,=F'12'                                        02040000
+         MVC   X.TMSGINFO(4),=F'12'                                     02050000
+         MVC   X.TMSGINFO+4(8),=CL8'ITRNTEST'                           02060000
+         LA    RMSG,WRK256        ADDRESS OF FIRST TRANSACTION          02070000
+         O     RMSG,=X'80000000'  HI BIT MEANS QUEUE AT FRONT           02080000
+         BAS   R14,WORK           QUEUE THE FIRST TRANSACTION           02090000
+         DROP  X                                                        02100000
+                                                                        02110000
+         B     PREPSESS           CONTINUE WITH STARTUP                 02120000
+                                                                        02130000
+*                                                                       02140000
+* THE PARTNER SYSTEM IS NOT DEFINED/RACE CONDITION. KILL THE CONNECTION 02150000
+*---------------------------------------------------------------------- 02160000
+                                                                        02170000
+RACECOND DS    0H                                                       02180000
+                                                                        02190000
+         $MSG  028,                                                    +02200000
+               FIELDS=(TSKNAME)   ISSUE "RACE CONDITION" MESSAGE        02210000
+                                                                        02220000
+         B     UNSTEND                                                  02230000
+                                                                        02240000
+UNSTART  DS    0H                                                       02250000
+                                                                        02260000
+         $MSG  025,                                                    +02270000
+               FIELDS=(TSKNAME)   ISSUE "IS NOT DEFINED" MESSAGE        02280000
+                                                                        02290000
+         B     UNSTEND                                                  02300000
+                                                                        02310000
+UNSTEND  DS    0H                                                       02320000
+                                                                        02330000
+         BAS   R14,VTAMUNLK       DESERIALIZE THE ISYS CHAIN            02340000
+         SR    RISYS,RISYS        SHOW NO ISYS                          02350000
+         BAS   R14,$SESSEND       ISSUE END SESSION REQUEST             02360000
+         B     STOP               AND END THE DRIVER PROCESS            02370000
+                                                                        02380000
+*---------------------------------------------------------------------- 02390000
+*                                                                       02400000
+*   PREPARE FOR INPUT WHICH CAN BE IN THE FORM OF ANY OF THE            02410000
+*   FOLLOWING:                                                          02420000
+*                                                                       02430000
+*      1) STOP OR CANCEL                                                02440000
+*      2) MESSAGE INPUT                                                 02450000
+*      3) SESSION DATA                                                  02460000
+*                                                                       02470000
+*   SESSION DATA IS CAPTURED BY ISSUING AN ASYNC RECEIVE                02480000
+*   WHICH REMAINS OUTSTANDING FOR THE DURATION OF THE SESSION.          02490000
+*                                                                       02500000
+*   WHEN ALL MESSAGES HAVE BEEN PROCESSED, THE MESSAGE BUFFER           02510000
+*   IS RELEASED PRIOR TO ENTERING THE NEXT EVENT WAIT.                  02520000
+*                                                                       02530000
+*---------------------------------------------------------------------- 02540000
+                                                                        02550000
+PREPSESS DS    0H                                                       02560000
+                                                                        02570000
+         BAS   R14,TMSGRECV       PREPARE FOR INITIAL MESSAGE RECEIVE   02580000
+                                                                        02590000
+         BAS   R14,SESSRECV       PREPARE FOR SESSION RECEIVE           02600000
+         BNZ   ABN_SESS           ERROR IN SESSION RECEIVE API          02610000
+                                                                        02620000
+*---------------------------------------------------------------------- 02630000
+* WAIT FOR NEXT EVENT                                                   02640000
+*---------------------------------------------------------------------- 02650000
+                                                                        02660000
+PROCWAIT DS    0H                                                       02670000
+                                                                        02680000
+         BAS   R14,FREEMSG        RELEASE MESSAGE BUFFER STORAGE        02690000
+                                                                        02700000
+*                                                                       02710000
+* IF WE ARE DRAINING & ALL IS QUIET, END THE SESSION                    02720000
+*---------------------------------------------------------------------- 02730000
+                                                                        02740000
+         TM    ISYF1,ISYF1DRN     ARE WE DRAINING?                      02750000
+         BNO   PROCNDRN           BRANCH IF NOT                         02760000
+                                                                        02770000
+         ICM   R1,15,ISYWQ1ST     IS THERE WORK TO DO?                  02780000
+         BP    PROCNDRN           BRANCH IF YES                         02790000
+                                                                        02800000
+         LA    RITWA,ISYPTWA      P-TO-S TRANSACTION WORK AREA          02810000
+         TM    ITWF1,ITWF1ACT     IS A TRANSACTION ACTIVE?              02820000
+         BO    PROCNDRN           BRANCH IF YES                         02830000
+                                                                        02840000
+         LA    RITWA,ISYSTWA      S-TO-P TRANSACTION WORK AREA          02850000
+         TM    ITWF1,ITWF1ACT     IS A TRANSACTION ACTIVE?              02860000
+         BO    PROCNDRN           BRANCH IF YES                         02870000
+                                                                        02880000
+         BAS   R14,$SESSEND       START THE SESSION TERMINATION         02890000
+         B     PROCWNOW           AND WAIT                              02900000
+                                                                        02910000
+PROCNDRN DS    0H                                                       02920000
+                                                                        02930000
+*                                                                       02940000
+* WE ARE NOT DRAINING.  START A QUEUED TRANSACTION IF APPROPRIATE       02950000
+*---------------------------------------------------------------------- 02960000
+                                                                        02970000
+PROCTRAN DS    0H                                                       02980000
+                                                                        02990000
+         TM    ISYF1,ISYF1SDT     WAITING FOR SDT                       03000000
+         BO    PROCWNOW           BRANCH IF NO SDT YET                  03010000
+                                                                        03020000
+         ICM   R1,15,ISYWQ1ST     IS THERE WORK TO DO?                  03030000
+         BNP   PROCWNOW           BRANCH IF NOT                         03040000
+                                                                        03050000
+         LA    RITWA,ISYPTWA      ASSUME P-TO-S TRANSACTION WORK AREA   03060000
+         TM    FLAG,FLAGORIG      ARE WE THE ORIGINATOR (SECONDARY)?    03070000
+         BNO   PROCTACT           BRANCH IF NOT, SEE IF TRAN IS ACTIVE  03080000
+         LA    RITWA,ISYSTWA      USE    S-TO-P TRANSACTION WORK AREA   03090000
+                                                                        03100000
+PROCTACT DS    0H                                                       03110000
+                                                                        03120000
+         TM    ITWF1,ITWF1ACT     IS A TRANSACTION ACTIVE?              03130000
+         BO    PROCWNOW           BRANCH IF YES, CAN'T START NEW ONE    03140000
+                                                                        03150000
+         LR    R1,RITWA           ITWA ADDRESS                          03160000
+         O     R1,=X'80000000'    FLAG AS ITWA ADDRESS                  03170000
+         SR    R0,R0              R0=0 --> START TRANSACTION            03180000
+         L     R15,ISY@RU         RECEIVE RU PROCESSOR ADDRESS          03190000
+         BASR  R14,R15            CALL THE PROCESSOR                    03200000
+                                                                        03210000
+         C     R15,=F'4'          TEST RETURN CODE                      03220000
+         BE    PROCTRAN             4 = FIND A TRANSACTION TO RUN       03230000
+         BL    PROCWNOW             0 = WAIT FOR WORK                   03240000
+         BAS   R14,$SESSEND         8 = FATAL PROTOCOL ERROR            03250000
+         B     PROCWNOW           AND WAIT                              03260000
+                                                                        03270000
+*                                                                       03280000
+* WAIT NOW                                                              03290000
+*---------------------------------------------------------------------- 03300000
+                                                                        03310000
+PROCWNOW DS    0H                                                       03320000
+                                                                        03330000
+         $TASK WAIT,                                                   +03340000
+               MESSAGE=MESSAGE,                                        +03350000
+               STOP=STOP,                                              +03360000
+               CANCEL=CANCEL,                                          +03370000
+               MF=(E,$TASKMFL)                                          03380000
+                                                                        03390000
+*---------------------------------------------------------------------- 03400000
+* PROCESS EVENTS OTHER THAN MESSAGE, STOP, AND CANCEL                   03410000
+*---------------------------------------------------------------------- 03420000
+                                                                        03430000
+         LM    R1,R3,EVCRTNTB     EVENT TYPE / PROCESSING RTN TABLE     03440000
+                                                                        03450000
+PROCSCAN DS    0H                 MATCH EVENT TO PROCESSING ROUTINE     03460000
+                                                                        03470000
+         C     R15,$ETABTYP(,R1)  MATCHING EVENT CODE                   03480000
+         BE    PROCMATC           END SCAN IF SO                        03490000
+         BXLE  R1,R2,PROCSCAN     AGAIN IF NOT                          03500000
+         B     PROCWAIT           IGNORE SPURIOUS EVENT                 03510000
+                                                                        03520000
+PROCMATC DS    0H                 EVENT IDENTIFIED                      03530000
+                                                                        03540000
+         L     R15,$ETABRTN(,R1)  EVENT PROCESSING RTN EPA              03550000
+         BASR  R14,R15            CALL                                  03560000
+         B     PROCWAIT           AWAIT NEXT EVENT                      03570000
+                                                                        03580000
+*---------------------------------------------------------------------- 03590000
+* EVENT CODE / PROCESSING ROUTINE TABLE                                 03600000
+*---------------------------------------------------------------------- 03610000
+                                                                        03620000
+EVCRTNTB DC    A(ETYPTABL,8,ETYPTABE-1)                                 03630000
+                                                                        03640000
+$ETABTYP EQU   0,4                EVENT TYPE CODE                       03650000
+$ETABRTN EQU   4,4                EVENT PROCESSING ROUTINE EPA          03660000
+                                                                        03670000
+ETYPTABL DS    0A                                                       03680000
+         DC    A(EC$SESS_RECEIVE,SESSDATA)                              03690000
+ETYPTABE EQU   *                                                        03700000
+                                                                        03710000
+*---------------------------------------------------------------------- 03720000
+* ROUTINE: SESSDATA - $SESS RECEIVE COMPLETION EVENT                    03730000
+*---------------------------------------------------------------------- 03740000
+                                                                        03750000
+SESSDATA DS    0H                                                       03760000
+                                                                        03770000
+         STM   R0,R15,SUB1SAVE    EVENT PROCESSOR ENTRY                 03780000
+                                                                        03790000
+*                                                                       03800000
+* CALL THE RECEIVE SPLIST PROCESSOR                                     03810000
+*---------------------------------------------------------------------- 03820000
+                                                                        03830000
+         L     R1,@SPL            PASS SPLIST ADDRESS IN R1             03840000
+         LR    R0,RISYS           PASS ISYS IN R0                       03850000
+         L     R15,ISY@RECV       RECEIVE SPLIST PROCESSOR ADDRESS      03860000
+         BASR  R14,R15            CALL THE PROCESSOR                    03870000
+                                                                        03880000
+*                                                                       03890000
+* IF THERE IS AN ERROR START SESSION TERMINATION                        03900000
+*---------------------------------------------------------------------- 03910000
+                                                                        03920000
+         LTR   R15,R15            RECEIVE OK?                           03930000
+         BZ    SDATOK             BRANCH IF YES                         03940000
+         BAS   R14,$SESSEND       ISSUE END SESSION REQUEST             03950000
+         B     SDATEXIT           AND RETURN                            03960000
+                                                                        03970000
+*                                                                       03980000
+* RECEIVE COMPLETED OK.  IF THERE IS DATA CALL THE RU PROCESSOR.        03990000
+*---------------------------------------------------------------------- 04000000
+                                                                        04010000
+SDATOK   DS    0H                                                       04020000
+                                                                        04030000
+         LTR   R0,R0              ANY DATA                              04040000
+         BZ    SDATEXIT           BRANCH IF NOT                         04050000
+         C     R0,=F'12'          AT LEAST 12 BYTES?                    04060000
+         BL    ABN_DATA           BRANCH IF NOT, WHAT IS IT?            04070000
+         ST    R0,RULEN           SAVE DATA LENGTH                      04080000
+         ST    R1,RU              SAVE DATA ADDRESS                     04090000
+         L     R15,ISY@RU         RECEIVE RU PROCESSOR ADDRESS          04100000
+         BASR  R14,R15            CALL THE PROCESSOR                    04110000
+                                                                        04120000
+         C     R15,=F'4'          TEST RETURN CODE                      04130000
+         BNH   SDATRET              0/4 = RELEASE MESSAGE BUFFER        04140000
+         BAS   R14,$SESSEND         8   = FATAL PROTOCOL ERROR          04150000
+         B     SDATRET            AND RELEASE MESSAGE BUFFER            04160000
+                                                                        04170000
+*                                                                       04180000
+* RELEASE THE RECEIVE BUFFER STORAGE                                    04190000
+*---------------------------------------------------------------------- 04200000
+                                                                        04210000
+SDATRET  DS    0H                                                       04220000
+                                                                        04230000
+         $RETSTOR *RU,                                                 +04240000
+               OWNER=(RITASK)     RELEASE THE MESSAGE STORAGE           04250000
+                                                                        04260000
+*                                                                       04270000
+* PROCESSING COMPLETE, REISSUE RECEIVE REQUEST AND RETURN               04280000
+*---------------------------------------------------------------------- 04290000
+                                                                        04300000
+SDATEXIT DS    0H                                                       04310000
+                                                                        04320000
+         BAS   R14,SESSRECV       REISSUE RECEIVE                       04330000
+         LM    R0,R15,SUB1SAVE    RESTORE MAINLINE REGS                 04340000
+         BR    R14                RETURN                                04350000
+                                                                        04360000
+                                                                        04370000
+*---------------------------------------------------------------------- 04380000
+* ROUTINE: MESSAGE - MESSAGE EVENT                                      04390000
+*---------------------------------------------------------------------- 04400000
+                                                                        04410000
+MESSAGE  DS    0H                                                       04420000
+                                                                        04430000
+         BAS   R14,TMSGRECV       PREPARE FOR NEXT MESSAGE              04440000
+                                                                        04450000
+MSGNEXT  DS    0H                                                       04460000
+                                                                        04470000
+         SR    RMSG,RMSG          SHOW NO MESSAGE AVAILABLE             04480000
+         BAS   R14,GETMSG         RECEIVE THE MESSAGE                   04490000
+         BZ    MSGRECVD           MESSAGE ACQUIRED                      04500000
+         B     PROCWAIT           ALL MESSAGES RECEIVED                 04510000
+                                                                        04520000
+MSGRECVD DS    0H                                                       04530000
+                                                                        04540000
+         LA    RMSG,0(,R1)        ADDRESS OF MESSAGE HEADER             04550000
+         L     R0,TMSGTYPE        DETERMINE MESSAGE TYPE                04560000
+         LM    R1,R3,MSGRTNTB     MESSAGE TYPE / PROCESSING RTN TABLE   04570000
+                                                                        04580000
+MSGSCAN  DS    0H                 MATCH MESSAGE TO PROCESSING ROUTINE   04590000
+                                                                        04600000
+         C     R0,$MTABTYP(,R1)   MATCHING MESSAGE TYPE?                04610000
+         BE    MSGMATCH           END SCAN IF SO                        04620000
+         BXLE  R1,R2,MSGSCAN      AGAIN IF NOT                          04630000
+         B     MSGNEXT            IGNORE SPURIOUS MSG                   04640000
+                                                                        04650000
+MSGMATCH DS    0H                                                       04660000
+                                                                        04670000
+         L     R15,$MTABRTN(,R1)  MESSAGE PROCESSING RTN EPA            04680000
+         LA    R1,TMSGSTD         R1 <== MESSAGE ORIGIN                 04690000
+         BASR  R14,R15            CALL                                  04700000
+         B     MSGNEXT            PROCESS NEXT MESSAGE                  04710000
+                                                                        04720000
+*                                                                       04730000
+* MESSAGE TYPES / PROCESSING ROUTINE TABLE                              04740000
+*---------------------------------------------------------------------- 04750000
+                                                                        04760000
+$MTABTYP EQU   0,4                MESSAGE TYPE CODE                     04770000
+$MTABRTN EQU   4,4                MESSAGE PROCESSING ROUTINE EPA        04780000
+                                                                        04790000
+MSGRTNTB DC    A(MTYPTABL,8,MTYPTABE-1)                                 04800000
+MTYPTABL DS    0A                                                       04810000
+         DC    A(ITM_SYS_WORK,WORK)                                     04820000
+         DC    A(ITM_SYS_DRAIN,DRAIN)                                   04830000
+         DC    A(ITM_SYS_SESSEND,ENDSESS)                               04840000
+MTYPTABE EQU   *                                                        04850000
+                                                                        04860000
+*---------------------------------------------------------------------- 04870000
+*                                                                       04880000
+* ROUTINE: ENDSESS - PROCESS ENDSESS MESSAGE                            04890000
+*                                                                       04900000
+* DESCRIPTION:                                                          04910000
+*                                                                       04920000
+*    A $SESS END_SESSION REQUEST IS MADE WHICH WILL CAUSE THIS          04930000
+*    PROCESS TO BE POSTED WITH A 'STOP' REQUEST.                        04940000
+*                                                                       04950000
+* ON ENTRY:                                                             04960000
+*                                                                       04970000
+*    RMSG - ADDR OF INTERTASK MESSAGE ORIGIN (TMSGSTD)                  04980000
+*                                                                       04990000
+* ON EXIT:                                                              05000000
+*                                                                       05010000
+*    ALL REGISTERS ARE RESTORED                                         05020000
+*---------------------------------------------------------------------- 05030000
+                                                                        05040000
+ENDSESS  DS    0H                                                       05050000
+                                                                        05060000
+         STM   R0,R15,SUB1SAVE    MESSAGE PROCESSOR ENTRY               05070000
+                                                                        05080000
+*                                                                       05090000
+* PROCEED WITH SESSION TERMINATION                                      05100000
+*---------------------------------------------------------------------- 05110000
+                                                                        05120000
+         BAS   R14,$SESSEND       ISSUE END SESSION REQUEST             05130000
+                                                                        05140000
+*                                                                       05150000
+* NOTIFY REQUESTOR OF MESSAGE PROCESSING COMPLETION                     05160000
+*---------------------------------------------------------------------- 05170000
+                                                                        05180000
+         SR    R2,R2              POST CODE IS ZERO                     05190000
+         ICM   R3,15,TMSGEPB      FETCH REPLY ECB                       05200000
+         BZ    ENDSEXIT           NOT PROVIDED?                         05210000
+                                                                        05220000
+         $TASK POST,EPB=(R3),                                          +05230000
+               PCODE=(R2),                                             +05240000
+               ERRET=ABN_TASK,                                         +05250000
+               MF=(E,$TASKMFL)                                          05260000
+                                                                        05270000
+*                                                                       05280000
+* MESSAGE PROCESSING COMPLETE                                           05290000
+*---------------------------------------------------------------------- 05300000
+                                                                        05310000
+ENDSEXIT DS    0H                                                       05320000
+                                                                        05330000
+         LM    R0,R15,SUB1SAVE    RESTORE MAINLINE REGS                 05340000
+         BR    R14                RETURN                                05350000
+                                                                        05360000
+*---------------------------------------------------------------------- 05370000
+*                                                                       05380000
+* ROUTINE: DRAIN - PROCESS DRAIN MESSAGE                                05390000
+*                                                                       05400000
+* DESCRIPTION:                                                          05410000
+*                                                                       05420000
+*    THE DRAIN FLAG IS SET.  WHEN THE WORK QUEUE IS EMPTY AND NO        05430000
+*    TRANSACTIONS ARE ACTIVE, THE SESSION WILL BE ENDED.                05440000
+*                                                                       05450000
+* ON ENTRY:                                                             05460000
+*                                                                       05470000
+*    RMSG - ADDR OF INTERTASK MESSAGE ORIGIN (TMSGSTD)                  05480000
+*                                                                       05490000
+* ON EXIT:                                                              05500000
+*                                                                       05510000
+*    ALL REGISTERS ARE RESTORED                                         05520000
+*---------------------------------------------------------------------- 05530000
+                                                                        05540000
+DRAIN    DS    0H                                                       05550000
+                                                                        05560000
+         STM   R0,R15,SUB1SAVE    MESSAGE PROCESSOR ENTRY               05570000
+                                                                        05580000
+*                                                                       05590000
+* SHOW THAT WE ARE "DRAINING"                                           05600000
+*---------------------------------------------------------------------- 05610000
+                                                                        05620000
+         OI    ISYF1,ISYF1DRN     SET THE "DRAINING" FLAG               05630000
+                                                                        05640000
+*                                                                       05650000
+* NOTIFY REQUESTOR OF MESSAGE PROCESSING COMPLETION                     05660000
+*---------------------------------------------------------------------- 05670000
+                                                                        05680000
+         SR    R2,R2              POST CODE IS ZERO                     05690000
+         ICM   R3,15,TMSGEPB      FETCH REPLY ECB                       05700000
+         BZ    DRNEXIT            NOT PROVIDED?                         05710000
+                                                                        05720000
+         $TASK POST,EPB=(R3),                                          +05730000
+               PCODE=(R2),                                             +05740000
+               ERRET=ABN_TASK,                                         +05750000
+               MF=(E,$TASKMFL)                                          05760000
+                                                                        05770000
+*                                                                       05780000
+* MESSAGE PROCESSING COMPLETE                                           05790000
+*---------------------------------------------------------------------- 05800000
+                                                                        05810000
+DRNEXIT  DS    0H                                                       05820000
+                                                                        05830000
+         LM    R0,R15,SUB1SAVE    RESTORE MAINLINE REGS                 05840000
+         BR    R14                RETURN TO PROCESS NEXT MESSAGE        05850000
+                                                                        05860000
+*---------------------------------------------------------------------- 05870000
+*                                                                       05880000
+* ROUTINE: WORK - PROCESS TRANSACTION REQUEST MESSAGE                   05890000
+*                                                                       05900000
+* DESCRIPTION:                                                          05910000
+*                                                                       05920000
+*    A WORK ELEMENT IS ALLOCATED AND THE MESSAGE CONTENT IS COPIED      05930000
+*    INTO THE WORK ELEMENT.  THE WORK ELEMENT IS THEN QUEUED TO THE     05940000
+*    ISYS WORK QUEUE FOR TRANSACTION INITIATION.                        05950000
+*                                                                       05960000
+* ON ENTRY:                                                             05970000
+*                                                                       05980000
+*    RMSG - ADDR OF INTERTASK MESSAGE ORIGIN (TMSGSTD)                  05990000
+*                                                                       06000000
+* ON EXIT:                                                              06010000
+*                                                                       06020000
+*    ALL REGISTERS ARE RESTORED                                         06030000
+*---------------------------------------------------------------------- 06040000
+                                                                        06050000
+WORK     DS    0H                                                       06060000
+                                                                        06070000
+         STM   R0,R15,SUB1SAVE    MESSAGE PROCESSOR ENTRY               06080000
+                                                                        06090000
+*                                                                       06100000
+* ALLOCATE, INITIALIZE, AND QUEUE A WORK ELEMENT                        06110000
+*---------------------------------------------------------------------- 06120000
+                                                                        06130000
+         LA    R3,L'IQTMAX        BASIC SIZE OF QUEUED TRANSACTION WE   06140000
+         LA    R2,TMSGSLN         LENGTH OF MESSAGE HEADER              06150000
+         A     R2,TMSGINFL        PLUS LENGTH OF MESSAGE INFO           06160000
+         AR    R3,R2              TOTAL SIZE OF QUEUED TRANSACTION      06170000
+                                                                        06180000
+         $GETSTOR (R3),                                                +06190000
+               LOC=ANY,                                                +06200000
+               OWNER=*IVTITASK    ALLOCATE A WORK ELEMENT               06210000
+                                                                        06220000
+         LR    RIQTR,R1           ADDRESS OF NEW WORK ELEMENT           06230000
+         MVC   IQTID,=CL8'IQTR'   SET BLOCK ID                          06240000
+         ST    R3,IQTLEN          SET BLOCK LENGTH                      06250000
+                                                                        06260000
+         LA    R14,IQTTMSG        ADDRESS OF MESSAGE AREA               06270000
+         LR    R0,RMSG            ADDRESS OF MESSAGE                    06280000
+         LR    R15,R2             LENGTH OF MESSAGE                     06290000
+         LR    R1,R15             LENGTH OF MESSAGE                     06300000
+         MVCL  R14,R0             COPY MESSAGE CONTENT TO WORK ELEMENT  06310000
+                                                                        06320000
+         TIME  DEC,                                                    +06330000
+               LINKAGE=SVC        R0=HHMMSSTH R1=0CYYDDDF               06340000
+                                                                        06350000
+         LR    R15,R1             R15=0CYYDDDF                          06360000
+         SRL   R1,4               R1=00CYYDDD                           06370000
+         SLL   R1,20              R1=DDD00000                           06380000
+         SRL   R1,4               R1=0DDD0000                           06390000
+         SRL   R15,16             R15=00000CYY                          06400000
+         C     R15,=X'000000FF'   IS THIS 20TH CENTURY?                 06410000
+         BNH   GET20TH            BRANCH IF YES                         06420000
+         ICM   R15,B'0010',=X'20' SET 21ST CENTURY                      06430000
+         B     GETBOTH            NOW COMBINE DAY AND YEAR              06440000
+GET20TH  DS    0H                                                       06450000
+         ICM   R15,B'0010',=X'19' SET 20TH CENTURY                      06460000
+GETBOTH  DS    0H                                                       06470000
+         OR    R1,R15             R1=0DDDYYYY                           06480000
+         ST    R0,IQTQTIME        SET PACKED DECIMAL HHMMSSTH           06490000
+         ST    R1,IQTQDATE        SET PACKED DECIMAL 0DDDYYYY           06500000
+                                                                        06510000
+         LTR   RMSG,RMSG          QUEUE AS FIRST OR LAST?               06520000
+         BM    WORKQ1ST           BRANCH IF FRONT OF QUEUE              06530000
+                                                                        06540000
+         L     R15,ISYWQLST       ADDRESS OF LAST WORK ELEMENT QUEUED   06550000
+         L     R14,IQTNEXT-IQT(,R15)                                    06560000
+         STM   R14,R15,IQTNEXT    SET NEXT/PREV IN NEW WORK ELEMENT     06570000
+         ST    RIQTR,IQTNEXT-IQT(,R15)                                  06580000
+         ST    RIQTR,IQTPREV-IQT(,R14)                                  06590000
+         B     WORKQEND                                                 06600000
+                                                                        06610000
+WORKQ1ST DS    0H                                                       06620000
+                                                                        06630000
+         L     R14,ISYWQ1ST       ADDRESS OF FIRST WORK ELEMENT QUEUED  06640000
+         L     R15,IQTPREV-IQT(,R14)                                    06650000
+         STM   R14,R15,IQTNEXT    SET NEXT/PREV IN NEW WORK ELEMENT     06660000
+         ST    RIQTR,IQTNEXT-IQT(,R15)                                  06670000
+         ST    RIQTR,IQTPREV-IQT(,R14)                                  06680000
+         B     WORKQEND                                                 06690000
+                                                                        06700000
+WORKQEND DS    0H                                                       06710000
+                                                                        06720000
+         SR    RIQTR,RIQTR        DONE WITH WORK ELEMENT FOR NOW        06730000
+                                                                        06740000
+*                                                                       06750000
+* NOTIFY REQUESTOR OF MESSAGE PROCESSING COMPLETION                     06760000
+*---------------------------------------------------------------------- 06770000
+                                                                        06780000
+         SR    R2,R2              POST CODE IS ZERO                     06790000
+         ICM   R3,15,TMSGEPB      FETCH REPLY ECB                       06800000
+         BZ    WORKEXIT           NOT PROVIDED?                         06810000
+                                                                        06820000
+         $TASK POST,EPB=(R3),                                          +06830000
+               PCODE=(R2),                                             +06840000
+               ERRET=ABN_TASK,                                         +06850000
+               MF=(E,$TASKMFL)                                          06860000
+                                                                        06870000
+*                                                                       06880000
+* MESSAGE PROCESSING COMPLETE                                           06890000
+*---------------------------------------------------------------------- 06900000
+                                                                        06910000
+WORKEXIT DS    0H                                                       06920000
+                                                                        06930000
+         LM    R0,R15,SUB1SAVE    RESTORE MAINLINE REGS                 06940000
+         BR    R14                RETURN TO PROCESS NEXT MESSAGE        06950000
+                                                                        06960000
+*---------------------------------------------------------------------- 06970000
+* ROUTINE STOP: STOP EVENT                                              06980000
+*---------------------------------------------------------------------- 06990000
+                                                                        07000000
+STOP     DS    0H                                                       07010000
+                                                                        07020000
+*---------------------------------------------------------------------- 07030000
+* ROUTINE CANCEL: CANCEL EVENT                                          07040000
+*---------------------------------------------------------------------- 07050000
+                                                                        07060000
+CANCEL   DS    0H                                                       07070000
+                                                                        07080000
+         BAS   R14,FREEMSG        FREE MESSAGE BUFFER, IF ANY           07090000
+                                                                        07100000
+         $MSG  019,                                                    +07110000
+               FIELDS=(TSKNAME)   ISSUE CONNECTION TERMINATED MESSAGE   07120000
+                                                                        07130000
+         LTR   RISYS,RISYS        DO WE HAVE AN ISYS?                   07140000
+         BZ    PROCEXIT           BRANCH IF NOT, NO CLEANUP             07150000
+                                                                        07160000
+*                                                                       07170000
+* PERFORM CLEANUP OF ANY ACTIVE TRANSACTIONS                            07180000
+*---------------------------------------------------------------------- 07190000
+                                                                        07200000
+         LA    R1,ISYPTWA         PRI-TO-SEC ITWA ADDRESS               07210000
+         O     R1,=X'80000000'    MARK PARM AS ITWA ADDRESS             07220000
+         L     R0,=F'-1'          CLEANUP TRANSACTION CODE              07230000
+         L     R15,ISY@RU         TRANSACTION PROGRAM ROUTER            07240000
+         BASR  R14,R15            CALL THE ROUTER TO CLEANUP TP         07250000
+                                                                        07260000
+         LA    R0,ISYPTWA         PRI-TO-SEC ITWA ADDRESS               07270000
+         LA    R1,L'ITWMAX        LENGTH OF ITWA                        07280000
+         SR    R15,R15            ZERO LENGTH AND ZERO PAD              07290000
+         MVCL  R0,R14             CLEAR THE ITWA                        07300000
+                                                                        07310000
+         LA    R1,ISYSTWA         SEC-TO-PRI ITWA ADDRESS               07320000
+         O     R1,=X'80000000'    MARK PARM AS ITWA ADDRESS             07330000
+         L     R0,=F'-1'          CLEANUP TRANSACTION CODE              07340000
+         L     R15,ISY@RU         TRANSACTION PROGRAM ROUTER            07350000
+         BASR  R14,R15            CALL THE ROUTER TO CLEANUP TP         07360000
+                                                                        07370000
+         LA    R0,ISYSTWA         SEC-TO-PRI ITWA ADDRESS               07380000
+         LA    R1,L'ITWMAX        LENGTH OF ITWA                        07390000
+         SR    R15,R15            ZERO LENGTH AND ZERO PAD              07400000
+         MVCL  R0,R14             CLEAR THE ITWA                        07410000
+                                                                        07420000
+*                                                                       07430000
+* PERFORM CLEANUP OF ISYS                                               07440000
+*---------------------------------------------------------------------- 07450000
+                                                                        07460000
+         BAS   R14,VTAMLOCK       SERIALIZE THE ISYS                    07470000
+                                                                        07480000
+         XC    ISYTNAME,ISYTNAME  CLEAR TASK NAME                       07490000
+         XC    ISYPNAME,ISYPNAME  CLEAR PROC NAME                       07500000
+         XC    ISYITASK,ISYITASK  CLEAR ITASK ADDRESS                   07510000
+         XC    ISYIPCB,ISYIPCB    CLEAR IPCB ADDRESS                    07520000
+         XC    ISYTK,ISYTK        CLEAR SESSION TOKEN                   07530000
+         XC    ISYRMSG#,ISYRMSG#  CLEAR COUNTERS                        07540000
+         XC    ISYRBYT#,ISYRBYT#  CLEAR COUNTERS                        07550000
+         XC    ISYSMSG#,ISYSMSG#  CLEAR COUNTERS                        07560000
+         XC    ISYSBYT#,ISYSBYT#  CLEAR COUNTERS                        07570000
+         NI    ISYF1,255-ISYF1ACT CLEAR "STARTED" FLAG                  07580000
+         NI    ISYF1,255-ISYF1DRN CLEAR "DRAINING" FLAG                 07590000
+         NI    ISYF1,255-ISYF1ORI CLEAR "ORIGINATOR" FLAG               07600000
+                                                                        07610000
+         BAS   R14,VTAMUNLK       DESERIALIZE THE ISYS                  07620000
+                                                                        07630000
+*                                                                       07640000
+* TERMINATE THIS PROCESS                                                07650000
+*---------------------------------------------------------------------- 07660000
+                                                                        07670000
+PROCEXIT DS    0H                                                       07680000
+                                                                        07690000
+         LM    R15,R1,RETREGS     SET RETURN REGISTERS                  07700000
+                                                                        07710000
+         #EXIT R1=YES             RETURN W/R15,R0,R1                    07720000
+                                                                        07730000
+*---------------------------------------------------------------------- 07740000
+* CATASTROPHIC ERRORS                                                   07750000
+*---------------------------------------------------------------------- 07760000
+                                                                        07770000
+ABN_TASK DS    0H                                                       07780000
+                                                                        07790000
+         STM   R15,R1,RETREGS                                           07800000
+                                                                        07810000
+         $ABEND ABE_$TASK,                                             +07820000
+               *RETR15,                                                +07830000
+               *RET1,                                                  +07840000
+               DUMP=YES,                                               +07850000
+               SCOPE=PCB,                                              +07860000
+               TITLE='$TASK ERROR IN ISYSDRVR'                          07870000
+                                                                        07880000
+ABN_SESS DS    0H                                                       07890000
+                                                                        07900000
+         STM   R15,R1,RETREGS                                           07910000
+                                                                        07920000
+         $ABEND ABE_$SESS,                                             +07930000
+               *RETR15,                                                +07940000
+               *RET1,                                                  +07950000
+               DUMP=YES,                                               +07960000
+               SCOPE=PCB,                                              +07970000
+               TITLE='$SESS ERROR IN ISYSDRVR'                          07980000
+                                                                        07990000
+ABN_DATA DS    0H                                                       08000000
+                                                                        08010000
+         STM   R15,R1,RETREGS                                           08020000
+                                                                        08030000
+         $ABEND ABE_VTDIAG,                                            +08040000
+               DUMP=YES,                                               +08050000
+               SCOPE=PCB,                                              +08060000
+               TITLE='UNEXPECTED SYSTEMS DATA'                          08070000
+                                                                        08080000
+*---------------------------------------------------------------------- 08090000
+*                                                                       08100000
+* ROUTINE: SESSRECV - RECEIVE SESSION DATA                              08110000
+*                                                                       08120000
+* DESCRIPTION:                                                          08130000
+*                                                                       08140000
+*    THIS ROUTINE WILL INITIALIZE A REQUEST TO RECEIVE DATA             08150000
+*    FROM THE $SESS (SESSION MANAGEMENT) FACILITY. ALL $SESS            08160000
+*    RECEIVE REQUESTS ARE ISSUED WITH AN EPB WHICH TO BE                08170000
+*    POSTED WHEN THE RECEIVE EVENT COMPLETES.                           08180000
+*                                                                       08190000
+* ENTRY:   N/A                                                          08200000
+*                                                                       08210000
+* EXIT:    UPON RETURN FROM THIS ROUTINE R15 WILL CONTAIN               08220000
+*          THE RETURN CODE PRESENTED BY $SESS                           08230000
+*---------------------------------------------------------------------- 08240000
+                                                                        08250000
+SESSRECV DS    0H                                                       08260000
+                                                                        08270000
+         STM   R0,R15,SUB0SAVE    SAVE CALLER'S REGISTERS               08280000
+                                                                        08290000
+*                                                                       08300000
+* ACQUIRE A $SESS PARAMETER BLOCK ON FIRST CALL                         08310000
+*---------------------------------------------------------------------- 08320000
+                                                                        08330000
+         ICM   R0,15,@SPL         ADDR OF SPLIST                        08340000
+         BNZ   SESSRGOT           BRANCH IF SPLIST ALREADY OBTAINED     08350000
+                                                                        08360000
+         $GETSTOR L'SPL,                                               +08370000
+               OWNER=(RITASK)     ALLOCATE SPLIST                       08380000
+                                                                        08390000
+         ST    R1,@SPL            SAVE SPLIST ADDRESS                   08400000
+                                                                        08410000
+SESSRGOT DS    0H                                                       08420000
+                                                                        08430000
+*                                                                       08440000
+* ACQUIRE A RECEIVE XEPB AND HANG OUT A RECEIVE                         08450000
+*---------------------------------------------------------------------- 08460000
+                                                                        08470000
+         $TASK SETEPB,            INITIALIZE $SESS RECEIVE EPB         +08480000
+               ECODE=EC$SESS_RECEIVE,                                  +08490000
+               ERRET=ABN_TASK,    SERVICE ROUTINE FAILURE              +08500000
+               MF=(E,$TASKMFL)                                          08510000
+                                                                        08520000
+         LR    R3,R1              EPB TOKEN / ADDR                      08530000
+                                                                        08540000
+         $SESS $SESS_RECEIVE,     ASYNC RECEIVE                        +08550000
+               SESSION=SESSTOKN,                                       +08560000
+               EPB=(R3),                                               +08570000
+               MF=(E,*@SPL)                                             08580000
+                                                                        08590000
+         ST    R15,SUB0SAVE+(4*R15)                                     08600000
+                                                                        08610000
+*                                                                       08620000
+* RETURN $SESS COMPLETION CODES TO REQUESTOR                            08630000
+*---------------------------------------------------------------------- 08640000
+                                                                        08650000
+         LM    R0,R15,SUB0SAVE    RESTORE CALLER'S REGISTERS            08660000
+         LTR   R15,R15            SET CONDITION CODE                    08670000
+         BR    R14                RETURN                                08680000
+                                                                        08690000
+*---------------------------------------------------------------------- 08700000
+* ROUTINE: TMSGRECV - PREPARE FOR MESSAGE RECEIVE                       08710000
+*---------------------------------------------------------------------- 08720000
+                                                                        08730000
+TMSGRECV DS    0H                                                       08740000
+                                                                        08750000
+         STM   R0,R15,SUB0SAVE    SAVE MAINLINE REGISTERS               08760000
+                                                                        08770000
+         $TASK SETEPB,            INITIALIZE MESSAGE EPB               +08780000
+               EPB=PCBMEPB,       MESSAGE EPB                          +08790000
+               ECODE=EC$MSG,                                           +08800000
+               SCOPE=LOCAL,                                            +08810000
+               ERRET=ABN_TASK,    SERVICE ROUTINE FAILURE              +08820000
+               MF=(E,$TASKMFL)                                          08830000
+                                                                        08840000
+         LM    R2,R14,SUB0SAVE+8  RESTORE MAINLINE REGISTERS            08850000
+         LTR   R15,R15            SET CONDITION CODE                    08860000
+         BR    R14                RETURN                                08870000
+                                                                        08880000
+*---------------------------------------------------------------------- 08890000
+*                                                                       08900000
+* ROUTINE: GETMSG - RECEIVE MESSAGE FROM MESSAGE QUEUE                  08910000
+*                                                                       08920000
+* DESCRIPTION:                                                          08930000
+*                                                                       08940000
+*    THIS ROUTINE WILL RECEIVE A MESSAGE FROM THE LOCAL PCB             08950000
+*    MESSAGE QUEUE.  RC08 FROM $TRECV INDICATES THAT THE BUFFER         08960000
+*    PROVIDED IS TOO SMALL.  THE MINIMUM LENGTH REQUIRED                08970000
+*    RETURNED IN R1 IS USED TO REALLOCATE THE BUFFER AND THE            08980000
+*    REQUEST IS RETRIED IF NECESSARY.                                   08990000
+*                                                                       09000000
+* ENTRY:  N/A                                                           09010000
+*                                                                       09020000
+* EXIT:   R15 CONTAINS THE $TRECV RETURN CODE AS FOLLOWS                09030000
+*                                                                       09040000
+*            RC00 - MESSAGE RECEIVED AND RETURNED VIA R1                09050000
+*            RC04 - NO MESSAGE AVAILABLE                                09060000
+*---------------------------------------------------------------------- 09070000
+                                                                        09080000
+GETMSG   DS    0H                                                       09090000
+                                                                        09100000
+         STM   R0,R15,SUB0SAVE    SAVE CALLER'S REGISTERS               09110000
+                                                                        09120000
+GETMRECV DS    0H                                                       09130000
+                                                                        09140000
+         L     R3,MSGBUFR         BUFFER PROVIDED ON INITIAL REQ        09150000
+         L     R2,MSGBUFL         ZERO LENGTH BUFFER TO OBTAIN MSGLEN   09160000
+                                                                        09170000
+         $TRECV ((R3),(R2)),      RECEIVE A MESSAGE                    +09180000
+               SCOPE=PCB,                                              +09190000
+               MF=(E,MFE_LIST)                                          09200000
+                                                                        09210000
+         C     R15,=A(RC08)       MESSAGE BUFFER TOO SMALL?             09220000
+         BNE   GETMEXIT           NO, RETURN                            09230000
+                                                                        09240000
+*                                                                       09250000
+* MSG BUFFER ALLOCATION INADEQUATE, REALLOCATE AND RETRY                09260000
+*---------------------------------------------------------------------- 09270000
+                                                                        09280000
+         LR    R2,R1              MESSAGE LENGTH                        09290000
+                                                                        09300000
+         $REALLOC MSGDESC,                                             +09310000
+               (R2),                                                   +09320000
+               MF=(E,MFE_LIST)    (RE)ALLOCATE MESSAGE BUFFER           09330000
+                                                                        09340000
+         B     GETMRECV           RETRY RECEIVE                         09350000
+                                                                        09360000
+*                                                                       09370000
+* RETURN TO REQUESTOR                                                   09380000
+*---------------------------------------------------------------------- 09390000
+                                                                        09400000
+GETMEXIT DS    0H                                                       09410000
+                                                                        09420000
+         L     R1,MSGBUFR         ADDRESS OF MESSAGE BUFFER             09430000
+         LM    R2,R14,SUB0SAVE+8  RESTORE CALLER'S REGISTERS            09440000
+         LTR   R15,R15            SET CONDITION CODE                    09450000
+         BR    R14                RETURN                                09460000
+                                                                        09470000
+*---------------------------------------------------------------------- 09480000
+*                                                                       09490000
+* ROUTINE: FREEMSG - FREE $TRECV MESSAGE BUFFER                         09500000
+*                                                                       09510000
+* DESCRIPTION:                                                          09520000
+*                                                                       09530000
+*    THIS ROUTINE WILL FREE THE STORAGE PREVIOUSLY ALLOCATED TO         09540000
+*    $TRECV ACQUIRE AN INBOUND MESSAGE. THE BUFFER DESCRIPTOR           09550000
+*    IS RESET ACCORDINGLY.                                              09560000
+*---------------------------------------------------------------------- 09570000
+                                                                        09580000
+FREEMSG  DS    0H                                                       09590000
+                                                                        09600000
+         STM   R0,R15,SUB0SAVE    SAVE CALLER'S REGISTERS               09610000
+                                                                        09620000
+         ICM   R3,15,MSGBUFR      MESSAGE BUFFER (ADDR,LEN)             09630000
+         BZ    FREEMRET           NOT ALLOCATED                         09640000
+                                                                        09650000
+         $RETSTOR (R3)                                                  09660000
+                                                                        09670000
+         XC    MSGDESC(MSGDESCL),MSGDESC                                09680000
+                                                                        09690000
+FREEMRET DS    0H                                                       09700000
+                                                                        09710000
+         LM    R0,R14,SUB0SAVE    RESTORE CALLER'S REGISTERS            09720000
+         SR    R15,R15            RETURN CODES NOT DEFINED              09730000
+         BR    R14                RETURN                                09740000
+                                                                        09750000
+*---------------------------------------------------------------------- 09760000
+*   SUBROUTINE: START SESSION TERMINATION                               09770000
+*---------------------------------------------------------------------- 09780000
+                                                                        09790000
+$SESSEND DS    0H                                                       09800000
+                                                                        09810000
+         STM   R0,R15,SUB0SAVE      SAVE CALLER'S REGISTERS             09820000
+                                                                        09830000
+         LA    R0,TIMERMFL          MVCL COPY-TO ADDRESS                09840000
+         LA    R1,L'TSETLIST        MVCL COPY-TO LENGTH                 09850000
+         LR    R15,R1               MVCL COPY-FROM LENGTH               09860000
+         LA    R14,TSETLIST         MVCL COPY-FROM ADDRESS              09870000
+         MVCL  R0,R14               INITIALIZE PARM LIST                09880000
+         MVC   TIMEINTV,=F'100'     WAIT 1 SECOND                       09890000
+                                                                        09900000
+         STIMERM SET,                                                  +09910000
+               ID=WRK256,                                              +09920000
+               BINTVL=TIMEINTV,                                        +09930000
+               WAIT=YES,                                               +09940000
+               ERRET=TIMEERR,                                          +09950000
+               MF=(E,TIMERMFL)      SET A TIMER                         09960000
+                                                                        09970000
+TIMEERR  DS    0H                                                       09980000
+                                                                        09990000
+         $SESS $SESS_END_SESSION,                                      +10000000
+               SESSION=SESSTOKN,                                       +10010000
+               ERRET=ABN_SESS,                                         +10020000
+               MF=(E,$SESSPL)       START SESSION TERMINATION           10030000
+                                                                        10040000
+         LM    R0,R15,SUB0SAVE      RESTORE CALLER'S REGISTERS          10050000
+         BR    R14                  RETURN                              10060000
+                                                                        10070000
+*---------------------------------------------------------------------- 10080000
+*   SUBROUTINE: OBTAIN VTAM GLOBAL LOCK                                 10090000
+*---------------------------------------------------------------------- 10100000
+                                                                        10110000
+VTAMLOCK DS    0H                                                       10120000
+                                                                        10130000
+         TM    FLAG,FLAGLOCK        WAS THE LOCK ALREAY OBTAINED?       10140000
+         BOR   R14                  RETURN IF YES                       10150000
+         STM   R14,R2,SUB0SAVE      SAVE CALLER'S REGISTERS             10160000
+                                                                        10170000
+         $SER  OBTAIN,                                                 +10180000
+               VTAM                                                     10190000
+                                                                        10200000
+         C     R15,=F'4'            WAS LOCK ALREADY HELD?              10210000
+         BNE   VTAMLOEX             BRANCH IF NOT                       10220000
+         OI    FLAG,FLAGLCKD        REMEMBER LOCK HELD ON ENTRY         10230000
+                                                                        10240000
+VTAMLOEX DS    0H                                                       10250000
+                                                                        10260000
+         OI    FLAG,FLAGLOCK        REMEMBER LOCK IS HELD               10270000
+         LM    R14,R2,SUB0SAVE      RESTORE CALLER'S REGISTERS          10280000
+         BR    R14                  RETURN                              10290000
+                                                                        10300000
+*---------------------------------------------------------------------- 10310000
+*   SUBROUTINE: RELEASE VTAM GLOBAL LOCK                                10320000
+*---------------------------------------------------------------------- 10330000
+                                                                        10340000
+VTAMUNLK DS    0H                                                       10350000
+                                                                        10360000
+         TM    FLAG,FLAGLOCK        IS LOCK HELD?                       10370000
+         BNOR  R14                  BRANCH IF NOT                       10380000
+         TM    FLAG,FLAGLCKD        WAS LOCK HELD ON ENTRY?             10390000
+         BOR   R14                  DON'T RELEASE IF IT WAS             10400000
+         STM   R14,R2,SUB0SAVE      SAVE CALLER'S REGISTERS             10410000
+                                                                        10420000
+         $SER  RELEASE,                                                +10430000
+               VTAM                                                     10440000
+                                                                        10450000
+         NI    FLAG,255-FLAGLOCK    SHOW LOCK NOT HELD                  10460000
+         LM    R14,R2,SUB0SAVE      RESTORE CALLER'S REGISTERS          10470000
+         BR    R14                  RETURN                              10480000
+                                                                        10490000
+*---------------------------------------------------------------------- 10500000
+* LOCAL READ-ONLY CONSTANTS, ETC.                                       10510000
+*---------------------------------------------------------------------- 10520000
+                                                                        10530000
+         LTORG ,                                                        10540000
+                                                                        10550000
+         DS    0D                                                       10560000
+                                                                        10570000
+TIMERSET STIMERM SET,MF=L                                               10580000
+                                                                        10590000
+TSETLIST EQU   TIMERSET,*-TIMERSET                                      10600000
+                                                                        10610000
+         PRINT NOGEN                                                    10620000
+         ICVT  ,                                                        10630000
+         IVTAMCVT ,                                                     10640000
+         ITASK ,                                                        10650000
+         IPCB  ,                                                        10660000
+         IUSER ,                                                        10670000
+         ISTDBIND ,                                                     10680000
+         ISESS ,                                                        10690000
+         $TASK DSECT=YES          TASK MANAGEMENT PLIST                 10700000
+         $SESS DSECT=YES          SESSION MANAGEMENT PLIST              10710000
+         $SYSTEMS DSECT=YES       SYSTEMS SERVICES PLIST                10720000
+         $RESMGR DSECT=YES        RESOURCE MANAGER PLIST                10730000
+         TMSG  ,                  INTERTASK MESSAGE HEADER              10740000
+         ABCODES PRINT=NOGEN      $ABEND CODES                          10750000
+         MSGCODES ,               INTERTASK MESSAGE CODES               10760000
+         EVCODES ,                TASK EVENT CODES                      10770000
+         NAV ,                                                          10780000
+         END   ,                                                        10790000

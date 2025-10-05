@@ -1,0 +1,2375 @@
+ISQPARSE TITLE '- SQL STATEMENT REDUCTION'                              00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE: ISQPARSE - SQL statement reduction                           00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This routine describes the subset of SQL DML statement             00080000
+*    grammar accepted by this SQL implementation.  A grammar            00090000
+*    tree, or GTREE, defines a subset of the #CTREE accepted.           00100000
+*    The GTREE also contains the addresses of routines                  00110000
+*    found in this assembly that build a semantic summary               00120000
+*    of the SQL statement suitable for driving subsequent               00130000
+*    validation and execution.                                          00140000
+*                                                                       00150000
+*                                                                       00160000
+* ON ENTRY:                                                             00170000
+*                                                                       00180000
+*    R1  contains the address of a parameter list constructed           00190000
+*        as follows:                                                    00200000
+*                                                                       00210000
+*           +00 - #CTREE representation of SQL statement                00220000
+*                                                                       00230000
+*           +04 - addr of #CLEX LCB (+0 is a #CLEX list ptr)            00240000
+*                                                                       00250000
+*           +08 - addr of an initialized STGGET queue header            00260000
+*                 (QH) defining the subpool in which the                00270000
+*                 semantic summary is to be built                       00280000
+*                                                                       00290000
+* ON EXIT:                                                              00300000
+*                                                                       00310000
+*    R15 contains one of the following return codes                     00320000
+*                                                                       00330000
+*    R1  for return codes RC04-RC12, contains the address of            00340000
+*        a #CLEX in error or zero                                       00350000
+*                                                                       00360000
+*        RC00 - semantic analysis complete                              00370000
+*                                                                       00380000
+*               R1 - origin of semantic summary (SQLSEMAL)              00390000
+*                                                                       00400000
+*        RC04 - ISQGTREE - SQL statement does not conform to            00410000
+*               GTREE defined subset grammar                            00420000
+*                                                                       00430000
+*        RCnn - ISQGTREE or ISQITREE - semantic analysis error          00440000
+*                                                                       00450000
+*               RSN04 - ISQGTREE failure                                00460000
+*               RSN08 - ISQITREE failure                                00470000
+*                                                                       00480000
+*        RC16 - storage management failure                              00490000
+*                                                                       00500000
+**<DOC-OFF>****************************************************         00510000
+                                                                        00520000
+         EJECT                                                          00530000
+***************************************************************         00540000
+*                                                                       00550000
+* MAINTENANCE:                                                          00560000
+*                                                                       00570000
+*    11/08/94 Su-Fen WU       PAR# 153670                        153670 00580000
+*                                                                       00590000
+*          1) add $BPNULL, allow basic predicate in WHERE clause 153670 00600000
+*             to take the NULL value                             153670 00610000
+*                                                                       00620000
+*          2) fix a bug in the case of host_variable = colname   153670 00630000
+*             (eq. in run-time  ? = column name)                 153670 00640000
+*             as predicate in WHERE clause. Add checking for     153670 00650000
+*             host variable be posted prior to column name.      153670 00660000
+*                                                                       00670000
+*    12/16/94 R. Turgeon      PAR# 157382                        157382 00680000
+*             Replaced STGSERV storage management interface      157382 00690000
+*             from prototype with STGGET, eliminating the        157382 00700000
+*             limitations imposed by fixed length workareas.     157382 00710000
+*             Partial cleanup of prototype code.                 157382 00720000
+*                                                                       00730000
+*    01/18/95 R. Turgeon      PAR# ODBC                                 00740000
+*             Added syntactic description of the LIKE predicate         00750000
+*             and related clauses.                                      00760000
+*                                                                       00770000
+*    10/16/95 R. Turgeon      Rel 2.0.4                                 00780000
+*             Added table name prefix support to all column             00790000
+*             name formats that permit a table name qualifier.          00800000
+*             (refer to the internal $CLOCATE routine).                 00810000
+*                                                                       00820000
+*    11/17/95 R. Turgeon      Rel 2.1                                   00830000
+*             IS íNOTù NULL syntax / semantics in search arg            00840000
+*                                                                       00850000
+*    01/06/96 R. Turgeon      Rel 2.1                                   00860000
+*             Posted column usage bits in SQCOLREF.SQCFLAGS             00870000
+*             to eliminate the need to do this in open ISQL*            00880000
+*             code.                                                     00890000
+*                                                                       00900000
+***************************************************************         00910000
+                                                                        00920000
+         EJECT                                                          00930000
+WORKAREA #WORK                                                          00940000
+                                                                        00950000
+$CTREE   DS    A                  ADDR OF #CTREE ORIGIN                 00960000
+$CLEXLCB DS    A                  ADDR OF #CLEX LIST LCB                00970000
+                                                                        00980000
+WORKLEN  #ENDWORK                                                       00990000
+                                                                        01000000
+         EJECT                                                          01010000
+         #CTREE ,                 SQL PARSE TREE                        01020000
+                                                                        01030000
+         EJECT                                                          01040000
+         #CLEX  ,                 TOKEN DESCRIPTOR                      01050000
+                                                                        01060000
+         EJECT                                                          01070000
+         GTREE DSECT=YES          ADMISSIBLE SQL PARSE SUBSET DEF       01080000
+                                                                        01090000
+         EJECT                                                          01100000
+         SQLSEMAL ,               SQL SEMANTIC SUMMARY                  01110000
+                                                                        01120000
+         EJECT                                                          01130000
+         $LIKE DSECT=YES          LIKE MASK STRING PREPROCESSING        01140000
+                                                                        01150000
+         EJECT                                                          01160000
+         EQUS ,                                                         01170000
+                                                                        01180000
+         EJECT                                                          01190000
+                                                                        01200000
+ISQPARSE #ENTER PREG=R8                                                 01210000
+                                                                        01220000
+         USING ITASK,R10                                                01230000
+                                                                        01240000
+***************************************************************         01250000
+*                                                                       01260000
+*   Initialize for select statement validation and summary              01270000
+*                                                                       01280000
+***************************************************************         01290000
+                                                                        01300000
+         LM    R2,R4,0(R8)        FETCH PASSED PARAMETERS               01310000
+         ST    R2,$CTREE          SQL PARSE TREE ORIGIN                 01320000
+         ST    R3,$CLEXLCB        #CLEX LCB                             01330000
+         LR    R8,R4              STGMGR (STGGET) QUEUE HEADER (QH)     01340000
+                                                                        01350000
+         STGGET SQSLN,QH=(R8)                                           01360000
+         BNZ   ERR_STG            STORAGE MANAGEMENT FAILURE            01370000
+                                                                        01380000
+         LR    R7,R1              SUMMARY HDR IS COMMON AREA ANCHOR     01390000
+         USING SQSEMAL,R7         LIFE OF FUNCTION                      01400000
+         ST    R8,SQSPOOL@        RETAIN PTR TO STGMGR QH               01410000
+                                                                        01420000
+         LA    R0,SQSATBLS        TABLE NAME LIST   - ALL               01430000
+         ST    R0,SQSATBLS+4      INITIALIZE Q HDR                      01440000
+                                                                        01450000
+         LA    R0,SQSASELC        COLUMN NAME LIST  - SELECT            01460000
+         ST    R0,SQSASELC+4      INITIALIZE Q HDR                      01470000
+                                                                        01480000
+         LA    R0,SQSAINSC        COLUMN NAME LIST  - INSERT            01490000
+         ST    R0,SQSAINSC+4      INITIALIZE Q HDR                      01500000
+                                                                        01510000
+         LA    R0,SQSAVALS        COLUMN VALUE LIST - INSERT            01520000
+         ST    R0,SQSAVALS+4      INITIALIZE Q HDR                      01530000
+                                                                        01540000
+         LA    R0,SQSASETS        COLUMN VALUE LIST - UPDATE            01550000
+         ST    R0,SQSASETS+4      INITIALIZE Q HDR                      01560000
+                                                                        01570000
+         LA    R0,SQSAORDC        ORDER BY COLUMN LIST - SELECT         01580000
+         ST    R0,SQSAORDC+4      INITIALIZE Q HDR                      01590000
+                                                                        01600000
+         LA    R0,SQSEXTRE        PREDICATE LIST                        01610000
+         ST    R0,SQSEXTRE+4      INITIALIZE Q HDR                      01620000
+                                                                        01630000
+*--------------------------------------------------------------         01640000
+*   Build SQL statement summary from parse/admissions trees             01650000
+*--------------------------------------------------------------         01660000
+                                                                        01670000
+         @CALL ISQGTREE,(*$CTREE,SQLADMIT,SQSEMAL,0),MF=(E,MFE_LIST)    01680000
+                                                                        01690000
+         LTR   R15,R15            TEST RESULTS                          01700000
+         BZ    ACCEPT             SUCCESS                               01710000
+                                                                        01720000
+         LA    R0,RSN04           INDICATE ISQGTREE FAILURE             01730000
+                                                                        01740000
+*--------------------------------------------------------------         01750000
+*   Identify SQL statement #CLEX in error                               01760000
+*--------------------------------------------------------------         01770000
+                                                                        01780000
+         USING #CLEX_NODE_S,R1    #CLEX ENTRY                           01790000
+                                                                        01800000
+         L     R2,$CLEXLCB        #CLEX LIST LCB                        01810000
+         ICM   R1,15,0(R2)        FIRST #CLEX BLOCK                     01820000
+                                                                        01830000
+SCANCLEX DS    0H                 LOCATE FIRST CLEX ENTRY IN ERROR      01840000
+         BZ    EXIT               #CLEX NOT IDENTIFIED                  01850000
+         TM    #CLEX_ERROR,L'#CLEX_ERROR   STD PTI TECHNIQUE            01860000
+         BO    EXIT               FOUND INVALID TOKEN                   01870000
+         ICM   R1,15,#CLEX_NEXT   ADVANCE TO NEXT #CLEX NODE            01880000
+         B     SCANCLEX           TRY AGAIN                             01890000
+         DROP  R1                 #CLEX                                 01900000
+                                                                        01910000
+*--------------------------------------------------------------         01920000
+*   Convert the search argument into an execution ready tree            01930000
+*--------------------------------------------------------------         01940000
+                                                                        01950000
+ACCEPT   DS    0H                                                       01960000
+         @CALL ISQITREE,(SQSEMAL),MF=(E,MFE_LIST)                       01970000
+                                                                        01980000
+         LA    R0,RSN08           ASSUME ISQITREE FAILURE               01990000
+                                                                        02000000
+         LTR   R15,R15            COMPLETED WITHOUT ERROR?              02010000
+         BE    NORMRET            DONE IF SO                            02020000
+         CH    R15,=AL2(RC16)     STORAGE FAILURE?                      02030000
+         BE    ERR_STG                                                  02040000
+         B     ERR_ANAL                                                 02050000
+                                                                        02060000
+         EJECT                                                          02070000
+***************************************************************         02080000
+*                                                                       02090000
+*   Normal / abnormal completion                                        02100000
+*                                                                       02110000
+***************************************************************         02120000
+                                                                        02130000
+NORMRET  DS    0H                                                       02140000
+         LA    R1,SQSEMAL         SELECT SUMMARIZATION AREA             02150000
+         SR    R0,R0                                                    02160000
+         LA    R15,RC00                                                 02170000
+         B     EXIT                                                     02180000
+                                                                        02190000
+ERR_ANAL DS    0H                 ANALYSIS ERROR, NO #CLEX AVAIL        02200000
+         SR    R1,R1              NO #CLEX AVAILABLE                    02210000
+         B     EXIT                                                     02220000
+                                                                        02230000
+ERR_STG  DS    0H                 INSUFFICIENT STORAGE                  02240000
+         LA    R15,RC16                                                 02250000
+         SR    R1,R1                                                    02260000
+         SR    R0,R0                                                    02270000
+         B     EXIT                                                     02280000
+                                                                        02290000
+*--------------------------------------------------------------         02300000
+*   Return completion status to caller                                  02310000
+*--------------------------------------------------------------         02320000
+                                                                        02330000
+EXIT     DS    0H                                                       02340000
+         #EXIT                                                          02350000
+                                                                        02360000
+         EJECT                                                          02370000
+***************************************************************         02380000
+*                                                                       02390000
+*   Select grammar - admitted subset                                    02400000
+*                                                                       02410000
+***************************************************************         02420000
+                                                                        02430000
+         #CTYPE                                                         02440000
+                                                                        02450000
+         EJECT                                                          02460000
+*--------------------------------------------------------------         02470000
+*   Local shorthand                                                     02480000
+*--------------------------------------------------------------         02490000
+                                                                        02500000
+CSELECT  EQU   CLAUSE_SELECT                                            02510000
+CFROM    EQU   CLAUSE_FROM                                              02520000
+CWHERE   EQU   CLAUSE_WHERE                                             02530000
+CEXP     EQU   CLAUSE_EXPRESSION                                        02540000
+CESCAPE  EQU   CLAUSE_ESCAPE                                            02550000
+CSET     EQU   CLAUSE_SET                                               02560000
+CSEARCH  EQU   CLAUSE_SEARCH_CONDITION                                  02570000
+CPRED    EQU   CLAUSE_PREDICATE                                         02580000
+CPBASIC  EQU   CLAUSE_PREDICATE_BASIC                                   02590000
+CPLIKE   EQU   CLAUSE_PREDICATE_LIKE                                    02600000
+CPNULL   EQU   CLAUSE_PREDICATE_NULL                                    02610000
+CCOLLIST EQU   CLAUSE_COLUMN_LIST                                       02620000
+CVALUES  EQU   CLAUSE_VALUES                                            02630000
+CVALLIST EQU   CLAUSE_VALUES_LIST                                       02640000
+CORDERBY EQU   CLAUSE_ORDER_BY                                          02650000
+                                                                        02660000
+KEYSEL   EQU   KEYWORD_SELECT                                           02670000
+KEYINS   EQU   KEYWORD_INSERT_INTO                                      02680000
+KEYDEL   EQU   KEYWORD_DELETE_FROM                                      02690000
+KEYALL   EQU   KEYWORD_ALL                                              02700000
+KEYDIST  EQU   KEYWORD_DISTINCT                                         02710000
+KEYUPD   EQU   KEYWORD_UPDATE                                           02720000
+KEYFROM  EQU   KEYWORD_FROM                                             02730000
+KEYWHERE EQU   KEYWORD_WHERE                                            02740000
+KEYLIKE  EQU   KEYWORD_LIKE                                             02750000
+KEYIS    EQU   KEYWORD_IS                                               02760000
+KEYESCAP EQU   KEYWORD_ESCAPE                                           02770000
+KEYSET   EQU   KEYWORD_SET                                              02780000
+KEYCOMMA EQU   KEYWORD_COMMA                                            02790000
+KEYDOT   EQU   KEYWORD_PERIOD                                           02800000
+KEYNOT   EQU   KEYWORD_NOT                                              02810000
+KEYAND   EQU   KEYWORD_AND                                              02820000
+KEYOR    EQU   KEYWORD_OR                                               02830000
+KEYCOMP  EQU   KEYWORD_COMPARAND                                        02840000
+KEYVALS  EQU   KEYWORD_VALUES                                           02850000
+KEYORDER EQU   KEYWORD_ORDER_BY                                         02860000
+KEYASC   EQU   KEYWORD_ASCENDING                                        02870000
+KEYDESC  EQU   KEYWORD_DESCENDING                                       02880000
+KEYUNOPR EQU   KEYWORD_UNARY_OPERATOR                                   02890000
+KEYNULL  EQU   KEYWORD_NULL                                             02900000
+                                                                        02910000
+VARCOLNM EQU   VARIABLE_COLUMN_NAME                                     02920000
+VARSTAR  EQU   VARIABLE_COL_KEYWORD_ASTERISK                            02930000
+VARCONST EQU   VARIABLE_CONSTANT                                        02940000
+VARCONSQ EQU   VARIABLE_CONSTANT_STRING                                 02950000
+VARCONSN EQU   VARIABLE_CONSTANT_NUMERIC                                02960000
+VARHOSTV EQU   VARIABLE_HOST_VARIABLE                                   02970000
+VARINT   EQU   VARIABLE_INTEGER                                         02980000
+VARTABVN EQU   VARIABLE_TABLE_VIEW_NAME                                 02990000
+VSHORTID EQU   VARIABLE_SHORT_IDENTIFIER                                03000000
+VLONGID  EQU   VARIABLE_LONG_IDENTIFIER                                 03010000
+                                                                        03020000
+         TITLE 'SQL SUBSET GRAMMAR'                                     03030000
+***************************************************************         03040000
+*                                                                       03050000
+*   Admissable statements - contstaints & extractions                   03060000
+*                                                                       03070000
+***************************************************************         03080000
+                                                                        03090000
+SQLADMIT GTREE ,((STATEMENT_SELECT,$SELECT),                           X03100000
+               (STATEMENT_DELETE,$DELETE),                             X03110000
+               (STATEMENT_INSERT,$INSERT),                             X03120000
+               (STATEMENT_UPDATE,$UPDATE))                              03130000
+                                                                        03140000
+*--------------------------------------------------------------         03150000
+*   DML statement types                                                 03160000
+*--------------------------------------------------------------         03170000
+                                                                        03180000
+$DELETE  GTREE ->,(KEYDEL,(VARTABVN,$VTVN),(CWHERE,$CWHERE)),          X03190000
+               RTN=@DELETE                                              03200000
+                                                                        03210000
+$INSERT  GTREE ->,(KEYINS,(VARTABVN,$VTVN),(CCOLLIST,$INSCLST),        X03220000
+               (CVALUES,$CVALUES)),                                    X03230000
+               RTN=@INSERT                                              03240000
+                                                                        03250000
+$UPDATE  GTREE ->,(KEYUPD,(VARTABVN,$VTVN),(CSET,$CSET),               X03260000
+               (CWHERE,$CWHERE)),                                      X03270000
+               RTN=@UPDATE                                              03280000
+                                                                        03290000
+$SELECT  GTREE ->,((CLAUSE_FULLSELECT,$FS),(CORDERBY,$ORDERBY)),       X03300000
+               RTN=@SELECT                                              03310000
+                                                                        03320000
+***************************************************************         03330000
+*                                                                       03340000
+*   SELECT statement specific                                           03350000
+*                                                                       03360000
+***************************************************************         03370000
+                                                                        03380000
+$FS      GTREE ->,((CLAUSE_SUBSELECT,$SUBSEL))                          03390000
+                                                                        03400000
+$SUBSEL  GTREE ->,((CSELECT,$CSEL),(CFROM,$CFROM),(CWHERE,$CWHERE))    X03410000
+                                                                        03420000
+$CSEL    GTREE ->,(KEYSEL,(CEXP,$COLEXP),VARSTAR,KEYCOMMA,             X03430000
+               (KEYDIST,$DIST),(KEYALL,$ALL))                           03440000
+                                                                        03450000
+$COLEXP  GTREE ->,((VARCOLNM,$SELCOLS))                                 03460000
+                                                                        03470000
+$CFROM   GTREE ->,(KEYFROM,(VARTABVN,$VTVN))                            03480000
+                                                                        03490000
+$DIST    GTREE RTN=DISTINCT                                             03500000
+$ALL     GTREE RTN=ALL                                                  03510000
+$SELCOLS GTREE RTN=SEL_COLS                                             03520000
+                                                                        03530000
+*--------------------------------------------------------------         03540000
+*   order by                                                            03550000
+*--------------------------------------------------------------         03560000
+                                                                        03570000
+$ORDERBY GTREE ->,(KEYORDER,(VARCOLNM,$ORDCOLS),KEYCOMMA,              X03580000
+               (KEYASC,$ORDCOLS),(KEYDESC,$ORDCOLS),                   X03590000
+               (VARINT,$ORDCINT))                                       03600000
+                                                                        03610000
+$ORDCOLS GTREE RTN=ORD_COLS                                             03620000
+$ORDCINT GTREE RTN=ORD_INT                                              03630000
+                                                                        03640000
+***************************************************************         03650000
+*                                                                       03660000
+*   INSERT statement specific                                           03670000
+*                                                                       03680000
+***************************************************************         03690000
+                                                                        03700000
+$INSCLST GTREE ->,((VARCOLNM,$INSCOLS),KEYCOMMA)                        03710000
+                                                                        03720000
+$INSCOLS GTREE RTN=INS_COLS                                             03730000
+                                                                        03740000
+$CVALUES GTREE ->,(KEYVALS,(CVALLIST,$CVALS))                           03750000
+                                                                        03760000
+$CVALS   GTREE ->,((VARCONST,$CONSTI),(VARHOSTV,$IHOSTV),KEYCOMMA,     X03770000
+               (KEYNULL,$INSNULL))                                      03780000
+                                                                        03790000
+$CONSTI  GTREE RTN=LIT                                                  03800000
+$INSNULL GTREE RTN=INS_NULL                                             03810000
+$IHOSTV  GTREE RTN=IHOSTV                                               03820000
+                                                                        03830000
+***************************************************************         03840000
+*                                                                       03850000
+*   UPDATE statement specific                                           03860000
+*                                                                       03870000
+***************************************************************         03880000
+                                                                        03890000
+$CSET    GTREE ->,(KEYSET,KEYCOMMA,(VARCOLNM,$UCOLNM),KEYCOMP,         X03900000
+               (CEXP,$UCEXP),(KEYNULL,$UNULL))                          03910000
+                                                                        03920000
+$UCEXP   GTREE ->,((VARCONST,$UCONST),(VARHOSTV,$UHOSTV))               03930000
+                                                                        03940000
+$UCOLNM  GTREE RTN=UPCOLNM                                              03950000
+$UCONST  GTREE RTN=UPLIT                                                03960000
+$UHOSTV  GTREE RTN=UPHOSTV                                              03970000
+$UNULL   GTREE RTN=SET_NULL                                             03980000
+                                                                        03990000
+***************************************************************         04000000
+*                                                                       04010000
+*   Search argument                                                     04020000
+*                                                                       04030000
+***************************************************************         04040000
+                                                                        04050000
+$CWHERE  GTREE ->,(KEYWHERE,(CSEARCH,$SEARCH))                          04060000
+                                                                        04070000
+$SEARCH  GTREE ->,((CPRED,$PRED),(KEYNOT,$LG),(KEYAND,$LG),(KEYOR,$LG),X04080000
+               (CSEARCH,$SEARCH))                                       04090000
+                                                                        04100000
+$PRED    GTREE ->,((CPBASIC,$PBASIC),(CPLIKE,$PLIKE),(CPNULL,$PNULL))   04110000
+                                                                        04120000
+$PBASIC  GTREE ->,((CEXP,$TERM),(KEYCOMP,$OPR))                         04130000
+                                                                        04140000
+$TERM    GTREE ->,((VARCOLNM,$COLEXP2),(VARCONST,$CONST),              X04150000
+               (KEYUNOPR,$UNOPR),(VARHOSTV,$HOSTV))                     04160000
+                                                                        04170000
+$LG      GTREE RTN=CONNECT                                              04180000
+$COLEXP2 GTREE RTN=BP_COLNM                                             04190000
+$OPR     GTREE RTN=BP_OPER                                              04200000
+$CONST   GTREE RTN=BP_LIT                                               04210000
+$HOSTV   GTREE RTN=BP_HOSTV                                             04220000
+$UNOPR   GTREE RTN=BP_UNOPR                                             04230000
+                                                                        04240000
+*--------------------------------------------------------------         04250000
+*   is ínotù null                                                       04260000
+*--------------------------------------------------------------         04270000
+                                                                        04280000
+$PNULL   GTREE ->,((CEXP,$NCOLEXP),KEYIS,(KEYNOT,$NULLNOT),            X04290000
+               (KEYNULL,$NULLFIN))                                      04300000
+                                                                        04310000
+$NCOLEXP GTREE ->,((VARCOLNM,$NULLCOL))                                 04320000
+                                                                        04330000
+$NULLCOL GTREE RTN=NULL_COL                                             04340000
+$NULLNOT GTREE RTN=NULL_NOT                                             04350000
+$NULLFIN GTREE RTN=NULL_FIN                                             04360000
+                                                                        04370000
+*--------------------------------------------------------------         04380000
+*   ínotù like 'mask' escape 'e'                                        04390000
+*--------------------------------------------------------------         04400000
+                                                                        04410000
+$PLIKE   GTREE ->,((CEXP,$LCOLEXP),(KEYNOT,$LNOT),KEYLIKE,             X04420000
+               (VARCONSQ,$LMASK),(VARHOSTV,$LMASK),                    X04430000
+               (CESCAPE,$CESCAPE))                                      04440000
+                                                                        04450000
+$LCOLEXP GTREE ->,((VARCOLNM,$LCOL))                                    04460000
+                                                                        04470000
+$CESCAPE GTREE ->,(KEYESCAP,(VARCONSQ,$LESCAPE),(VARHOSTV,$LESCAPE))    04480000
+                                                                        04490000
+$LCOL    GTREE RTN=LIKE_COL                                             04500000
+$LNOT    GTREE RTN=LIKE_NOT                                             04510000
+$LMASK   GTREE RTN=LIKE_MSK                                             04520000
+$LESCAPE GTREE RTN=LIKE_ESC                                             04530000
+                                                                        04540000
+***************************************************************         04550000
+*                                                                       04560000
+*   Qualified and unqulified table names                                04570000
+*                                                                       04580000
+***************************************************************         04590000
+                                                                        04600000
+$VTVN    GTREE ->,((VSHORTID,$TABPFX),KEYDOT,(VLONGID,$TABNM))          04610000
+                                                                        04620000
+$TABPFX  GTREE RTN=@TABPFX                                              04630000
+                                                                        04640000
+$TABNM   GTREE RTN=@TABNAME                                             04650000
+                                                                        04660000
+***************************************************************         04670000
+*                                                                       04680000
+*   Local read-only data areas                                          04690000
+*                                                                       04700000
+***************************************************************         04710000
+         LTORG ,                                                        04720000
+                                                                        04730000
+         TITLE 'SEMANTIC ANALYSIS AND SUMMARIZATION RTNS'               04740000
+***************************************************************         04750000
+*                                                                       04760000
+* ROUTINE: @SELECT - SELECT STATEMENT                                   04770000
+*                                                                       04780000
+***************************************************************         04790000
+                                                                        04800000
+@SELECT  GTENTER ,                                                      04810000
+                                                                        04820000
+         MVI   SQSQUERY,SQSQ_SEL                                        04830000
+         SR    R15,R15                                                  04840000
+                                                                        04850000
+         GTEXIT ,                                                       04860000
+                                                                        04870000
+***************************************************************         04880000
+*                                                                       04890000
+* ROUTINE: @INSERT - INSERT STATEMENT                                   04900000
+*                                                                       04910000
+***************************************************************         04920000
+                                                                        04930000
+@INSERT  GTENTER ,                                                      04940000
+                                                                        04950000
+         MVI   SQSQUERY,SQSQ_INS                                        04960000
+         SR    R15,R15                                                  04970000
+                                                                        04980000
+         GTEXIT ,                                                       04990000
+                                                                        05000000
+***************************************************************         05010000
+*                                                                       05020000
+* ROUTINE: @UPDATE - UPDATE STATEMENT                                   05030000
+*                                                                       05040000
+***************************************************************         05050000
+                                                                        05060000
+@UPDATE  GTENTER ,                                                      05070000
+                                                                        05080000
+         MVI   SQSQUERY,SQSQ_UPD                                        05090000
+         SR    R15,R15                                                  05100000
+                                                                        05110000
+         GTEXIT ,                                                       05120000
+                                                                        05130000
+***************************************************************         05140000
+*                                                                       05150000
+* ROUTINE: @DELETE - DELETE STATEMENT                                   05160000
+*                                                                       05170000
+***************************************************************         05180000
+                                                                        05190000
+@DELETE  GTENTER ,                                                      05200000
+                                                                        05210000
+         MVI   SQSQUERY,SQSQ_DEL                                        05220000
+         SR    R15,R15                                                  05230000
+                                                                        05240000
+         GTEXIT ,                                                       05250000
+                                                                        05260000
+         EJECT                                                          05270000
+***************************************************************         05280000
+*                                                                       05290000
+* ROUTINE: @TABPFX - TABLE NAME PREFIX (QUALIFIER)                      05300000
+*                                                                       05310000
+***************************************************************         05320000
+                                                                        05330000
+@TABPFX  GTENTER ,                                                      05340000
+                                                                        05350000
+         L     R3,SQSPOOL@                                              05360000
+         STGGET SQTLN,QH=(R3)                                           05370000
+         BNZ   @TABPERR                                                 05380000
+                                                                        05390000
+         LR    R6,R1              BASIC PREDICATE SUMMARY NODE          05400000
+         ST    R6,SQSEXNOD        SAVE FOR SUBSEQUENT OPERATIONS        05410000
+         ST    R6,SQSEXOLD        NEW NODE IS LAST NODE                 05420000
+                                                                        05430000
+*--------------------------------------------------------------         05440000
+*   Construct table reference summary                                   05450000
+*--------------------------------------------------------------         05460000
+                                                                        05470000
+         USING SQTABREF,R6        TABLE NAME ENTRY FORMAT               05480000
+         MVI   SQTPROJ,C' '       CLEAR                                 05490000
+         MVC   SQTPROJ+1(L'SQTPROJ-1),SQTPROJ                           05500000
+                                                                        05510000
+         L     R2,#CTREE_STOKEN      CLEX ENTRY                         05520000
+         USING #CLEX_NODE_S,R2       TOKEN FORMAT                       05530000
+         ST    R2,SQTPRJ@C           TABLE PREFIX CLEX ENTRY            05540000
+         LH    R15,#CLEX_LENGTH      LENGTH OF TOKEN                    05550000
+         LTR   R15,R15               TEST LENGTH                        05560000
+         BZ    @TABPERR              NOT A TABLE PREFIX                 05570000
+         CH    R15,=AL2(L'SQTPROJ)   EXCEEDS SQL STANDARD?              05580000
+         BH    @TABPERR              NOT A TABLE PREFIX                 05590000
+         BCTR  R15,0                 PREPARE FOR COPY                   05600000
+         EX    R15,*+4               COPY                               05610000
+         MVC   SQTPROJ(*-*),#CLEX_TOKEN                                 05620000
+         OC    SQTPROJ,=CL32' '      UPPER CASE                         05630000
+         DROP  R2,R6                 #CLEX, SQTABREF                    05640000
+                                                                        05650000
+*--------------------------------------------------------------         05660000
+*   Return acceptance status                                            05670000
+*--------------------------------------------------------------         05680000
+                                                                        05690000
+         LA    R15,RC00           INDICATE NORMAL COMPLETION            05700000
+         B     @TABPXIT           DONE                                  05710000
+                                                                        05720000
+@TABPERR DS    0H                                                       05730000
+         LA    R15,RC04           REJECT TABLE NAME                     05740000
+                                                                        05750000
+@TABPXIT DS    0H                                                       05760000
+         GTEXIT ,                                                       05770000
+                                                                        05780000
+         EJECT                                                          05790000
+***************************************************************         05800000
+*                                                                       05810000
+* ROUTINE: @TABNAME - TABLE NAME REFERENCE                              05820000
+*                                                                       05830000
+***************************************************************         05840000
+                                                                        05850000
+@TABNAME GTENTER ,                                                      05860000
+                                                                        05870000
+         ICM   R6,15,SQSEXNOD     BASIC PREDICATE OPENED?               05880000
+         BNZ   @TABNGO            MODIFY/COMPLETE IT IF SO              05890000
+                                                                        05900000
+         L     R3,SQSPOOL@                                              05910000
+         STGGET SQTLN,QH=(R3)                                           05920000
+         BNZ   @TABNERR                                                 05930000
+                                                                        05940000
+         LR    R6,R1              BASIC PREDICATE SUMMARY NODE          05950000
+                                                                        05960000
+*--------------------------------------------------------------         05970000
+*   Construct table reference summary                                   05980000
+*--------------------------------------------------------------         05990000
+                                                                        06000000
+@TABNGO  DS    0H                                                       06010000
+         USING SQTABREF,R6        TABLE NAME ENTRY FORMAT               06020000
+         MVI   SQTNAME,C' '       CLEAR                                 06030000
+         MVC   SQTNAME+1(L'SQTNAME-1),SQTNAME                           06040000
+                                                                        06050000
+         L     R2,#CTREE_STOKEN      CLEX ENTRY                         06060000
+         USING #CLEX_NODE_S,R2       TOKEN FORMAT                       06070000
+         ST    R2,SQT@C              TABLE NAME CLEX ENTRY              06080000
+         LH    R15,#CLEX_LENGTH      LENGTH OF TOKEN                    06090000
+         LTR   R15,R15               TEST LENGTH                        06100000
+         BZ    @TABNERR              NOT A TABLE NAME                   06110000
+         CH    R15,=AL2(L'SQTNAME)   EXCEEDS SQL STANDARD               06120000
+         BH    @TABNERR              NOT A TABLE NAME                   06130000
+         STH   R15,SQTNLEN           TABLE NAME LENGTH                  06140000
+         BCTR  R15,0                 PREPARE FOR COPY                   06150000
+         EX    R15,*+4               COPY                               06160000
+         MVC   SQTNAME(*-*),#CLEX_TOKEN                                 06170000
+         OC    SQTNAME,=CL32' '   UPPER CASE                            06180000
+         DROP  R2                 #CLEX                                 06190000
+                                                                        06200000
+*--------------------------------------------------------------         06210000
+*   Enqueue qualified table name upon receipt of table name             06220000
+*--------------------------------------------------------------         06230000
+                                                                        06240000
+         L     R3,SQSATBLS+4      ADDR OF LAST TABLE NAME POSTED        06250000
+         ST    R6,0(,R3)          INSERT OURSELF AT END OF QUEUE        06260000
+         ST    R6,SQSATBLS+4      RESET END-OF-QUEUE PTR                06270000
+                                                                        06280000
+         L     R15,SQSATBLS+8     UPDATE TABLE REFERENCE COUNT          06290000
+         LA    R15,1(,R15)                                              06300000
+         ST    R15,SQSATBLS+8                                           06310000
+                                                                        06320000
+         XC    SQSEXNOD,SQSEXNOD  CLEAR STAGING AREA PTR                06330000
+         DROP  R6                 SQTABREF                              06340000
+                                                                        06350000
+*--------------------------------------------------------------         06360000
+*   Return acceptance status                                            06370000
+*--------------------------------------------------------------         06380000
+                                                                        06390000
+         LA    R15,RC00           INDICATE NORMAL COMPLETION            06400000
+         B     @TABNXIT           DONE                                  06410000
+                                                                        06420000
+@TABNERR DS    0H                                                       06430000
+         LA    R15,RC04           REJECT TABLE NAME                     06440000
+                                                                        06450000
+@TABNXIT DS    0H                                                       06460000
+         GTEXIT ,                                                       06470000
+                                                                        06480000
+         EJECT                                                          06490000
+***************************************************************         06500000
+*                                                                       06510000
+* ROUTINE: SEL_COLS - PROCESS SELECT-CLAUSE COLUMN REFERENCE            06520000
+*                                                                       06530000
+***************************************************************         06540000
+                                                                        06550000
+SEL_COLS GTENTER ,                                                      06560000
+                                                                        06570000
+         LA    R1,SQSACOLS        R1 <== COLUMN LIST ORIGIN             06580000
+         GTCALL $CLOCATE          LOOKUP COLUMN NAME                    06590000
+         LTR   R15,R15            FOUND OR BUILT ENTRY (R1) ?           06600000
+         BNZ   SEL_ERR            FAILURE                               06610000
+         LR    R2,R1              SQCOLREF ENTRY ADDR RETURNED          06620000
+                                                                        06630000
+         OI    SQCFLAGS-SQCOLREF(R2),SQCF$SEL                           06640000
+                                                                        06650000
+*--------------------------------------------------------------         06660000
+*   Construct and enqueue reference to table column                     06670000
+*--------------------------------------------------------------         06680000
+                                                                        06690000
+         L     R3,SQSPOOL@                                              06700000
+         STGGET SQREFPLN,QH=(R3)                                        06710000
+         BNZ   SEL_ERR                                                  06720000
+                                                                        06730000
+         USING SQREFP,R1          REFERENCE LINKAGE                     06740000
+         L     R0,#CTREE_STOKEN   COLUMN CLEX                           06750000
+         ST    R0,SQR@C                                                 06760000
+         ST    R2,SQRNODE         SQCOLREF ADDRESS                      06770000
+                                                                        06780000
+         L     R3,SQSASELC+4      SELECTED COLUMN QUEUE - LAST ENTRY    06790000
+         ST    R1,0(,R3)          SET FORWARD PTR TO NEW NODE           06800000
+         ST    R1,SQSASELC+4      ADD LINKAGE NODE TO END OF LIST       06810000
+                                                                        06820000
+         L     R15,SQSASELC+8     UPDATE SELECT LIST SIZE               06830000
+         LA    R15,1(,R15)                                              06840000
+         ST    R15,SQSASELC+8                                           06850000
+         DROP  R1                 SQREFP                                06860000
+                                                                        06870000
+*--------------------------------------------------------------         06880000
+*   Return to requester with completion status                          06890000
+*--------------------------------------------------------------         06900000
+                                                                        06910000
+         LA    R15,RC00           NORMAL COMPLETION                     06920000
+         B     SEL_XIT            DONE                                  06930000
+                                                                        06940000
+SEL_ERR  DS    0H                                                       06950000
+         LA    R15,RC04           FAILURE                               06960000
+                                                                        06970000
+SEL_XIT  DS    0H                                                       06980000
+         GTEXIT ,                                                       06990000
+                                                                        07000000
+         EJECT                                                          07010000
+***************************************************************         07020000
+*                                                                       07030000
+* ROUTINE: INS_COLS - PROCESS INSERT COLUMN LIST                        07040000
+*                                                                       07050000
+* NOTES:                                                                07060000
+*                                                                       07070000
+*    TEMPORARILY POSTED AGAINST SELCOLS - INSC CONSTRUCTED LATER        07080000
+*                                                                       07090000
+***************************************************************         07100000
+                                                                        07110000
+INS_COLS GTENTER ,                                                      07120000
+                                                                        07130000
+         LA    R1,SQSACOLS        R1 <== COLUMN LIST ORIGIN             07140000
+         GTCALL $CLOCATE          LOOKUP COLUMN NAME                    07150000
+         LTR   R15,R15            FOUND OR BUILT ENTRY (R1) ?           07160000
+         BNZ   INS_ERR            FAILURE                               07170000
+*****    LTR   R0,R0              COLUMN REFERENCE MADE EARLIER?        07180000
+*****    BZ    INS_ERR            FAILURE                               07190000
+         LR    R2,R1              SQCOLREF ENTRY ADDR RETURNED          07200000
+                                                                        07210000
+*--------------------------------------------------------------         07220000
+*   Construct and enqueue reference to table column                     07230000
+*--------------------------------------------------------------         07240000
+                                                                        07250000
+         L     R3,SQSPOOL@                                              07260000
+         STGGET SQREFPLN,QH=(R3)                                        07270000
+         BNZ   INS_ERR                                                  07280000
+                                                                        07290000
+         USING SQREFP,R1          REFERENCE LINKAGE                     07300000
+         L     R0,#CTREE_STOKEN   COLUMN CLEX                           07310000
+         ST    R0,SQR@C                                                 07320000
+         ST    R2,SQRNODE         SQCOLREF ADDRESS                      07330000
+                                                                        07340000
+         L     R3,SQSASELC+4      INSERTED COLUMN LIST END              07350000
+         ST    R1,0(,R3)          SET FORWARD PTR TO NEW NODE           07360000
+         ST    R1,SQSASELC+4      ADD LINKAGE NODE TO END OF LIST       07370000
+                                                                        07380000
+         L     R15,SQSASELC+8     UPDATE COLUMN LIST SIZE               07390000
+         LA    R15,1(,R15)                                              07400000
+         ST    R15,SQSASELC+8                                           07410000
+         DROP  R1                 SQREFP                                07420000
+                                                                        07430000
+*--------------------------------------------------------------         07440000
+*   Return to requester with completion status                          07450000
+*--------------------------------------------------------------         07460000
+                                                                        07470000
+         LA    R15,RC00           NORMAL COMPLETION                     07480000
+         B     INS_XIT            DONE                                  07490000
+                                                                        07500000
+INS_ERR  DS    0H                                                       07510000
+         LA    R15,RC04           FAILURE                               07520000
+                                                                        07530000
+INS_XIT  DS    0H                                                       07540000
+         GTEXIT ,                                                       07550000
+                                                                        07560000
+         EJECT                                                          07570000
+***************************************************************         07580000
+*                                                                       07590000
+* ROUTINE: @ORDCOLS - SELECT ORDER-BY COLUMN LIST SUMMARIZATION         07600000
+*                                                                       07610000
+***************************************************************         07620000
+                                                                        07630000
+ORD_COLS GTENTER ,                                                      07640000
+                                                                        07650000
+         ICM   R1,15,SQSAORDC+4   ORDERBY COLUMN NAMES PRESENT?         07660000
+         BZ    ORD_CONT           DON'T CONSIDER ASC/DESC OTHERWISE     07670000
+         USING SQREFP,R1          REFERENCE LINKAGE                     07680000
+         CLC   #CTREE_TYPE,=A(KEYASC)                                   07690000
+         BE    ORD_OK             ASCENDING IS DEFAULT                  07700000
+         CLC   #CTREE_TYPE,=A(KEYDESC)                                  07710000
+         BNE   ORD_CONT           DESCENDING IS EXPECTED                07720000
+         SR    R0,R0                                                    07730000
+         BCTR  R0,0               DESCENDING INDICATED BY HIGH VALUES   07740000
+         STC   R0,SQRORDER        IN ORDER BY DIRECTION FLAG            07750000
+         B     ORD_OK             DONE                                  07760000
+         DROP  R1                 SQREFP                                07770000
+                                                                        07780000
+*--------------------------------------------------------------         07790000
+*   Match column named to sqcolref                                      07800000
+*--------------------------------------------------------------         07810000
+                                                                        07820000
+ORD_CONT DS    0H                                                       07830000
+         LA    R1,SQSACOLS        R1 <== COLUMN LIST ORIGIN             07840000
+         GTCALL $CLOCATE          LOOKUP COLUMN NAME                    07850000
+         LTR   R15,R15            BUILT ENTRY (R1) ?                    07860000
+         BNZ   ORD_ERR            FAILURE                               07870000
+         LR    R2,R1              SQCOLREF ENTRY ADDR RETURNED          07880000
+                                                                        07890000
+*--------------------------------------------------------------         07900000
+*   Construct and enqueue reference to table column                     07910000
+*--------------------------------------------------------------         07920000
+                                                                        07930000
+         L     R3,SQSPOOL@                                              07940000
+         STGGET SQREFPLN,QH=(R3)                                        07950000
+         BNZ   ORD_ERR                                                  07960000
+                                                                        07970000
+         USING SQREFP,R1          REFERENCE LINKAGE                     07980000
+         L     R0,#CTREE_STOKEN   COLUMN CLEX                           07990000
+         ST    R0,SQR@C                                                 08000000
+         ST    R2,SQRNODE         SQCOLREF ADDRESS                      08010000
+                                                                        08020000
+         L     R3,SQSAORDC+4      ORDER-BY COLUMN LIST END              08030000
+         ST    R1,0(,R3)          SET FORWARD PTR TO NEW NODE           08040000
+         ST    R1,SQSAORDC+4      ADD LINKAGE NODE TO END OF LIST       08050000
+                                                                        08060000
+         L     R15,SQSAORDC+8     UPDATE ORDER BY LIST COUNT            08070000
+         LA    R15,1(,R15)                                              08080000
+         ST    R15,SQSAORDC+8                                           08090000
+         DROP  R1                 SQREFP                                08100000
+                                                                        08110000
+*--------------------------------------------------------------         08120000
+*   Return to requester with completion status                          08130000
+*--------------------------------------------------------------         08140000
+                                                                        08150000
+ORD_OK   DS    0H                                                       08160000
+         LA    R15,RC00           NORMAL COMPLETION                     08170000
+         B     ORD_XIT            DONE                                  08180000
+                                                                        08190000
+ORD_ERR  DS    0H                                                       08200000
+         LA    R15,RC04           FAILURE                               08210000
+                                                                        08220000
+ORD_XIT  DS    0H                                                       08230000
+         GTEXIT ,                                                       08240000
+                                                                        08250000
+         EJECT                                                          08260000
+***************************************************************         08270000
+*                                                                       08280000
+* ROUTINE: @ORDCONS - SELECT ORDER-BY COLUMN NUMBER REFERENCE           08290000
+*                                                                       08300000
+***************************************************************         08310000
+                                                                        08320000
+ORD_INT  GTENTER ,                                                      08330000
+                                                                        08340000
+         ICM   R1,15,SQSAORDC+4   ORDERBY COLUMN NAMES PRESENT?         08350000
+         BZ    ORD_INTQ           DON'T CONSIDER ASC/DESC OTHERWISE     08360000
+                                                                        08370000
+         USING SQREFP,R1          REFERENCE LINKAGE                     08380000
+         CLC   #CTREE_TYPE,=A(KEYASC)                                   08390000
+         BE    ORD_INT_FIN        ASCENDING IS DEFAULT                  08400000
+         CLC   #CTREE_TYPE,=A(KEYDESC)                                  08410000
+         BNE   ORD_INTQ           DESCENDING IS EXPECTED                08420000
+         MVI   SQRORDER,SQR$DESC                                        08430000
+         B     ORD_INT_FIN        DONE                                  08440000
+         DROP  R1                 SQREFP                                08450000
+                                                                        08460000
+*--------------------------------------------------------------         08470000
+*   Only single appearance of column name permitted                     08480000
+*--------------------------------------------------------------         08490000
+                                                                        08500000
+ORD_INTQ DS    0H                                                       08510000
+         GTCALL $INT              CONVERT INTEGER VALUE TO BINARY       08520000
+                                                                        08530000
+         LTR   R15,R15            SUCCESS?                              08540000
+         BNZ   ORD_INT_ERR        REJECT IF NOT                         08550000
+         CLM   R0,B'1100',ICTZERO SMALL INTEGER?                        08560000
+         BNE   ORD_INT_ERR        REJECT IF NOT                         08570000
+         LTR   R4,R0              COLUMN REFS GREATER THAN ZERO         08580000
+         BNP   ORD_INT_ERR        ERROR OTHERWISE                       08590000
+                                                                        08600000
+         L     R3,SQSPOOL@                                              08610000
+         STGGET SQREFPLN,QH=(R3)                                        08620000
+         BNZ   ORD_INT_ERR                                              08630000
+                                                                        08640000
+         USING SQREFP,R1          REFERENCE LINKAGE                     08650000
+         L     R0,#CTREE_STOKEN   COLUMN CLEX                           08660000
+         ST    R0,SQR@C                                                 08670000
+         MVI   SQRORDFL,SQR$ORD1  INDICATE COLUMN NUMBERED              08680000
+         STH   R4,SQRCNUM         RETAIN BINARY VALUE                   08690000
+                                                                        08700000
+         L     R3,SQSAORDC+4      ORDER-BY COLUMN LIST END              08710000
+         ST    R1,0(,R3)          SET FORWARD PTR TO NEW NODE           08720000
+         ST    R1,SQSAORDC+4      ADD LINKAGE NODE TO END OF LIST       08730000
+                                                                        08740000
+         L     R15,SQSAORDC+8     UPDATE ORDER BY LIST COUNT            08750000
+         LA    R15,1(,R15)                                              08760000
+         ST    R15,SQSAORDC+8                                           08770000
+         DROP  R1                 SQREFP                                08780000
+                                                                        08790000
+*--------------------------------------------------------------         08800000
+*   Return to requester with completion status                          08810000
+*--------------------------------------------------------------         08820000
+                                                                        08830000
+ORD_INT_FIN    DS   0H                                                  08840000
+         LA    R15,RC00           NORMAL COMPLETION                     08850000
+         B     ORD_INTX           DONE                                  08860000
+                                                                        08870000
+ORD_INT_ERR    DS   0H                                                  08880000
+         LA    R15,RC04           FAILURE                               08890000
+                                                                        08900000
+ORD_INTX DS    0H                                                       08910000
+         GTEXIT ,                                                       08920000
+                                                                        08930000
+         EJECT                                                          08940000
+***************************************************************         08950000
+*                                                                       08960000
+* ROUTINE: LIKE_COL - COLUMN REFERENCE OCCURS IN LIKE-PREDICATE         08970000
+*                                                                       08980000
+***************************************************************         08990000
+                                                                        09000000
+LIKE_COL GTENTER ,                                                      09010000
+                                                                        09020000
+         L     R3,SQSPOOL@                                              09030000
+         STGGET SBPTLN,QH=(R3)                                          09040000
+         BNZ   LIKE_COL_ERR                                             09050000
+                                                                        09060000
+         USING SBPTERM,R6         DECLARE INTENTIONS                    09070000
+         LR    R6,R1              LIKE PREDICATE SUMMARY NODE           09080000
+         ST    R6,SQSEXNOD        SAVE FOR SUBSEQUENT OPERATIONS        09090000
+         ST    R6,SQSEXOLD        NEW NODE IS LAST NODE                 09100000
+                                                                        09110000
+         MVI   SBPNTYPE,SBPN$LIK  MARK NODE TYPE AS LIKE-PREDICATE      09120000
+         MVI   SBPCOMP,SBPC$EQ    ASSUME LIKE RATHER THAN UNLIKE        09130000
+         MVC   SBPLVL,GTXPLVL     CAPTURE NESTING LEVEL / DEPTH         09140000
+         MVC   SBPCOL@C,#CTREE_STOKEN    RETAIN #CLEX ENTRY             09150000
+                                                                        09160000
+*--------------------------------------------------------------         09170000
+*   Build column reference component                                    09180000
+*--------------------------------------------------------------         09190000
+                                                                        09200000
+         LA    R1,SQSACOLS        R1 <== COLUMN LIST ORIGIN             09210000
+         GTCALL $CLOCATE          LOOKUP COLUMN NAME                    09220000
+         LTR   R15,R15            FOUND / BUILT ENTRY (R1) ?            09230000
+         BNZ   LIKE_COL_ERR       FAILURE                               09240000
+                                                                        09250000
+         OI    SQCFLAGS-SQCOLREF(R1),SQCF$SA    MEMBER OF SARG          09260000
+                                                                        09270000
+         ST    R1,SBPACOL         POST COLUMN REFERENCE                 09280000
+         USING SQCOLREF,R1                                              09290000
+         LH    R2,SQCUCNTB        GET CURRENT USE COUNT                 09300000
+         LA    R2,1(,R2)          BUMP IT BY ONE                        09310000
+         STH   R2,SQCUCNTB        SAVE COLUMN USE COUNT                 09320000
+         DROP  R1,R6              SQCOLREF, SQTABREF                    09330000
+                                                                        09340000
+*--------------------------------------------------------------         09350000
+*   Return to requester with completion status                          09360000
+*--------------------------------------------------------------         09370000
+                                                                        09380000
+         LA    R15,RC00           NORMAL COMPLETION                     09390000
+         B     LIKE_COL_RET       DONE                                  09400000
+                                                                        09410000
+LIKE_COL_ERR   DS   0H            FAILURE                               09420000
+         LA    R15,RC04                                                 09430000
+                                                                        09440000
+LIKE_COL_RET   DS   0H                                                  09450000
+         GTEXIT ,                                                       09460000
+                                                                        09470000
+         EJECT                                                          09480000
+***************************************************************         09490000
+*                                                                       09500000
+* ROUTINE: LIKE_NOT - <COLEXP> NOT LIKE ...                             09510000
+*                                                                       09520000
+***************************************************************         09530000
+                                                                        09540000
+LIKE_NOT GTENTER ,                                                      09550000
+                                                                        09560000
+         L     R6,SQSEXNOD        LIKE-PREDICATE IS OPENED              09570000
+         USING SBPTERM,R6         DECLARE INTENTIONS                    09580000
+                                                                        09590000
+         MVI   SBPCOMP,SBPC$NE    NOT LIKE IS A NEGATION OF LIKE        09600000
+                                                                        09610000
+         LA    R15,RC00           NORMAL COMPLETION                     09620000
+         DROP  R6                 SBPTERM                               09630000
+                                                                        09640000
+         GTEXIT ,                                                       09650000
+                                                                        09660000
+         EJECT                                                          09670000
+***************************************************************         09680000
+*                                                                       09690000
+* ROUTINE: LIKE_MSK - COMPARAND PROVIDED AS MASK OR HOST VAR            09700000
+*                                                                       09710000
+***************************************************************         09720000
+                                                                        09730000
+LIKE_MSK GTENTER ,                                                      09740000
+                                                                        09750000
+         L     R6,SQSEXNOD        LIKE-PREDICATE IS OPENED              09760000
+         USING SBPTERM,R6         DECLARE INTENTIONS                    09770000
+                                                                        09780000
+         MVC   SBPVAL@C,#CTREE_STOKEN    RETAIN #CLEX ENTRY PTR         09790000
+                                                                        09800000
+*--------------------------------------------------------------         09810000
+*   Identify form of mask specified:  string const or host var          09820000
+*--------------------------------------------------------------         09830000
+                                                                        09840000
+         L     R2,#CTREE_STOKEN   #CLEX ENTRY                           09850000
+         USING #CLEX_NODE_S,R2    TOKEN FORMAT                          09860000
+         LA    R4,#CLEX_TOKEN     TEXT ORIGIN                           09870000
+                                                                        09880000
+         CLI   0(R4),C':'         TOKEN IS A HOST VARIABLE MARKER?      09890000
+         BNE   LIKE_MSK_STR       SKIP IF NOT                           09900000
+         OI    SBPVTYPE,SBPV$HOS  INDICATE HOST VARIABLE                09910000
+         B     LIKE_MSK_POST      DONE                                  09920000
+         DROP  R2                 #CLEX_NODE_S                          09930000
+                                                                        09940000
+*--------------------------------------------------------------         09950000
+*   Mask is a string constant                                           09960000
+*--------------------------------------------------------------         09970000
+                                                                        09980000
+LIKE_MSK_STR   DS   0H                                                  09990000
+                                                                        10000000
+         GTCALL $LITERAL          CREATE REPRESENTATION FOR LITERAL     10010000
+                                                                        10020000
+         CH    R15,=AL2(RC04)     TEST COMPLETION STATUS                10030000
+         BH    LIKE_MSK_ERR       FAILURE                               10040000
+         BL    *+8                LITERAL EXTRACTED                     10050000
+         OI    SBPVTYPE,SBPV$NUL  NULL STRING                           10060000
+                                                                        10070000
+         ST    R1,SBPAVAL         SAVE PTR TO EDITTED LITERAL           10080000
+         STH   R0,SBPLVAL         SAVE EDITTED LITERAL LENGTH           10090000
+         LTR   R0,R0              NULL STRING?                          10100000
+         BNP   LIKE_MSK_POST      NO PREPROCESSING REQUIREMENT IF SO    10110000
+                                                                        10120000
+*--------------------------------------------------------------         10130000
+*   Convert mask to compare-ready format                                10140000
+*--------------------------------------------------------------         10150000
+                                                                        10160000
+         LR    R2,R0              LENGTH OF MASK STRING                 10170000
+         L     R3,SQSPOOL@                                              10180000
+         STGGET (R2),QH=(R3)                                            10190000
+         BNZ   LIKE_MSK_ERR                                             10200000
+                                                                        10210000
+         LR    R3,R1              MASK CONVERSION WORKAREA              10220000
+                                                                        10230000
+         $LIKE INIT=YES,                                               X10240000
+               MASK=*SBPAVAL,MASKLEN=(R2),                             X10250000
+               STR=(R3),STRLEN=(R2),                                   X10260000
+               MF=(E,MFE_LIST)                                          10270000
+                                                                        10280000
+         LTR   R15,R15            CONVERSION COMPLETE?                  10290000
+         BNZ   LIKE_MSK_ERR       FAIL IF NOT                           10300000
+                                                                        10310000
+         ST    R3,SBPAVAL         SAVE PTR TO CONVERTED MASK            10320000
+* ?????? STH   R0,SBPLVAL         CONVERTED MASK MAY BE SHORTER         10330000
+                                                                        10340000
+*--------------------------------------------------------------         10350000
+*   Enqueue completed like-predicate to chain                           10360000
+*--------------------------------------------------------------         10370000
+                                                                        10380000
+LIKE_MSK_POST  DS   0H                                                  10390000
+         L     R3,SQSEXTRE+4      ADDR OF LAST PRED POSTED              10400000
+         ST    R6,0(,R3)          INSERT OURSELF AT END OF QUEUE        10410000
+         ST    R6,SQSEXTRE+4      RESET END-OF-QUEUE PTR                10420000
+                                                                        10430000
+         L     R15,SQSEXTRE+8     UPDATE PRED REF COUNT                 10440000
+         LA    R15,1(,R15)                                              10450000
+         ST    R15,SQSEXTRE+8                                           10460000
+                                                                        10470000
+         XC    SQSEXNOD,SQSEXNOD  CLEAR STAGING AREA PTR                10480000
+         DROP  R6                 SBPTERM                               10490000
+                                                                        10500000
+*--------------------------------------------------------------         10510000
+*   Return to requester with completion status                          10520000
+*--------------------------------------------------------------         10530000
+                                                                        10540000
+         LA    R15,RC00           NORMAL COMPLETION                     10550000
+         B     LIKE_MSK_RET                                             10560000
+                                                                        10570000
+LIKE_MSK_ERR   DS   0H            FAILURE                               10580000
+         LA    R15,RC04                                                 10590000
+                                                                        10600000
+LIKE_MSK_RET   DS   0H                                                  10610000
+         GTEXIT ,                                                       10620000
+                                                                        10630000
+         EJECT                                                          10640000
+***************************************************************         10650000
+*                                                                       10660000
+* ROUTINE: LIKE_ESC - ESCAPE CLAUSE AS AFTERTHOUGHT                     10670000
+*                                                                       10680000
+***************************************************************         10690000
+                                                                        10700000
+LIKE_ESC GTENTER ,                                                      10710000
+                                                                        10720000
+         L     R6,SQSEXOLD        LIKE-PREDICATE IS NO LONGER OPEN      10730000
+         USING SBPTERM,R6         DECLARE INTENTIONS                    10740000
+                                                                        10750000
+*--------------------------------------------------------------         10760000
+*   Identify form of escape given:  string const or host var            10770000
+*   escape is a single char enclosed in quotes                          10780000
+*--------------------------------------------------------------         10790000
+                                                                        10800000
+         L     R2,#CTREE_STOKEN   #CLEX ENTRY                           10810000
+         USING #CLEX_NODE_S,R2    TOKEN FORMAT                          10820000
+         LA    R4,#CLEX_TOKEN     TEXT ORIGIN                           10830000
+                                                                        10840000
+         CLI   0(R4),C':'         TOKEN IS A HOST VARIABLE MARKER?      10850000
+         BNE   LIKE_ESC_STR       SKIP IF NOT                           10860000
+         OI    SBPVTYPE,SBPV$HOS  INDICATE HOST VARIABLE                10870000
+         B     LIKE_ESC_POST      DONE                                  10880000
+         DROP  R2                 #CLEX_NODE_S                          10890000
+                                                                        10900000
+*--------------------------------------------------------------         10910000
+*   Escape char is a string constant                                    10920000
+*--------------------------------------------------------------         10930000
+                                                                        10940000
+LIKE_ESC_STR   DS    0H                                                 10950000
+                                                                        10960000
+         GTCALL $LITERAL          CREATE REPRESENTATION FOR LITERAL     10970000
+                                                                        10980000
+         LTR   R15,R15            TEST COMPLETION STATUS                10990000
+         BNZ   LIKE_ESC_ERR       FAILURE                               11000000
+                                                                        11010000
+         CH    R0,=H'1'           VALID LENGTH OF ESCAPE 'CHAR'         11020000
+         BNE   LIKE_ESC_ERR       ERROR OTHERWISE                       11030000
+                                                                        11040000
+         MVC   SBPESC,0(R1)       RETAIN ESCAPE CHAR                    11050000
+         DROP  R6                 #CLEX_NODE_S, SBPTERM                 11060000
+                                                                        11070000
+*--------------------------------------------------------------         11080000
+*   Return to requester with completion status                          11090000
+*--------------------------------------------------------------         11100000
+                                                                        11110000
+LIKE_ESC_POST  DS   0H            FAILURE                               11120000
+         LA    R15,RC00           NORMAL COMPLETION                     11130000
+         B     LIKE_ESC_RET                                             11140000
+                                                                        11150000
+LIKE_ESC_ERR   DS   0H            FAILURE                               11160000
+         LA    R15,RC04                                                 11170000
+                                                                        11180000
+LIKE_ESC_RET   DS   0H                                                  11190000
+         GTEXIT ,                                                       11200000
+                                                                        11210000
+         EJECT                                                          11220000
+***************************************************************         11230000
+*                                                                       11240000
+* ROUTINE: NULL_COL - Column reference occurs in null-predicate         11250000
+*                                                                       11260000
+***************************************************************         11270000
+                                                                        11280000
+NULL_COL GTENTER ,                                                      11290000
+                                                                        11300000
+         L     R3,SQSPOOL@                                              11310000
+         STGGET SBPTLN,QH=(R3)                                          11320000
+         BNZ   NULL_COL_ERR                                             11330000
+                                                                        11340000
+         USING SBPTERM,R6         DECLARE INTENTIONS                    11350000
+         LR    R6,R1              LIKE PREDICATE SUMMARY NODE           11360000
+         ST    R6,SQSEXNOD        SAVE FOR SUBSEQUENT OPERATIONS        11370000
+         ST    R6,SQSEXOLD        NEW NODE IS LAST NODE                 11380000
+                                                                        11390000
+         MVI   SBPNTYPE,SBPN$NUL  INDICATE NULL PREDICATE               11400000
+         MVI   SBPCOMP,SBPC$IS    IS (ASSERTION)                        11410000
+                                                                        11420000
+         MVC   SBPLVL,GTXPLVL     CAPTURE NESTING LEVEL / DEPTH         11430000
+         MVC   SBPCOL@C,#CTREE_STOKEN    RETAIN #CLEX ENTRY             11440000
+                                                                        11450000
+*--------------------------------------------------------------         11460000
+*   Build column reference component                                    11470000
+*--------------------------------------------------------------         11480000
+                                                                        11490000
+         LA    R1,SQSACOLS        R1 <== COLUMN LIST ORIGIN             11500000
+         GTCALL $CLOCATE          LOOKUP COLUMN NAME                    11510000
+         LTR   R15,R15            FOUND / BUILT ENTRY (R1) ?            11520000
+         BNZ   NULL_COL_ERR       FAILURE                               11530000
+                                                                        11540000
+         OI    SQCFLAGS-SQCOLREF(R1),SQCF$SA    MEMBER OF SARG          11550000
+                                                                        11560000
+         ST    R1,SBPACOL         POST COLUMN REFERENCE                 11570000
+         USING SQCOLREF,R1                                              11580000
+         LH    R2,SQCUCNTB        GET CURRENT USE COUNT                 11590000
+         LA    R2,1(,R2)          BUMP IT BY ONE                        11600000
+         STH   R2,SQCUCNTB        SAVE COLUMN USE COUNT                 11610000
+         DROP  R1,R6              SQCOLREF, SQTABREF                    11620000
+                                                                        11630000
+*--------------------------------------------------------------         11640000
+*   Return to requester with completion status                          11650000
+*--------------------------------------------------------------         11660000
+                                                                        11670000
+         LA    R15,RC00           NORMAL COMPLETION                     11680000
+         B     NULL_COL_RET       DONE                                  11690000
+                                                                        11700000
+NULL_COL_ERR   DS   0H            FAILURE                               11710000
+         LA    R15,RC04                                                 11720000
+                                                                        11730000
+NULL_COL_RET   DS   0H                                                  11740000
+         GTEXIT ,                                                       11750000
+                                                                        11760000
+         EJECT                                                          11770000
+***************************************************************         11780000
+*                                                                       11790000
+* ROUTINE: NULL_NOT - <COLEXP> IS NOT NULL                              11800000
+*                                                                       11810000
+***************************************************************         11820000
+                                                                        11830000
+NULL_NOT GTENTER ,                                                      11840000
+                                                                        11850000
+         L     R6,SQSEXNOD        NULL-PREDICATE IS OPENED              11860000
+         USING SBPTERM,R6         DECLARE INTENTIONS                    11870000
+                                                                        11880000
+         MVI   SBPCOMP,SBPC$NOT   IS NOT                                11890000
+                                                                        11900000
+         LA    R15,RC00           NORMAL COMPLETION                     11910000
+         DROP  R6                 SBPTERM                               11920000
+                                                                        11930000
+         GTEXIT ,                                                       11940000
+                                                                        11950000
+         EJECT                                                          11960000
+***************************************************************         11970000
+*                                                                       11980000
+* ROUTINE: NULL_FIN - Terminate NULL-Predicate                          11990000
+*                                                                       12000000
+***************************************************************         12010000
+                                                                        12020000
+NULL_FIN GTENTER ,                                                      12030000
+                                                                        12040000
+         L     R6,SQSEXNOD        NULL PREDICATE IS OPEN                12050000
+         USING SBPTERM,R6         DECLARE INTENTIONS                    12060000
+                                                                        12070000
+*--------------------------------------------------------------         12080000
+*   Enqueue predicate on chain                                          12090000
+*--------------------------------------------------------------         12100000
+                                                                        12110000
+         L     R3,SQSEXTRE+4      ADDR OF LAST TABLE NAME POSTED        12120000
+         ST    R6,0(,R3)          INSERT OURSELF AT END OF QUEUE        12130000
+         ST    R6,SQSEXTRE+4      RESET END-OF-QUEUE PTR                12140000
+                                                                        12150000
+         L     R15,SQSEXTRE+8     UPDATE TABLE REFERENCE COUNT          12160000
+         LA    R15,1(,R15)                                              12170000
+         ST    R15,SQSEXTRE+8                                           12180000
+                                                                        12190000
+         XC    SQSEXNOD,SQSEXNOD  CLEAR STAGING AREA PTR                12200000
+         DROP  R6                 SQTABREF                              12210000
+                                                                        12220000
+*--------------------------------------------------------------         12230000
+*   Return to requester with completion status                          12240000
+*--------------------------------------------------------------         12250000
+                                                                        12260000
+         LA    R15,RC00           NORMAL COMPLETION                     12270000
+         B     NULL_FIN_EXIT      DONE                                  12280000
+                                                                        12290000
+NULL_STG_ERR   DS   0H                                                  12300000
+         LA    R15,RC04           FAILURE                               12310000
+                                                                        12320000
+NULL_FIN_EXIT  DS   0H                                                  12330000
+         GTEXIT ,                                                       12340000
+                                                                        12350000
+         EJECT                                                          12360000
+***************************************************************         12370000
+*                                                                       12380000
+* ROUTINE: BP_COLNM - PROCESS BASIC-PREDICATE COLUMN REFERENCE          12390000
+*                                                                       12400000
+* NOTE:    WE ALLOW THE SEARCH CONDITION TO BE EITHER                   12410000
+*                                                                       12420000
+*             COLUMN-IDENTIFIER  COMPARATOR  LITERAL_EXPRESSION         12430000
+*          OR                                                           12440000
+*             LITERAL_EXPRESSION COMPARATOR COLUMNM_IDENTIFIER          12450000
+*                                                                       12460000
+***************************************************************         12470000
+                                                                        12480000
+BP_COLNM GTENTER ,                                                      12490000
+                                                                        12500000
+         ICM   R6,15,SQSEXNOD     BASIC PREDICATE OPENED?               12510000
+         BNZ   BP_CONT            MODIFY/COMPLETE IT IF SO              12520000
+         USING SBPTERM,R6         DECLARE INTENTIONS                    12530000
+                                                                        12540000
+         L     R3,SQSPOOL@                                              12550000
+         STGGET SBPTLN,QH=(R3)                                          12560000
+         BNZ   BP_COERR                                                 12570000
+                                                                        12580000
+         LR    R6,R1              BASIC PREDICATE SUMMARY NODE          12590000
+         ST    R6,SQSEXNOD        SAVE FOR SUBSEQUENT OPERATIONS        12600000
+         ST    R6,SQSEXOLD        NEW NODE IS LAST NODE                 12610000
+         MVI   SBPNTYPE,SBPN$BPE  MARK NODE AS BASIC PREDICATE TYPE     12620000
+                                                                        12630000
+*--------------------------------------------------------------         12640000
+*   Build column reference - one ref per basic pred                     12650000
+*--------------------------------------------------------------         12660000
+                                                                        12670000
+BP_CONT  DS    0H                                                       12680000
+         ICM   R0,15,SBPACOL      COLUMN REFERENCE PREV POSTED?         12690000
+         BNZ   BP_COERR           ERROR IF SO                           12700000
+                                                                        12710000
+         MVC   SBPCOL@C,#CTREE_STOKEN    RETAIN #CLEX ENTRY             12720000
+         LA    R1,SQSACOLS        R1 <== COLUMN LIST ORIGIN             12730000
+         GTCALL $CLOCATE          LOOKUP COLUMN NAME                    12740000
+         LTR   R15,R15            FOUND OR BUILT ENTRY (R1) ?           12750000
+         BNZ   BP_COERR           FAILURE                               12760000
+                                                                        12770000
+         OI    SQCFLAGS-SQCOLREF(R1),SQCF$SA    MEMBER OF SARG          12780000
+                                                                        12790000
+         ST    R1,SBPACOL         POST COLUMN REFERENCE                 12800000
+         USING SQCOLREF,R1                                              12810000
+         LH    R2,SQCUCNTB        GET CURRENT USE COUNT                 12820000
+         LA    R2,1(,R2)          BUMP IT BY ONE                        12830000
+         STH   R2,SQCUCNTB        SAVE COLUMN USE COUNT                 12840000
+                                                                        12850000
+*--------------------------------------------------------------         12860000
+*   Enqueue basic predicate to chain if complete                        12870000
+*--------------------------------------------------------------         12880000
+                                                                        12890000
+         TM    SBPVTYPE,SBPV$HOS  HOST VARIABLE ALREADY POSTED   153670 12900000
+         BO    BP_POST            YES, POST IT                   153670 12910000
+                                                                        12920000
+         ICM   R0,15,SBPAVAL      COMPARAND POSTED YET?                 12930000
+         BZ    BP_COFIN           COMPLETE IF SO                        12940000
+                                                                        12950000
+BP_POST  DS    0H                                                       12960000
+         L     R3,SQSEXTRE+4      ADDR OF LAST TABLE NAME POSTED        12970000
+         ST    R6,0(,R3)          INSERT OURSELF AT END OF QUEUE        12980000
+         ST    R6,SQSEXTRE+4      RESET END-OF-QUEUE PTR                12990000
+                                                                        13000000
+         L     R15,SQSEXTRE+8     UPDATE TABLE REFERENCE COUNT          13010000
+         LA    R15,1(,R15)                                              13020000
+         ST    R15,SQSEXTRE+8                                           13030000
+                                                                        13040000
+         XC    SQSEXNOD,SQSEXNOD  CLEAR STAGING AREA PTR                13050000
+         B     BP_COFIN                                                 13060000
+         DROP  R1,R6              SQCOLREF, SQTABREF                    13070000
+                                                                        13080000
+*--------------------------------------------------------------         13090000
+*   Return to requester with completion status                          13100000
+*--------------------------------------------------------------         13110000
+                                                                        13120000
+BP_COFIN DS    0H                                                       13130000
+         LA    R15,RC00           NORMAL COMPLETION                     13140000
+         B     BP_COXIT           DONE                                  13150000
+                                                                        13160000
+BP_COERR DS    0H                                                       13170000
+         LA    R15,RC04           FAILURE                               13180000
+                                                                        13190000
+BP_COXIT DS    0H                                                       13200000
+         GTEXIT ,                                                       13210000
+                                                                        13220000
+         EJECT                                                          13230000
+***************************************************************         13240000
+*                                                                       13250000
+* ROUTINE: BP_OPER - PROC BASIC-PREDICATE COMPARISON OPERATOR           13260000
+*                                                                       13270000
+***************************************************************         13280000
+                                                                        13290000
+BP_OPER  GTENTER ,                                                      13300000
+                                                                        13310000
+         ICM   R6,15,SQSEXNOD     BASIC PREDICATE OPENED?               13320000
+         BZ    BP_OPERR           ERROR IF NOT                          13330000
+         USING SBPTERM,R6         DECLARE INTENTIONS                    13340000
+         MVI   SBPNTYPE,SBPN$BPE  INDICATE NODE IS BASIC PREDICATE      13350000
+         MVC   SBPLVL,GTXPLVL     CAPTURE NESTING LEVEL / DEPTH         13360000
+                                                                        13370000
+*--------------------------------------------------------------         13380000
+*   Identify operator                                                   13390000
+*--------------------------------------------------------------         13400000
+                                                                        13410000
+         L     R2,#CTREE_STOKEN      CLEX ENTRY                         13420000
+         ST    R2,SBPOPR@C           PRESERVED                          13430000
+         USING #CLEX_NODE_S,R2       TOKEN FORMAT                       13440000
+         LH    R15,#CLEX_LENGTH      LENGTH OF TOKEN                    13450000
+         LTR   R15,R15               TEST TOKEN LENGTH                  13460000
+         BZ    BP_OPERR              NOT A TABLE NAME                   13470000
+         CH    R15,=AL2(2)           EXCEEDS SQL STANDARD?              13480000
+         BH    BP_OPERR              NOT AN OPERATOR                    13490000
+         BCTR  R15,0                 PREPARE FOR EX                     13500000
+                                                                        13510000
+         LM    R3,R5,=A(BP_OPTAB,L'BP_OPTAB,BP_OPEND-1)                 13520000
+                                                                        13530000
+BP_OPSCN DS    0H                 MATCH COMPARE OPERATOR TO TABLE       13540000
+         CLC   #CLEX_TOKEN(*-*),0(R3)                                   13550000
+         EX    R15,*-6                                                  13560000
+         BE    BP_OPSET                                                 13570000
+         BXLE  R3,R4,BP_OPSCN                                           13580000
+         B     BP_OPERR                                                 13590000
+                                                                        13600000
+BP_OPSET DS    0H                                                       13610000
+         MVC   SBPCOMP,3(R3)      ESTABLISH COMPARISON TYPE             13620000
+         ICM   R0,15,SBPAVAL      VALUE REFERENCE PREV POSTED?          13630000
+         BZ    *+10               STD COL.OP.LIT FORMAT IF NOT          13640000
+         MVC   SBPCOMP,4(R3)                                            13650000
+         DROP  R2,R6              #CLEX, SBPTERM                        13660000
+                                                                        13670000
+*--------------------------------------------------------------         13680000
+*   Return to requester with completion status                          13690000
+*--------------------------------------------------------------         13700000
+                                                                        13710000
+         LA    R15,RC00           NORMAL COMPLETION                     13720000
+         B     BP_OPXIT           DONE                                  13730000
+                                                                        13740000
+BP_OPERR DS    0H                                                       13750000
+         LA    R15,RC04           FAILURE                               13760000
+                                                                        13770000
+BP_OPXIT DS    0H                                                       13780000
+         GTEXIT ,                                                       13790000
+                                                                        13800000
+*--------------------------------------------------------------         13810000
+                                                                        13820000
+BP_OPTAB EQU   *,3+1+1                                                  13830000
+         DC    CL3'=  ',AL1(SBPC$EQ,SBPC$EQ)                            13840000
+         DC    CL3'<  ',AL1(SBPC$LT,SBPC$GT)                            13850000
+         DC    CL3'>  ',AL1(SBPC$GT,SBPC$LT)                            13860000
+         DC    CL3'<> ',AL1(SBPC$NE,SBPC$NE)                            13870000
+         DC    CL3'~= ',AL1(SBPC$NE,SBPC$NE) DB2 EXTENSION              13880000
+         DC    CL3'<= ',AL1(SBPC$LE,SBPC$GE)                            13890000
+         DC    CL3'~> ',AL1(SBPC$LE,SBPC$GE) DB2 EXTENSION              13900000
+         DC    CL3'>= ',AL1(SBPC$GE,SBPC$LE)                            13910000
+         DC    CL3'~< ',AL1(SBPC$GE,SBPC$LE) DB2 EXTENSION              13920000
+BP_OPEND EQU   *                                                        13930000
+                                                                        13940000
+         EJECT                                                          13950000
+***************************************************************         13960000
+*                                                                       13970000
+* ROUTINE: BP_LIT - PROCESS BASIC-PREDICATE LITERAL VALUE               13980000
+*                                                                       13990000
+* NOTE:    WE ALLOW THE SEARCH CONDITION TO BE :                        14000000
+*          EITHER                                                       14010000
+*             COLUMN-IDENTIFIER  COMPARATOR  LITERAL_EXPRESSION         14020000
+*          OR                                                           14030000
+*                                                                       14040000
+*             LIETRAL_EXPRESSION COMPARATOR COLUMNM_IDENTIFIER          14050000
+*                                                                       14060000
+***************************************************************         14070000
+                                                                        14080000
+BP_LIT   GTENTER ,                                                      14090000
+                                                                        14100000
+         ICM   R6,15,SQSEXNOD     BASIC PREDICATE OPENED?               14110000
+         BNZ   BP_LIGO            MODIFY/COMPLETE IT IF SO              14120000
+         USING SBPTERM,R6         DECLARE INTENTIONS                    14130000
+                                                                        14140000
+         L     R3,SQSPOOL@                                              14150000
+         STGGET SBPTLN,QH=(R3)                                          14160000
+         BNZ   BP_LIERR                                                 14170000
+                                                                        14180000
+         LR    R6,R1              BASIC PREDICATE SUMMARY NODE          14190000
+         ST    R6,SQSEXNOD        SAVE FOR SUBSEQUENT OPERATIONS        14200000
+         ST    R6,SQSEXOLD        NEW NODE IS LAST NODE                 14210000
+         MVI   SBPNTYPE,SBPN$BPE  MARK NODE AS BASIC PREDICATE TYPE     14220000
+                                                                        14230000
+*--------------------------------------------------------------         14240000
+*   Edit and store literal value - maintain reference                   14250000
+*--------------------------------------------------------------         14260000
+                                                                        14270000
+BP_LIGO  DS    0H                                                       14280000
+         ICM   R0,15,SBPAVAL      VALUE REFERENCE PREV POSTED?          14290000
+         BNZ   BP_LIERR           ERROR IF SO                           14300000
+                                                                        14310000
+         TM    SBPVTYPE,SBPV$NUL  NULL STRING?                          14320000
+         BO    BP_LIERR           ERROR IF VALUE ALREADY PROVIDED       14330000
+         TM    SBPVTYPE,SBPV$HOS  HOST VARIABLE?                        14340000
+         BO    BP_LIERR           ERROR IF VALUE ALREADY PROVIDED       14350000
+                                                                        14360000
+         MVC   SBPVAL@C,#CTREE_STOKEN    RETAIN #CLEX ENTRY PTR         14370000
+         GTCALL $LITERAL          CREATE REPRESENTATION FOR LITERAL     14380000
+         CH    R15,=AL2(RC04)     TEST COMPLETION STATUS                14390000
+         BH    BP_LIERR           FAILURE                               14400000
+         BL    *+8                LITERAL EXTRACTED                     14410000
+         OI    SBPVTYPE,SBPV$NUL  NULL STRING                           14420000
+                                                                        14430000
+         ST    R1,SBPAVAL         SAVE PTR TO EDITTED LITERAL           14440000
+         STH   R0,SBPLVAL         SAVE EDITTED LITERAL LENGTH           14450000
+                                                                        14460000
+*--------------------------------------------------------------         14470000
+*   Enqueue basic predicate to chain if complete                        14480000
+*--------------------------------------------------------------         14490000
+                                                                        14500000
+         ICM   R0,15,SBPACOL      COMPARAND POSTED YET?                 14510000
+         BZ    BP_LIFIN           SKIP POSTING IF NOT                   14520000
+                                                                        14530000
+         L     R3,SQSEXTRE+4      ADDR OF LAST TABLE NAME POSTED        14540000
+         ST    R6,0(,R3)          INSERT OURSELF AT END OF QUEUE        14550000
+         ST    R6,SQSEXTRE+4      RESET END-OF-QUEUE PTR                14560000
+                                                                        14570000
+         L     R15,SQSEXTRE+8     UPDATE TABLE REFERENCE COUNT          14580000
+         LA    R15,1(,R15)                                              14590000
+         ST    R15,SQSEXTRE+8                                           14600000
+                                                                        14610000
+         XC    SQSEXNOD,SQSEXNOD  CLEAR STAGING AREA PTR                14620000
+         DROP  R6                 SQTABREF                              14630000
+                                                                        14640000
+*--------------------------------------------------------------         14650000
+*   Return to requester with completion status                          14660000
+*--------------------------------------------------------------         14670000
+                                                                        14680000
+BP_LIFIN DS    0H                                                       14690000
+         LA    R15,RC00           NORMAL COMPLETION                     14700000
+         B     BP_LIXIT           DONE                                  14710000
+                                                                        14720000
+BP_LIERR DS    0H                                                       14730000
+         LA    R15,RC04           FAILURE                               14740000
+                                                                        14750000
+BP_LIXIT DS    0H                                                       14760000
+         GTEXIT ,                                                       14770000
+                                                                        14780000
+         EJECT                                                          14790000
+***************************************************************         14800000
+*                                                                       14810000
+* ROUTINE: BP_HOSTV - PROCESS BASIC-PREDICATE HOST VARIABLE             14820000
+*                                                                       14830000
+***************************************************************         14840000
+                                                                        14850000
+BP_HOSTV GTENTER ,                                                      14860000
+                                                                        14870000
+         ICM   R6,15,SQSEXNOD     BASIC PREDICATE OPENED?               14880000
+         BNZ   BP_HOSGO           MODIFY/COMPLETE IT IF SO              14890000
+         USING SBPTERM,R6         DECLARE INTENTIONS                    14900000
+                                                                        14910000
+         L     R3,SQSPOOL@                                              14920000
+         STGGET SBPTLN,QH=(R3)                                          14930000
+         BNZ   BP_HOERR                                                 14940000
+                                                                        14950000
+         LR    R6,R1              BASIC PREDICATE SUMMARY NODE          14960000
+         ST    R6,SQSEXNOD        SAVE FOR SUBSEQUENT OPERATIONS        14970000
+         ST    R6,SQSEXOLD        NEW NODE IS LAST NODE                 14980000
+         MVI   SBPNTYPE,SBPN$BPE  MARK NODE AS BASIC PREDICATE TYPE     14990000
+                                                                        15000000
+*--------------------------------------------------------------         15010000
+*   Mark value as host variable - maintenance reference                 15020000
+*--------------------------------------------------------------         15030000
+                                                                        15040000
+BP_HOSGO DS    0H                                                       15050000
+         ICM   R0,15,SBPAVAL      VALUE REFERENCE PREV POSTED?          15060000
+         BNZ   BP_HOERR           ERROR IF SO                           15070000
+         TM    SBPVTYPE,SBPV$NUL  NULL STRING?                          15080000
+         BO    BP_HOERR           ERROR IF VALUE ALREADY PROVIDED       15090000
+         TM    SBPVTYPE,SBPV$HOS  HOST VARIABLE ?                       15100000
+         BO    BP_HOERR           ERROR IF VALUE ALREADY PROVIDED       15110000
+         OI    SBPVTYPE,SBPV$HOS  MARK VALUE AS HOST VARIABLE           15120000
+         L     R1,#CTREE_STOKEN   R1 <== #CLEX ENTRY                    15130000
+         ST    R1,SBPVAL@C        RETAIN #CLEX ENTRY PTR                15140000
+                                                                        15150000
+*--------------------------------------------------------------         15160000
+*   Enqueue basic predicate to chain if complete                        15170000
+*--------------------------------------------------------------         15180000
+                                                                        15190000
+         ICM   R0,15,SBPACOL      COMPARAND POSTED YET?                 15200000
+         BZ    BP_HOFIN           SKIP POSTING IF NOT                   15210000
+                                                                        15220000
+         L     R3,SQSEXTRE+4      ADDR OF LAST TABLE NAME POSTED        15230000
+         ST    R6,0(,R3)          INSERT OURSELF AT END OF QUEUE        15240000
+         ST    R6,SQSEXTRE+4      RESET END-OF-QUEUE PTR                15250000
+                                                                        15260000
+         L     R15,SQSEXTRE+8     UPDATE TABLE REFERENCE COUNT          15270000
+         LA    R15,1(,R15)                                              15280000
+         ST    R15,SQSEXTRE+8                                           15290000
+                                                                        15300000
+         XC    SQSEXNOD,SQSEXNOD  CLEAR STAGING AREA PTR                15310000
+         DROP  R6                 SQTABREF                              15320000
+                                                                        15330000
+*--------------------------------------------------------------         15340000
+*   Return to requester with completion status                          15350000
+*--------------------------------------------------------------         15360000
+                                                                        15370000
+BP_HOFIN DS    0H                                                       15380000
+         LA    R15,RC00           NORMAL COMPLETION                     15390000
+         B     BP_HOXIT           DONE                                  15400000
+                                                                        15410000
+BP_HOERR DS    0H                                                       15420000
+         LA    R15,RC04           FAILURE                               15430000
+                                                                        15440000
+BP_HOXIT DS    0H                                                       15450000
+         GTEXIT ,                                                       15460000
+                                                                        15470000
+         EJECT                                                          15480000
+***************************************************************         15490000
+*                                                                       15500000
+* ROUTINE: UPCOLNM - UPDATE SET CLAUSE - COLUMN DESIGNATION             15510000
+*                                                                       15520000
+***************************************************************         15530000
+                                                                        15540000
+UPCOLNM  GTENTER ,                                                      15550000
+                                                                        15560000
+         L     R3,SQSPOOL@                                              15570000
+         STGGET SBPTLN,QH=(R3)                                          15580000
+         BNZ   UPCOLERR                                                 15590000
+                                                                        15600000
+         LR    R6,R1              BASIC PREDICATE SUMMARY NODE          15610000
+PFX      USING PREDENT,R6         PREDICATE LIST NODE - COMMON PFX      15620000
+BPT      USING SBPTERM,R6         BASIC PREDICATE FORMAT                15630000
+                                                                        15640000
+         ST    R6,SQSEXNOD        SAVE FOR SUBSEQUENT OPERATIONS        15650000
+         ST    R6,SQSEXOLD        NEW NODE IS LAST NODE                 15660000
+         MVI   PFX.PREDTYPE,PRED$SET    MARK AS SET CALUSE TYPE         15670000
+         MVI   BPT.SBPCOMP,SBPC$EQ      ASSIGNMENT FIXED BY GRAMMAR     15680000
+                                                                        15690000
+*--------------------------------------------------------------         15700000
+*   Build column reference                                              15710000
+*--------------------------------------------------------------         15720000
+                                                                        15730000
+         ICM   R0,15,BPT.SBPACOL  COLUMN REFERENCE PREV POSTED?         15740000
+         BNZ   UPCOLERR           ERROR IF SO                           15750000
+                                                                        15760000
+         MVC   BPT.SBPCOL@C,#CTREE_STOKEN    RETAIN #CLEX ENTRY         15770000
+                                                                        15780000
+         LA    R1,SQSACOLS        R1 <== COLUMN LIST ORIGIN             15790000
+         GTCALL $CLOCATE          LOOKUP COLUMN NAME                    15800000
+         LTR   R15,R15            FOUND OR BUILT ENTRY (R1) ?           15810000
+         BNZ   UPCOLERR           FAILURE                               15820000
+                                                                        15830000
+         ST    R1,BPT.SBPACOL     POST COLUMN REFERENCE                 15840000
+                                                                        15850000
+*--------------------------------------------------------------         15860000
+*   Return to requester with completion status                          15870000
+*--------------------------------------------------------------         15880000
+                                                                        15890000
+         LA    R15,RC00           NORMAL COMPLETION                     15900000
+         B     UPCOLXIT           DONE                                  15910000
+                                                                        15920000
+UPCOLERR DS    0H                                                       15930000
+         LA    R15,RC04           FAILURE                               15940000
+                                                                        15950000
+UPCOLXIT DS    0H                                                       15960000
+         GTEXIT ,                                                       15970000
+                                                                        15980000
+         EJECT                                                          15990000
+***************************************************************         16000000
+*                                                                       16010000
+* ROUTINE: UPLIT - UPDATE SET CLAUSE COLUMN VALUE                       16020000
+*                                                                       16030000
+***************************************************************         16040000
+                                                                        16050000
+UPLIT    GTENTER ,                                                      16060000
+                                                                        16070000
+         ICM   R6,15,SQSEXNOD     SET COLUMN NAME POSTED?               16080000
+         BZ    UPLITERR           ERROR IF NOT                          16090000
+         USING SBPTERM,R6         DECLARE INTENTIONS                    16100000
+                                                                        16110000
+*--------------------------------------------------------------         16120000
+*   Edit and store literal value - maintain reference                   16130000
+*--------------------------------------------------------------         16140000
+                                                                        16150000
+         MVC   SBPVAL@C,#CTREE_STOKEN    RETAIN #CLEX ENTRY PTR         16160000
+         GTCALL $LITERAL          CREATE REPRESENTATION FOR LITERAL     16170000
+         CH    R15,=AL2(RC04)     TEST COMPLETION STATUS                16180000
+         BH    UPLITERR           FAILURE                               16190000
+         BL    *+8                LITERAL EXTRACTED                     16200000
+         OI    SBPVTYPE,SBPV$NUL  NULL STRING                           16210000
+                                                                        16220000
+         ST    R1,SBPAVAL         SAVE PTR TO EDITTED LITERAL           16230000
+         STH   R0,SBPLVAL         SAVE EDITTED LITERAL LENGTH           16240000
+                                                                        16250000
+*--------------------------------------------------------------         16260000
+*   Enqueue update-set directive                                        16270000
+*--------------------------------------------------------------         16280000
+                                                                        16290000
+         L     R3,SQSASETS+4      COLUMN VALUES LIST LAST ENTRY         16300000
+         ST    R6,0(,R3)          SET FORWARD PTR TO NEW NODE           16310000
+         ST    R6,SQSASETS+4      ADD LINKAGE NODE TO END OF LIST       16320000
+                                                                        16330000
+         L     R15,SQSASETS+8     UPDATE VALUE LIST ENTRY COUNT         16340000
+         LA    R15,1(,R15)                                              16350000
+         ST    R15,SQSASETS+8                                           16360000
+                                                                        16370000
+         XC    SQSEXNOD,SQSEXNOD  RESET WORKAREA PTR                    16380000
+         DROP  R6                 SBPTERM                               16390000
+                                                                        16400000
+*--------------------------------------------------------------         16410000
+*   Return to requester with completion status                          16420000
+*--------------------------------------------------------------         16430000
+                                                                        16440000
+         LA    R15,RC00           NORMAL COMPLETION                     16450000
+         B     UPLITXIT           DONE                                  16460000
+                                                                        16470000
+UPLITERR DS    0H                                                       16480000
+         LA    R15,RC04           FAILURE                               16490000
+                                                                        16500000
+UPLITXIT DS    0H                                                       16510000
+         GTEXIT ,                                                       16520000
+                                                                        16530000
+         EJECT                                                          16540000
+***************************************************************         16550000
+*                                                                       16560000
+* ROUTINE: UPHOSTV - UPDATE SET CLAUSE HOST VARIABLE                    16570000
+*                                                                       16580000
+***************************************************************         16590000
+                                                                        16600000
+UPHOSTV  GTENTER ,                                                      16610000
+                                                                        16620000
+         ICM   R6,15,SQSEXNOD     SET COLUMN NAME POSTED?               16630000
+         BZ    UHOSERR            ERROR IF NOT                          16640000
+         USING SBPTERM,R6         DECLARE INTENTIONS                    16650000
+                                                                        16660000
+*--------------------------------------------------------------         16670000
+*   Edit and store literal value - maintain reference                   16680000
+*--------------------------------------------------------------         16690000
+                                                                        16700000
+         L     R1,#CTREE_STOKEN   R1 <== #CLEX ENTRY                    16710000
+         ST    R1,SBPVAL@C        RETAIN #CLEX ENTRY PTR                16720000
+         OI    SBPVTYPE,SBPV$HOS  MARK VALUE AS HOST VARIABLE           16730000
+                                                                        16740000
+*--------------------------------------------------------------         16750000
+*   Enqueue update-set directive                                        16760000
+*--------------------------------------------------------------         16770000
+                                                                        16780000
+         L     R3,SQSASETS+4      COLUMN VALUES LIST LAST ENTRY         16790000
+         ST    R6,0(,R3)          SET FORWARD PTR TO NEW NODE           16800000
+         ST    R6,SQSASETS+4      ADD LINKAGE NODE TO END OF LIST       16810000
+                                                                        16820000
+         L     R15,SQSASETS+8     UPDATE VALUE LIST ENTRY COUNT         16830000
+         LA    R15,1(,R15)                                              16840000
+         ST    R15,SQSASETS+8                                           16850000
+                                                                        16860000
+         XC    SQSEXNOD,SQSEXNOD  RESET WORKAREA PTR                    16870000
+         DROP  R6                 SBPTERM                               16880000
+                                                                        16890000
+*--------------------------------------------------------------         16900000
+*   Return to requester with completion status                          16910000
+*--------------------------------------------------------------         16920000
+                                                                        16930000
+         LA    R15,RC00           NORMAL COMPLETION                     16940000
+         B     UHOSEXIT           DONE                                  16950000
+                                                                        16960000
+UHOSERR  DS    0H                                                       16970000
+         LA    R15,RC04           FAILURE                               16980000
+                                                                        16990000
+UHOSEXIT DS    0H                                                       17000000
+         GTEXIT ,                                                       17010000
+                                                                        17020000
+         EJECT                                                          17030000
+***************************************************************         17040000
+*                                                                       17050000
+* ROUTINE: LIT - PROCESS FREE-STANDING LITERAL VALUE                    17060000
+*                                                                       17070000
+***************************************************************         17080000
+                                                                        17090000
+LIT      GTENTER ,                                                      17100000
+                                                                        17110000
+         L     R3,SQSPOOL@                                              17120000
+         STGGET SBPTLN,QH=(R3)                                          17130000
+         BNZ   LITERR                                                   17140000
+                                                                        17150000
+         LR    R6,R1              BASIC PREDICATE SUMMARY NODE          17160000
+         USING SBPTERM,R6         DECLARE INTENTIONS                    17170000
+                                                                        17180000
+*--------------------------------------------------------------         17190000
+*   Edit and store literal value - maintain reference                   17200000
+*--------------------------------------------------------------         17210000
+                                                                        17220000
+         MVI   SBPNTYPE,SBPN$BPE  MARK NODE AS BASIC PREDICATE TYPE     17230000
+         MVC   SBPVAL@C,#CTREE_STOKEN    RETAIN #CLEX ENTRY PTR         17240000
+         GTCALL $LITERAL          CREATE REPRESENTATION FOR LITERAL     17250000
+         CH    R15,=AL2(RC04)     TEST COMPLETION STATUS                17260000
+         BH    LITERR             FAILURE                               17270000
+         BL    *+8                LITERAL EXTRACTED                     17280000
+         OI    SBPVTYPE,SBPV$NUL  NULL STRING                           17290000
+                                                                        17300000
+         ST    R1,SBPAVAL         SAVE PTR TO EDITTED LITERAL           17310000
+         STH   R0,SBPLVAL         SAVE EDITTED LITERAL LENGTH           17320000
+                                                                        17330000
+*--------------------------------------------------------------         17340000
+*   Enqueue literal reference                                           17350000
+*--------------------------------------------------------------         17360000
+                                                                        17370000
+         L     R3,SQSAVALS+4      COLUMN VALUES LIST LAST ENTRY         17380000
+         ST    R6,0(,R3)          SET FORWARD PTR TO NEW NODE           17390000
+         ST    R6,SQSAVALS+4      ADD LINKAGE NODE TO END OF LIST       17400000
+                                                                        17410000
+         L     R15,SQSAVALS+8     UPDATE VALUE LIST ENTRY COUNT         17420000
+         LA    R15,1(,R15)                                              17430000
+         ST    R15,SQSAVALS+8                                           17440000
+         DROP  R6                 SBPTERM                               17450000
+                                                                        17460000
+*--------------------------------------------------------------         17470000
+*   Return to requester with completion status                          17480000
+*--------------------------------------------------------------         17490000
+                                                                        17500000
+         LA    R15,RC00           NORMAL COMPLETION                     17510000
+         B     LITEXIT            DONE                                  17520000
+                                                                        17530000
+LITERR   DS    0H                                                       17540000
+         LA    R15,RC04           FAILURE                               17550000
+                                                                        17560000
+LITEXIT  DS    0H                                                       17570000
+         GTEXIT ,                                                       17580000
+                                                                        17590000
+         EJECT                                                          17600000
+***************************************************************         17610000
+*                                                                       17620000
+* ROUTINE: INS_NULL - PROCESS 'NULL' FOR INSERT VALUE CLAUSE            17630000
+*                                                                       17640000
+***************************************************************         17650000
+                                                                        17660000
+INS_NULL GTENTER ,                                                      17670000
+                                                                        17680000
+         L     R3,SQSPOOL@                                              17690000
+         STGGET SBPTLN,QH=(R3)                                          17700000
+         BNZ   NULL_ERR                                                 17710000
+                                                                        17720000
+         LR    R6,R1              BASIC PREDICATE SUMMARY NODE          17730000
+         USING SBPTERM,R6         DECLARE INTENTIONS                    17740000
+                                                                        17750000
+*--------------------------------------------------------------         17760000
+*   Edit and store literal value - maintain reference                   17770000
+*--------------------------------------------------------------         17780000
+                                                                        17790000
+         MVI   SBPNTYPE,SBPN$BPE  MARK NODE AS BASIC PREDICATE TYPE     17800000
+         L     R1,#CTREE_STOKEN   R1 <== #CLEX ENTRY                    17810000
+         USING #CLEX_NODE_S,R1    TOKEN FORMAT                          17820000
+         ST    R1,SBPVAL@C        RETAIN #CLEX ENTRY PTR                17830000
+                                                                        17840000
+         OI    SBPVTYPE,SBPV$DFT  EXPLICIT NULL                         17850000
+                                                                        17860000
+         LH    R0,#CLEX_LENGTH    LENGTH OF TOKEN                       17870000
+         LA    R1,#CLEX_TOKEN     TEXT ORIGIN                           17880000
+                                                                        17890000
+         ST    R1,SBPAVAL         SAVE PTR TO EDITTED LITERAL           17900000
+         STH   R0,SBPLVAL         SAVE EDITTED LITERAL LENGTH           17910000
+                                                                        17920000
+*--------------------------------------------------------------         17930000
+*   Enqueue literal reference                                           17940000
+*--------------------------------------------------------------         17950000
+                                                                        17960000
+         L     R3,SQSAVALS+4      COLUMN VALUES LIST LAST ENTRY         17970000
+         ST    R6,0(,R3)          SET FORWARD PTR TO NEW NODE           17980000
+         ST    R6,SQSAVALS+4      ADD LINKAGE NODE TO END OF LIST       17990000
+                                                                        18000000
+         L     R15,SQSAVALS+8     UPDATE VALUE LIST ENTRY COUNT         18010000
+         LA    R15,1(,R15)                                              18020000
+         ST    R15,SQSAVALS+8                                           18030000
+         DROP  R1,R6              SBPTERM                               18040000
+                                                                        18050000
+*--------------------------------------------------------------         18060000
+*   Return to requester with completion status                          18070000
+*--------------------------------------------------------------         18080000
+                                                                        18090000
+         LA    R15,RC00           NORMAL COMPLETION                     18100000
+         B     NULL_XIT           DONE                                  18110000
+                                                                        18120000
+NULL_ERR DS    0H                                                       18130000
+         LA    R15,RC04           FAILURE                               18140000
+                                                                        18150000
+NULL_XIT DS    0H                                                       18160000
+         GTEXIT ,                                                       18170000
+                                                                        18180000
+         EJECT                                                          18190000
+***************************************************************         18200000
+*                                                                       18210000
+* ROUTINE: SET_NULL - PROCESS 'NULL' FOR UPDATE SET CLAUSE              18220000
+*                                                                       18230000
+***************************************************************         18240000
+                                                                        18250000
+SET_NULL GTENTER ,                                                      18260000
+                                                                        18270000
+         ICM   R6,15,SQSEXNOD     SET COLUMN NAME POSTED?               18280000
+         BZ    SNULLERR           ERROR IF NOT                          18290000
+         USING SBPTERM,R6         DECLARE INTENTIONS                    18300000
+                                                                        18310000
+*--------------------------------------------------------------         18320000
+*   Edit and store literal value - maintain reference                   18330000
+*--------------------------------------------------------------         18340000
+                                                                        18350000
+         L     R1,#CTREE_STOKEN   R1 <== #CLEX ENTRY                    18360000
+         USING #CLEX_NODE_S,R1    TOKEN FORMAT                          18370000
+         ST    R1,SBPVAL@C        RETAIN #CLEX ENTRY PTR                18380000
+                                                                        18390000
+         OI    SBPVTYPE,SBPV$DFT  EXPLICIT NULL                         18400000
+                                                                        18410000
+         LH    R0,#CLEX_LENGTH    LENGTH OF TOKEN                       18420000
+         LA    R1,#CLEX_TOKEN     TEXT ORIGIN                           18430000
+                                                                        18440000
+         ST    R1,SBPAVAL         SAVE PTR TO EDITTED LITERAL           18450000
+         STH   R0,SBPLVAL         SAVE EDITTED LITERAL LENGTH           18460000
+                                                                        18470000
+*--------------------------------------------------------------         18480000
+*   Enqueue update-set directive                                        18490000
+*--------------------------------------------------------------         18500000
+                                                                        18510000
+         L     R3,SQSASETS+4      COLUMN VALUES LIST LAST ENTRY         18520000
+         ST    R6,0(,R3)          SET FORWARD PTR TO NEW NODE           18530000
+         ST    R6,SQSASETS+4      ADD LINKAGE NODE TO END OF LIST       18540000
+                                                                        18550000
+         L     R15,SQSASETS+8     UPDATE VALUE LIST ENTRY COUNT         18560000
+         LA    R15,1(,R15)                                              18570000
+         ST    R15,SQSASETS+8                                           18580000
+                                                                        18590000
+         XC    SQSEXNOD,SQSEXNOD  RESET WORKAREA PTR                    18600000
+         DROP  R1,R6              SBPTERM                               18610000
+                                                                        18620000
+*--------------------------------------------------------------         18630000
+*   Return to requester with completion status                          18640000
+*--------------------------------------------------------------         18650000
+                                                                        18660000
+         LA    R15,RC00           NORMAL COMPLETION                     18670000
+         B     SNULLXIT           DONE                                  18680000
+                                                                        18690000
+SNULLERR DS    0H                                                       18700000
+         LA    R15,RC04           FAILURE                               18710000
+                                                                        18720000
+SNULLXIT DS    0H                                                       18730000
+         GTEXIT ,                                                       18740000
+                                                                        18750000
+         EJECT                                                          18760000
+***************************************************************         18770000
+*                                                                       18780000
+* ROUTINE: IHOSTV - PROCESS FREE_STANDING HOST VARIABLE                 18790000
+*                                                                       18800000
+***************************************************************         18810000
+                                                                        18820000
+IHOSTV   GTENTER ,                                                      18830000
+                                                                        18840000
+         L     R3,SQSPOOL@                                              18850000
+         STGGET SBPTLN,QH=(R3)                                          18860000
+         BNZ   IHOSERR                                                  18870000
+                                                                        18880000
+         LR    R6,R1              BASIC PREDICATE SUMMARY NODE          18890000
+         USING SBPTERM,R6         DECLARE INTENTIONS                    18900000
+                                                                        18910000
+*--------------------------------------------------------------         18920000
+*   Edit and store literal value - maintain reference                   18930000
+*--------------------------------------------------------------         18940000
+                                                                        18950000
+         MVI   SBPNTYPE,SBPN$BPE  MARK NODE AS BASIC PREDICATE TYPE     18960000
+         L     R1,#CTREE_STOKEN   R1 <== #CLEX ENTRY                    18970000
+         ST    R1,SBPVAL@C        RETAIN #CLEX ENTRY PTR                18980000
+         OI    SBPVTYPE,SBPV$HOS  MARK VALUE AS HOST VARIABLE           18990000
+                                                                        19000000
+*--------------------------------------------------------------         19010000
+*   Enqueue literal reference                                           19020000
+*--------------------------------------------------------------         19030000
+                                                                        19040000
+         L     R3,SQSAVALS+4      COLUMN VALUES LIST LAST ENTRY         19050000
+         ST    R6,0(,R3)          SET FORWARD PTR TO NEW NODE           19060000
+         ST    R6,SQSAVALS+4      ADD LINKAGE NODE TO END OF LIST       19070000
+                                                                        19080000
+         L     R15,SQSAVALS+8     UPDATE VALUE LIST ENTRY COUNT         19090000
+         LA    R15,1(,R15)                                              19100000
+         ST    R15,SQSAVALS+8                                           19110000
+         DROP  R6                 SBPTERM                               19120000
+                                                                        19130000
+*--------------------------------------------------------------         19140000
+*   Return to requester with completion status                          19150000
+*--------------------------------------------------------------         19160000
+                                                                        19170000
+         LA    R15,RC00           NORMAL COMPLETION                     19180000
+         B     IHOSXIT            DONE                                  19190000
+                                                                        19200000
+IHOSERR  DS    0H                                                       19210000
+         LA    R15,RC04           FAILURE                               19220000
+                                                                        19230000
+IHOSXIT  DS    0H                                                       19240000
+         GTEXIT ,                                                       19250000
+                                                                        19260000
+         EJECT                                                          19270000
+***************************************************************         19280000
+*                                                                       19290000
+* ROUTINE: CONNECT - BUILD CONNECTOR TREE NODE                          19300000
+*                                                                       19310000
+***************************************************************         19320000
+                                                                        19330000
+CONNECT  GTENTER  ,                                                     19340000
+         LR    R3,R1              SAVE PTR TO GTXPLIST ACROSS STG GET   19350000
+         DROP  R1                                                       19360000
+         USING GTXPLIST,R3        RESET INTENTIONS                      19370000
+                                                                        19380000
+         L     R2,SQSPOOL@                                              19390000
+         STGGET PRBCONLN,QH=(R2)                                        19400000
+         BNZ   CONERR                                                   19410000
+                                                                        19420000
+         LR    R6,R1              BASIC PREDICATE CONNECTOR NODE        19430000
+         USING PRBCON,R6          DECLARE INTENTIONS                    19440000
+                                                                        19450000
+         MVI   PRBTYPE,PRB$CON    MARK AS PREDICATE CONNECTOR NODE      19460000
+         MVC   PRBLVL,GTXPLVL     CAPTURE NESTING LEVEL / DEPTH         19470000
+                                                                        19480000
+*--------------------------------------------------------------         19490000
+*   Identify connector                                                  19500000
+*--------------------------------------------------------------         19510000
+                                                                        19520000
+         L     R2,#CTREE_STOKEN   CLEX ENTRY                            19530000
+         USING #CLEX_NODE_S,R2    TOKEN FORMAT                          19540000
+         ST    R2,PRBCON@C        RETAIN #CLEX FOR ERROR ANALYSIS       19550000
+                                                                        19560000
+         MVI   PRBCONTP,PRBC$OR   ASSUME IT IS AN OR CONNECTOR          19570000
+                                                                        19580000
+         CLC   #CLEX_TOKEN(*-*),=C'NOT'    IS IT NOT?                   19590000
+         BNE   CONAND             NO - GO CHECK FOR AND CONNECTOR       19600000
+         MVI   PRBCONTP,PRBC$NOT  CONNECTOR NODE IS A NOT               19610000
+         B     CONEND             GO RETURN TO REQUESTER                19620000
+                                                                        19630000
+CONAND   CLC   #CLEX_TOKEN(*-*),=C'AND'    IS IT AND?                   19640000
+         BNE   CONEND             NO -THEN ITS OR SO WE ARE DONE        19650000
+         MVI   PRBCONTP,PRBC$AND  CONNECTOR NODE IS AN AND              19660000
+         DROP  R2                                                       19670000
+                                                                        19680000
+CONEND   DS    0H                                                       19690000
+                                                                        19700000
+*--------------------------------------------------------------         19710000
+*   Enqueue connector node                                              19720000
+*--------------------------------------------------------------         19730000
+                                                                        19740000
+         L     R3,SQSEXTRE+4      ADDR OF LAST TABLE NAME POSTED        19750000
+         ST    R6,0(,R3)          INSERT OURSELF AT END OF QUEUE        19760000
+         ST    R6,SQSEXTRE+4      RESET END-OF-QUEUE PTR                19770000
+                                                                        19780000
+         L     R15,SQSEXTRE+8     UPDATE TABLE REFERENCE COUNT          19790000
+         LA    R15,1(,R15)                                              19800000
+         ST    R15,SQSEXTRE+8                                           19810000
+                                                                        19820000
+         XC    SQSEXNOD,SQSEXNOD  CLEAR STAGING AREA PTR                19830000
+         DROP  R6                 SQTABREF                              19840000
+                                                                        19850000
+         LA    R15,RC00           NORMAL COMPLETION                     19860000
+         B     CONEXIT            DONE                                  19870000
+                                                                        19880000
+CONERR   DS    0H                                                       19890000
+         LA    R15,RC04           FAILURE                               19900000
+                                                                        19910000
+CONEXIT  DS    0H                                                       19920000
+         GTEXIT  ,                                                      19930000
+                                                                        19940000
+         EJECT                                                          19950000
+***************************************************************         19960000
+*                                                                       19970000
+* ROUTINE: BP_UNOPR - UNARY OPERATOR SPECIFIED                          19980000
+*                                                                       19990000
+***************************************************************         20000000
+                                                                        20010000
+BP_UNOPR GTENTER ,                                                      20020000
+                                                                        20030000
+         L     R6,SQSEXNOD        BASIC PREDICATE ADDRESS               20040000
+         USING SBPTERM,R6         DECLARE INTENTIONS                    20050000
+                                                                        20060000
+         OI    SBPVTYPE,SBPV$NEG  INDICATE VALUE IS NEGATIVE            20070000
+                                                                        20080000
+         LA    R15,RC00           NORMAL COMPLETION                     20090000
+         GTEXIT  ,                                                      20100000
+                                                                        20110000
+         EJECT                                                          20120000
+***************************************************************         20130000
+*                                                                       20140000
+* ROUTINE: DISTINCT - DISTINCT KEYWORD PRESENT ON SELECT                20150000
+*                                                                       20160000
+***************************************************************         20170000
+                                                                        20180000
+DISTINCT GTENTER ,                                                      20190000
+                                                                        20200000
+         MVI   SQSDIST,SQS$DIST   INDICATE DISTINCT SPECIFIED           20210000
+                                                                        20220000
+         LA    R15,RC00           NORMAL COMPLETION                     20230000
+         GTEXIT  ,                                                      20240000
+                                                                        20250000
+         EJECT                                                          20260000
+***************************************************************         20270000
+*                                                                       20280000
+* ROUTINE: ALL - ALL KEYWORD PRESENT ON SELECT                          20290000
+*                                                                       20300000
+***************************************************************         20310000
+                                                                        20320000
+ALL      GTENTER ,                                                      20330000
+                                                                        20340000
+         MVI   SQSDIST,SQS$ALL    INDICATE DISTINCT SPECIFIED           20350000
+                                                                        20360000
+         LA    R15,RC00           NORMAL COMPLETION                     20370000
+         GTEXIT  ,                                                      20380000
+                                                                        20390000
+         EJECT                                                          20400000
+***************************************************************         20410000
+*                                                                       20420000
+* ROUTINE: $CLOCATE - Locate column reference                           20430000
+*                                                                       20440000
+* ON ENTRY:                                                             20450000
+*                                                                       20460000
+*    GTENTER register usage conventions                                 20470000
+*                                                                       20480000
+*    R1 - addr of column descriptor node (sqcolref) queue anhcor        20490000
+*                                                                       20500000
+* ON EXIT:                                                              20510000
+*                                                                       20520000
+*    R15 contains one of the following return codes                     20530000
+*                                                                       20540000
+*        RC00 - column reference node returned in R1                    20550000
+*                                                                       20560000
+*               RSN00:  column reference created previously             20570000
+*               RSN04:  new column reference created                    20580000
+*                                                                       20590000
+*        RC04 - invalid column name or environmental error              20600000
+*                                                                       20610000
+***************************************************************         20620000
+                                                                        20630000
+$CLOCATE GTENTER LEVEL=SUB                                              20640000
+                                                                        20650000
+         LR    R5,R1              COLUMN LIST ANCHOR WORD               20660000
+         USING SQCOLREF,R5        COLUMN ENTRY FORMAT                   20670000
+                                                                        20680000
+*--------------------------------------------------------------         20690000
+*   locate & validate table name prefix to column name, if any          20700000
+*--------------------------------------------------------------         20710000
+                                                                        20720000
+         SR    R14,R14            ASSUME COLUMN NAME NOT PREFIXED       20730000
+         SR    R15,R15               TABLE NAME ORIGIN                  20740000
+                                                                        20750000
+         USING #CLEX_NODE_S,R6    TOKEN FORMAT                          20760000
+         L     R6,#CTREE_STOKEN   COLUMN NAME, FIRST COMPONENT          20770000
+         C     R6,#CTREE_ETOKEN   COLUMN NAME HAS SINGLE COMPONENT?     20780000
+         BE    $CLOCGO                                                  20790000
+                                                                        20800000
+         LH    R14,#CLEX_LENGTH   LENGTH OF PREFIX STRING               20810000
+         LA    R15,#CLEX_TOKEN    PREFIX ORIGIN                         20820000
+                                                                        20830000
+         CLI   0(R15),C'"'        EXTENDED FORMAT?                      20840000
+         BNE   $CLOPFXV           SKIP IF NOT                           20850000
+         LA    R15,1(,R15)        DISCARD DLMS                          20860000
+         SH    R14,=H'2'                                                20870000
+         DROP  R6                 #CLEX                                 20880000
+                                                                        20890000
+$CLOPFXV DS    0H                                                       20900000
+         LTR   R14,R14            VALID PREFIX STRING LENGTH?           20910000
+         BNP   $CLOCERR           FAILURE IF NOT                        20920000
+         CH    R14,=AL2(L'SQCOLNM)   CONFORMS TO SQL STANDARD?          20930000
+         BH    $CLOCERR           FAILURE IF NOT                        20940000
+                                                                        20950000
+*--------------------------------------------------------------         20960000
+*   locate & validate column name proper                                20970000
+*--------------------------------------------------------------         20980000
+                                                                        20990000
+$CLOCGO  DS    0H                                                       21000000
+         USING #CLEX_NODE_S,R6    TOKEN FORMAT                          21010000
+         L     R6,#CTREE_ETOKEN   CLEX ENTRY                            21020000
+         LH    R2,#CLEX_LENGTH    LENGTH OF COLUMN NAME                 21030000
+         LA    R3,#CLEX_TOKEN     LOCATE COLUMN NAME ORIGIN             21040000
+                                                                        21050000
+         CLI   0(R3),C'"'         EXTENDED FORMAT?                      21060000
+         BNE   $CLOVERF           SKIP IF NOT                           21070000
+         LA    R3,1(,R3)          DISCARD DLMS                          21080000
+         SH    R2,=H'2'                                                 21090000
+         DROP  R6                 #CLEX                                 21100000
+                                                                        21110000
+$CLOVERF DS    0H                                                       21120000
+         LTR   R2,R2              VALID COLUMN NAME LENGTH?             21130000
+         BNP   $CLOCERR           FAILURE IF NOT                        21140000
+         CH    R2,=AL2(L'SQCOLNM) CONFORMS TO SQL STANDARD?             21150000
+         BH    $CLOCERR           FAILURE IF NOT                        21160000
+                                                                        21170000
+*--------------------------------------------------------------         21180000
+*   locate column reference previously posted                           21190000
+*--------------------------------------------------------------         21200000
+                                                                        21210000
+         LR    R4,R2              RETAIN TRUE NAME LENGTH               21220000
+         BCTR  R2,0               PREPARE FOR USE WITH EX               21230000
+                                                                        21240000
+$CLOCNXT DS    0H                                                       21250000
+         ICM   R5,15,SQCOLINK     ADVANCE TO NEXT COLUMN REFERENCE      21260000
+         BZ    $CLOCBLD           N/A                                   21270000
+         CH    R4,SQCOLNML        MATCHING NAME LENGTHS?                21280000
+         BNE   $CLOCNXT           CONTINUE SEARCH IF NOT                21290000
+         CLC   SQCOLNM(*-*),0(R3) EX OBJECT                             21300000
+         EX    R2,*-6             MATCHING NAMES?                       21310000
+         BNE   $CLOCNXT           CONTINUE SEARCH IF NOT                21320000
+                                                                        21330000
+         LTR   R15,R15            TABLE NAME PREFIX PRESENT?            21340000
+         BZ    $CLOCMAT           MATCH FIRST OCCURRENCE IF NOT         21350000
+         ICM   R1,15,SQCTQ@C      PREVIOUS REF INCLUDES TABLE PFX?      21360000
+         BZ    $CLOCMAT           MATCH FIRST OCCURRENCE IF NOT         21370000
+                                                                        21380000
+CL       USING #CLEX_NODE_S,R1    TABLE PFX RETAINED IN #CLEX           21390000
+         CH    R14,CL.#CLEX_LENGTH      MATCHING COMPONENT LENGTHS?     21400000
+         BNE   $CLOCNXT                 NO MATCH OTHERWISE              21410000
+         CLC   CL.#CLEX_TOKEN(*-*),0(R15)                               21420000
+         EX    R14,*-6                  MATCHING NAME STRINGS?          21430000
+         BNE   $CLOCNXT                 (EXTRA BYTE REF IS SAFE!)       21440000
+         DROP  CL                 TABLE PREFIX #CLEX                    21450000
+                                                                        21460000
+*--------------------------------------------------------------         21470000
+*   update matched node w/ table prefix, context flags, etc.            21480000
+*--------------------------------------------------------------         21490000
+                                                                        21500000
+$CLOCMAT DS    0H                                                       21510000
+         LA    R1,SQCF$Q          ASSUME QUALIFIED NAME                 21520000
+         LTR   R15,R15            COL NAME INCLUDES TABLE PFX?          21530000
+         BNZ   *+8                SKIP IF SO                            21540000
+         LA    R1,SQCF$UQ         UNQUALIFIED COLUMN NAME               21550000
+         OI    SQCFLAGS,*-*       UPDATE COLUMN CONTEXT FLAGS           21560000
+         EX    R1,*-4                                                   21570000
+                                                                        21580000
+         LA    R0,RSN00           INDICATE COLUMN PREVIOUSLY DEFINED    21590000
+                                                                        21600000
+         LTR   R15,R15            TABLE NAME PFX PRESENT?               21610000
+         BZ    $CLOCHIT           COMPLETE IF N/A                       21620000
+         ICM   R1,15,SQCTQ@C      TABLE NAME PFX #CLEX PREV POSTED?     21630000
+         BNZ   $CLOCHIT           COMPLETE IF SO                        21640000
+         MVC   SQCTQ@C,#CTREE_STOKEN                                    21650000
+         B     $CLOCHIT           COMPLETE                              21660000
+                                                                        21670000
+*--------------------------------------------------------------         21680000
+*   construct new column reference entry                                21690000
+*--------------------------------------------------------------         21700000
+                                                                        21710000
+$CLOCBLD DS    0H                                                       21720000
+         EREG  R0,R1              REFRESH PARAMETERS                    21730000
+         LR    R5,R1              RESTABLISH COLUMN REF LIST ORIGIN     21740000
+                                                                        21750000
+         L     R9,SQSPOOL@                                              21760000
+         STGGET SQCLN,QH=(R9)                                           21770000
+         BNZ   $CLOCERR                                                 21780000
+                                                                        21790000
+         MVC   SQCOLINK-SQCOLREF(,R1),SQCOLINK                          21800000
+         ST    R1,SQCOLINK        ADD COL REF ENTRY TO LIST             21810000
+         LR    R5,R1              ADDRESS NEW ENTRY                     21820000
+         ST    R6,SQCOL@C         #CLEX ENTRY OF FIRST ENCOUNTER        21830000
+         STH   R4,SQCOLNML        POST NAME LENGTH                      21840000
+                                                                        21850000
+         EX    R2,*+4             INSERT COLUMN NAME                    21860000
+         MVC   SQCOLNM(*-*),0(R3) EX OBJECT                             21870000
+         OC    SQCOLNM,=CL32' '   UPPER CASE                            21880000
+                                                                        21890000
+*--------------------------------------------------------------         21900000
+*   update constructed node w/ table prefix, context flags, etc         21910000
+*--------------------------------------------------------------         21920000
+                                                                        21930000
+         LA    R0,RSN04           COLUMN REFERENCE BLOCK CREATED        21940000
+                                                                        21950000
+         CLC   #CTREE_STOKEN,#CTREE_ETOKEN                              21960000
+         BNE   $CLOBPFX                                                 21970000
+         OI    SQCFLAGS,SQCF$UQ                                         21980000
+         B     $CLOCHIT                                                 21990000
+                                                                        22000000
+$CLOBPFX DS    0H                                                       22010000
+         OI    SQCFLAGS,SQCF$Q                                          22020000
+         MVC   SQCTQ@C,#CTREE_STOKEN                                    22030000
+                                                                        22040000
+*--------------------------------------------------------------         22050000
+*   return column reference node or error indication                    22060000
+*--------------------------------------------------------------         22070000
+                                                                        22080000
+$CLOCHIT DS    0H                                                       22090000
+         LH    R1,SQCUCNT         GET CURRENT USE COUNT                 22100000
+         LA    R1,1(,R1)          BUMP IT BY ONE                        22110000
+         STH   R1,SQCUCNT         SAVE COLUMN USE COUNT                 22120000
+                                                                        22130000
+         LA    R1,SQCOLREF        RETURN COLUMN REFERENCE ENTRY         22140000
+         LA    R15,RC00           INDICATE NORMAL COMPLETION            22150000
+         B     $CLOCXIT           DONE                                  22160000
+                                                                        22170000
+$CLOCERR DS    0H                                                       22180000
+         SR    R1,R1                                                    22190000
+         LA    R15,RC04           REJECT COLUMN NAME                    22200000
+                                                                        22210000
+$CLOCXIT DS    0H                                                       22220000
+         GTEXIT ,                                                       22230000
+                                                                        22240000
+         EJECT                                                          22250000
+***************************************************************         22260000
+*                                                                       22270000
+* ROUTINE: $LITERAL - Validate and store literal                        22280000
+*                                                                       22290000
+* ON ENTRY:                                                             22300000
+*                                                                       22310000
+*    GTENTER register usage conventions                                 22320000
+*                                                                       22330000
+* ON EXIT:                                                              22340000
+*                                                                       22350000
+*    R15 contains one of the following return codes                     22360000
+*                                                                       22370000
+*        RC00 - validation and store complete                           22380000
+*                                                                       22390000
+*               R1 - literal origin                                     22400000
+*               R0 - literal length                                     22410000
+*                                                                       22420000
+*        RC04 - literal is the null string                              22430000
+*                                                                       22440000
+*        RC08 - insufficient storage / logic failure                    22450000
+*                                                                       22460000
+***************************************************************         22470000
+                                                                        22480000
+$LITERAL GTENTER LEVEL=SUB                                              22490000
+                                                                        22500000
+         L     R2,#CTREE_STOKEN   #CLEX ENTRY                           22510000
+         USING #CLEX_NODE_S,R2    TOKEN FORMAT                          22520000
+         LH    R3,#CLEX_LENGTH    LENGTH OF TOKEN                       22530000
+         LA    R4,#CLEX_TOKEN     TEXT ORIGIN                           22540000
+         AR    R4,R3              USE VALUE ASIS                        22550000
+                                                                        22560000
+         CLI   0(R4),C''''        STRING IN QUOTES?                     22570000
+         BNE   $LITALLO           ACCEPT AS IS IF NOT                   22580000
+         LA    R4,1(,R4)          DROP DLMS                             22590000
+         SH    R3,=H'2'           PRESUMES WELL-FORMED CONSTANT         22600000
+         BM    $LITERR            INVALID SYNTAX (UNEXPECTED)           22610000
+         BZ    $LITNULL           NULL STRING                           22620000
+         DROP  R2                 #CLEX                                 22630000
+                                                                        22640000
+*--------------------------------------------------------------         22650000
+*   Allocate retention area - remove escape chars                       22660000
+*--------------------------------------------------------------         22670000
+                                                                        22680000
+$LITALLO DS    0H                                                       22690000
+         L     R9,SQSPOOL@                                              22700000
+         STGGET (R3),QH=(R9)                                            22710000
+         BNZ   $LITERR                                                  22720000
+                                                                        22730000
+         LR    R2,R1              LITERAL ORIGIN                        22740000
+                                                                        22750000
+$LITNEXT DS    0H                 COPY / EDIT LITERAL                   22760000
+         CLI   0(R4),C''''        ESCAPE CHAR?                          22770000
+         BNE   $LITCOPY           MOVE VALUE BYTE TO RETENTION AREA     22780000
+         LA    R4,1(,R4)          ELSE QUOTES ALWAYS COME IN PAIRS      22790000
+         BCTR  R3,0               ADJUST LENGTH ACCORDINGLY             22800000
+                                                                        22810000
+$LITCOPY DS    0H                                                       22820000
+         MVC   0(1,R2),0(R4)      ACCEPT CHARACTER FROM SOURCE VALUE    22830000
+         LA    R2,1(,R2)          ADVANCE TO NEXT DEST CHAR             22840000
+         LA    R4,1(,R4)          ADVANCE TO NEXT SOURCE CHAR           22850000
+         SH    R3,=H'1'           ACCOUNT FOR CHAR MOVE                 22860000
+         BP    $LITNEXT           PROCESS NEXT VALUE CHAR               22870000
+         DROP  R7                 SQSEMAL                               22880000
+                                                                        22890000
+*--------------------------------------------------------------         22900000
+*   Return lteral and completion status to caller                       22910000
+*--------------------------------------------------------------         22920000
+                                                                        22930000
+         LR    R0,R2              COMPUTE LENGTH OF                     22940000
+         SR    R0,R1              STORED LITERAL                        22950000
+         LA    R15,RC00           INDICATE NON-NULL LITERAL             22960000
+         B     $LITEXIT           RETURN                                22970000
+                                                                        22980000
+$LITNULL DS    0H                 NULL STRING                           22990000
+         LA    R15,RC04                                                 23000000
+         SR    R1,R1                                                    23010000
+         SR    R0,R0                                                    23020000
+         B     $LITEXIT           RETURN                                23030000
+                                                                        23040000
+$LITERR  DS    0H                 ERROR PROCESSING / EDITTING LITERAL   23050000
+         LA    R15,RC08           INDICATE ERROR                        23060000
+         SR    R1,R1                                                    23070000
+         SR    R0,R0                                                    23080000
+                                                                        23090000
+$LITEXIT DS    0H                                                       23100000
+         GTEXIT ,                                                       23110000
+                                                                        23120000
+         EJECT                                                   153670 23130000
+***************************************************************         23140000
+*                                                                       23150000
+* ROUTINE: $INT - Validate and store integer constant                   23160000
+*                                                                       23170000
+* ON ENTRY:                                                             23180000
+*                                                                       23190000
+*    GTENTER register usage conventions                                 23200000
+*                                                                       23210000
+* ON EXIT:                                                              23220000
+*                                                                       23230000
+*    R15 contains one of the following return codes                     23240000
+*                                                                       23250000
+*        RC00 - validation complete, R0 contains value                  23260000
+*                                                                       23270000
+*        RC04 - value rejected                                          23280000
+*                                                                       23290000
+***************************************************************         23300000
+                                                                        23310000
+$INT     GTENTER LEVEL=SUB                                              23320000
+                                                                        23330000
+         L     R2,#CTREE_STOKEN   #CLEX ENTRY                           23340000
+         USING #CLEX_NODE_S,R2    TOKEN FORMAT                          23350000
+         LH    R3,#CLEX_LENGTH    LENGTH OF TOKEN                       23360000
+         LA    R4,#CLEX_TOKEN     TEXT ORIGIN                           23370000
+                                                                        23380000
+*--------------------------------------------------------------         23390000
+*   Return binary value and/or completion status to caller              23400000
+*--------------------------------------------------------------         23410000
+                                                                        23420000
+                                                                        23430000
+         C     R3,=F'10'          NUMBER OF DIGITS                      23440000
+         BH    $INT_ERR           REJECT IF UNREASONABLE                23450000
+                                                                        23460000
+         BCTR  R3,0               PREPARE FOR EX                        23470000
+         EX    R3,$INTPACK        CONVERT TO DECIMAL                    23480000
+         CP    DWORD,=P'2147483648'                                     23490000
+         BNL   $INT_ERR           OVER OUR LIMIT                        23500000
+                                                                        23510000
+         CVB   R0,DWORD           RETURN IN BINARY FORM                 23520000
+                                                                        23530000
+*--------------------------------------------------------------         23540000
+*   Return binary value and/or completion status to caller              23550000
+*--------------------------------------------------------------         23560000
+                                                                        23570000
+         LA    R15,RC00           INDICATE SUCCESS                      23580000
+         B     $INT_RET           RETURN R0                             23590000
+                                                                        23600000
+$INT_ERR DS    0H                                                       23610000
+         LA    R15,RC04           INDICATE VALUE REJECT                 23620000
+                                                                        23630000
+$INT_RET DS    0H                                                       23640000
+         GTEXIT ,                                                       23650000
+                                                                        23660000
+*--------------------------------------------------------------         23670000
+                                                                        23680000
+$INTPACK PACK  DWORD,0(*-*,R4)    CONVERT DIGIT STRING TO DECIMAL       23690000
+                                                                        23700000
+         EJECT                                                          23710000
+         PRINT NOGEN                                                    23720000
+         ICVT  ,                                                        23730000
+         ITASK ,                                                        23740000
+         END   ,                                                        23750000

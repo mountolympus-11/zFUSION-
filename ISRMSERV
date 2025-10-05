@@ -1,0 +1,355 @@
+ISRMSERV TITLE 'ISRMSERV - Shared Resource Manager Services'            00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE: ISRMSERV - Shared Resource Manager Services                  00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This routine implements the $SRM CREATE, ACQUIRE, and              00080000
+*    RELEASE functions.  It accepts a partial parameter list            00090000
+*    including the request code and resource identifier from            00100000
+*    the $SRM macro, completes the parameter list, and forwards         00110000
+*    it to the $INTMAIN.$SRM.  When a resource is created or            00120000
+*    acquired, a $RESMGR resource manager routine is established        00130000
+*    to ensure that program failures result in a release and/or         00140000
+*    deregistration of the resource.  When the resource is              00150000
+*    released, the resource manager routine is deleted.                 00160000
+*                                                                       00170000
+* ON ENTRY:                                                             00180000
+*                                                                       00190000
+*    R1  contains the address of a parameter list described by          00200000
+*        the PSRMP mapping expanded by $SRM DSECT=YES                   00210000
+*                                                                       00220000
+* ON EXIT:                                                              00230000
+*                                                                       00240000
+*    R15 contains one of the following return codes returned            00250000
+*        from the $SRM server                                           00260000
+*                                                                       00270000
+*        RC00 - request complete                                        00280000
+*                                                                       00290000
+*        RC04 - ACQUIRE request, but the named resource                 00300000
+*               is already owned by the designated workunit             00310000
+*                                                                       00320000
+*        RC08 - ACQUIRE or RELEASE request, but the named resource      00330000
+*               is not registered                                       00340000
+*                                                                       00350000
+*        RC12 - RELEASE request, but the named resource is not          00360000
+*               owned                                                   00370000
+*                                                                       00380000
+*        RC16 - RELEASE request zeroed the resource use count.          00390000
+*               The destructor routine completed with a non-zero        00400000
+*               return code or ABENDed                                  00410000
+*                                                                       00420000
+*        RC20 - CREATE request, but the named resource already          00430000
+*               exists                                                  00440000
+*                                                                       00450000
+*        RC24 - CREATE or ACQUIRE request, $ENTITY ADD failure          00460000
+*                                                                       00470000
+*        RC28 - ACQUIRE or RELEASE request, $ENTITY UPDATE              00480000
+*               failure                                                 00490000
+*                                                                       00500000
+*        RC32 - INT_SRM_REQUEST message in error                        00510000
+*                                                                       00520000
+*        RC36 - Storage allocation error                                00530000
+*                                                                       00540000
+*                                                                       00550000
+* OUTBOUND INTERTASK MESSAGES:                                          00560000
+*                                                                       00570000
+*    ITM_SRM_REQUEST    - SRM manager interface                         00580000
+*                                                                       00590000
+**<DOC-OFF>****************************************************         00600000
+                                                                        00610000
+         EJECT                                                          00620000
+***************************************************************         00630000
+*                                                                       00640000
+* MAINTENANCE:                                                          00650000
+*                                                                       00660000
+*    08/16/94 R. Turgeon                                                00670000
+*             Initial version                                           00680000
+*                                                                       00690000
+***************************************************************         00700000
+                                                                        00710000
+         EJECT                                                          00720000
+         $SRM   DSECT=YES    REQUEST BLOCK                              00730000
+                                                                        00740000
+         EJECT                                                          00750000
+         $TSEND DSECT=YES    INTERTASK MESSAGE REQUEST FORMAT           00760000
+                                                                        00770000
+         EJECT                                                          00780000
+         TMSG  ,             INTERTASK MSG FORMAT                       00790000
+                                                                        00800000
+         EJECT                                                          00810000
+         $TASK DSECT=YES     $TASK SERVICES                             00820000
+                                                                        00830000
+         EJECT                                                          00840000
+         $RESMGR DSECT=YES   RESOURCE MANAGER PLIST FORMAT              00850000
+                                                                        00860000
+         EJECT                                                          00870000
+         @CB   WORKUNIT=YES  COMMON WORKUNIT PREFIX                     00880000
+                                                                        00890000
+         EJECT                                                          00900000
+         EVCODES ,           EVENT CODES                                00910000
+*                                                                       00920000
+         ABCODES ,           $ABEND CODES                               00930000
+*                                                                       00940000
+         MSGCODES ,          INTERTASK MESSAGING CODES                  00950000
+*                                                                       00960000
+         CMDCODES ,          STANDARD COMMAND PROCESSOR RESPONSES       00970000
+*                                                                       00980000
+         EQUS  ,                                                        00990000
+                                                                        01000000
+         EJECT                                                          01010000
+         #WORK ,             BEGIN WORKAREA                             01020000
+                                                                        01030000
+RESTOKEN DS    F             $RESMGR TOKEN CREATED BY ADD REQUEST       01040000
+RETREGS  DS    3F            R15-R1 STAGING FOR RETURN                  01050000
+                                                                        01060000
+$PTSEND  DS    0D            REQUEST BLOCK IN TSEND FORMAT              01070000
+$PSRMP   DS    XL(PSRMPLN)   LENGTH OF REQUEST BLOCK                    01080000
+$RSRCNM  DS    CL16          RESOURCE NAME APPENDAGE                    01090000
+$PTSENDL EQU   *-$PTSEND     PLIST LENGTH IN MSG                        01100000
+                                                                        01110000
+$RESMFL  $RESMGR MF=(L,*)    $RESMGR REQUEST PLIST                      01120000
+$TASKMFL $TASK MF=(L,*)      $TASK PLIST CONSTRUCTION AREA              01130000
+                                                                        01140000
+REGSAVE  DS    16F           LOCAL ROUTINE SAVEAREA                     01150000
+                                                                        01160000
+         #ENDWORK ,          END WORKAREA                               01170000
+                                                                        01180000
+         EJECT                                                          01190000
+ISRMSERV #ENTER PREG=R8                                                 01200000
+                                                                        01210000
+         USING ITASK,R10          STDENV                                01220000
+                                                                        01230000
+         EJECT                                                          01240000
+***************************************************************         01250000
+*                                                                       01260000
+*    CONVERT PSRMP TO $TSEND FORMAT.  THE RESOURCE NAME IS              01270000
+*    EXTRACTED FROM THE RESOURCE IDENTIFIER AND APPENDED TO A           01280000
+*    COPY OF THE PSRMP PARAMETER BLOCK. THE RESOURCE IDENTIFIER         01290000
+*    PTR IS REPLACED WITH THE OFFSET AND LENGTH OF THE RESOURCE         01300000
+*    NAME.                                                              01310000
+*                                                                       01320000
+***************************************************************         01330000
+         MVC   $PSRMP,0(R8)       MODIFIABLE COPY OF REQUEST BLOCK      01340000
+         LA    R8,$PSRMP          ADDRESS THE WORKING COPY              01350000
+         USING PSRMP,R8           LIFE OF FUNCTION                      01360000
+                                                                        01370000
+         L     R6,PSRMRID         RESOURCE IDENTIFIER LOCATION          01380000
+         USING SRMRID,R6          RESOURCE IDENTIFIER FORMAT            01390000
+         MVC   $RSRCNM,SRMRIDNM   APPEND TO PSRMP FOR $TSEND            01400000
+         LA    R0,PSRMPLN         OFFSET TO END OF REQUEST BLOCK        01410000
+         STH   R0,PSRMRIDO        POST OFFSET TO RESOURCE NAME          01420000
+         MVC   PSRMRIDL,=AL2(L'$RSRCNM)                                 01430000
+                                                                        01440000
+         ICM   R4,15,PSRMOWNR     OWNER PROVIDED EXPLICITLY?            01450000
+         BNZ   *+8                SKIP IF NOT                           01460000
+         L     R4,SRMOWNER        USE PREVIOUS DECLARATION              01470000
+         USING @CB,R4             COMMON PREFIX                         01480000
+                                                                        01490000
+         MVC   PSRMWUID,@CBENTKN  WORKUNIT TOKEN                        01500000
+         CLC   @CBID,=CL8'IPCB'   WORKUNIT IS A PROCESS?                01510000
+         BNE   *+10               SKIP IF NOT                           01520000
+         MVC   PSRMPROC,PCBNAME-IPCB(R4)  PROCESS NAME                  01530000
+         MVC   PSRMTASK,TSKNAME   TASK NAME                             01540000
+         DROP  R4                 @CB                                   01550000
+                                                                        01560000
+         L     R1,PSRMFUNC        FUNCTION CODE                         01570000
+         B     *+4(R1)            GO TO DEPENDING ON                    01580000
+         B     CREATE                                                   01590000
+         B     ACQUIRE                                                  01600000
+         B     RELEASE                                                  01610000
+                                                                        01620000
+         EJECT                                                          01630000
+***************************************************************         01640000
+*                                                                       01650000
+*   CREATE SHARED RESOURCE                                              01660000
+*                                                                       01670000
+*   A RESOURCE IDENTIFIER IS CONSTRUCTED WHICH INCLUDES A               01680000
+*   UNIQUE SYSTEM-WIDE RESOURCE NAME.  THE OWNING WORKUNIT              01690000
+*   AND THE ADDRESS OF THE RESMGR ROUTINE TOKEN CURRENTLY               01700000
+*   PROTECTING THE RESOURCE ARE CAPTURED.  ONCE THESE                   01710000
+*   PRELIMINARIES ARE COMPLETE, THE CREATE FUNCTION BECOMES             01720000
+*   AN ACQUIRE.                                                         01730000
+*                                                                       01740000
+***************************************************************         01750000
+CREATE   DS    0H                                                       01760000
+         XC    SRMRID(SRMRIDLN),SRMRID                                  01770000
+         MVC   SRMRMXTK,PSRMRXTK  ADDR OF CURRENT $RESMGR RTN TOKEN     01780000
+                                                                        01790000
+         L     R2,ICTSRMID        RESOURCE NAME UNIQUIFIER              01800000
+CRECS    DS    0H                                                       01810000
+         LA    R1,1(,R2)          GENERATE UNIQUE SUFFIX                01820000
+         CS    R2,R1,ICTSRMID     SAVE UPDATED VALUE                    01830000
+         BNZ   CRECS              MAKE IT STICK                         01840000
+                                                                        01850000
+         CVD   R1,DWORD           DECIMAL DIGITS                        01860000
+         MVC   $RSRCNM+4(L'SFXPAT),SFXPAT                               01870000
+         ED    $RSRCNM+4(L'SFXPAT),DWORD+2                              01880000
+         MVC   $RSRCNM(4),=C'RSRC'                                      01890000
+         MVC   SRMRIDNM,$RSRCNM   RETURN RESOURCE ID                    01900000
+         B     ACQUIRE            REMAINDER IS ACQUIRE                  01910000
+                                                                        01920000
+         EJECT                                                          01930000
+***************************************************************         01940000
+*                                                                       01950000
+*   ACQUIRE ACCESS TO SHARED RESOURCE                                   01960000
+*                                                                       01970000
+*   FIRST, A $SRM-PROVIDED RESOURCE MANAGEMENT ROUTINE IS               01980000
+*   ATTACHED TO THE OWNING WORKUNIT TO ENSURE THAT SUBSEQUENT           01990000
+*   FAILURES OR END-OF-WU DRIVE A $SRM RELEASE FOR THE GIVEN            02000000
+*   RESOURCE.  THEN, THE ACQUIRE REQUEST IS SENT TO THE $SRM            02010000
+*   PROCESS.  IF THE REQUEST FAILS, THE RESMGR ROUTINE JUST             02020000
+*   ESTABLISHED IS DELETED.                                             02030000
+*                                                                       02040000
+*   IF ACQUIRE IS RUNNING AS THE BACK END OF A CREATE REQUEST,          02050000
+*   A RESMGR ROUTINE MAY HAVE BEEN IDENTIFIED THAT PROVIDES             02060000
+*   THE SAME RESOURCE CLEANUP FUNCTIONS AS THE DESTRUCTOR.              02070000
+*   IF SO, THAT ROUTINE IS NOW DELETED.                                 02080000
+*                                                                       02090000
+***************************************************************         02100000
+ACQUIRE  DS    0H                                                       02110000
+         $RESMGR ADD,                                                  X02120000
+               TOKEN=RESTOKEN,    SAVE TOKEN IN WORKAREA               X02130000
+               OWNER=*PSRMOWNR,   ASSOCIATE WITH DESIGNATED WORKUNIT   X02140000
+               ROUTINE=*#RMXSRM,  RESOURCE RELEASE ON FAILURE          X02150000
+               PARM=SRMRID,       RESOURCE IDENTIFIER                  X02160000
+               MF=(E,$RESMFL)     PLIST CONSTRUCTION AREA               02170000
+                                                                        02180000
+         BZ    *+8                ASSERT SUCCESSFUL COMPLETION          02190000
+         EX    R0,*               DENIED                                02200000
+                                                                        02210000
+*--------------------------------------------------------------         02220000
+*   REQUEST RSRC ACCESS, RECANT OUR RESMGR RTN IF ANY FAILURE           02230000
+*--------------------------------------------------------------         02240000
+         BAS   R14,SENDREQ        $TSEND THE REQUEST & AWAIT REPLY      02250000
+         STM   R15,R1,RETREGS     RETAIN SERVICE COMPLETION STATUS      02260000
+         LTR   R15,R15            SUCCESSFUL COMPLETION?                02270000
+         BZ    ACQRMX             ONWARD IF SO                          02280000
+                                                                        02290000
+         $RESMGR DELETE,          REMOVE $SRM RESOURCE MGR             X02300000
+               TOKEN=RESTOKEN,    SAVE TOKEN IN RESOURCE IDENTIFIER    X02310000
+               OWNER=*PSRMOWNR,   ASSOCIATE WITH DESIGNATED WORKUNIT   X02320000
+               MF=(E,$RESMFL)                                           02330000
+                                                                        02340000
+         B     ACQRESP                                                  02350000
+                                                                        02360000
+*--------------------------------------------------------------         02370000
+*   DELETE PRIOR RESMGR RTN DUPLICATING FUNCTION OF DESTRUCTOR          02380000
+*--------------------------------------------------------------         02390000
+ACQRMX   DS    0H                 ONWARD IF SO                          02400000
+         MVC   SRMSRMTK,RESTOKEN  SAVE $RESMGR TOKEN IN RSRC IDENT      02410000
+         MVC   SRMOWNER,PSRMOWNR  RESOURCE/$RESMGR OWNING WORKUNIT      02420000
+                                                                        02430000
+         ICM   R2,15,SRMRMXTK     DELETABLE RESMGR ROUTINE IDENTIFIED?  02440000
+         BZ    ACQRESP            SKIP IF NOT                           02450000
+         XC    SRMRMXTK,SRMRMXTK  DELETE WILL BE ATTEMPTED              02460000
+                                                                        02470000
+         $RESMGR DELETE,          DELETE PREVIOUS RESOURCE MGR         X02480000
+               TOKEN=(R2),        PTR TO $RESMGR TOKEN                 X02490000
+               OWNER=*SRMOWNER,                                        X02500000
+               MF=(E,$RESMFL)                                           02510000
+                                                                        02520000
+ACQRESP  DS    0H                                                       02530000
+         LM    R15,R1,RETREGS     RESTORE SERVICE COMPLETION STATUS     02540000
+         B     RETURN             PASS THRU RETC, RSNC                  02550000
+                                                                        02560000
+         EJECT                                                          02570000
+***************************************************************         02580000
+*                                                                       02590000
+*   RELEASE ACCESS TO SHARED RESOURCE                                   02600000
+*                                                                       02610000
+*   THE RELEASE REQUEST IS SENT TO THE $SRM PROCESS.  THEN              02620000
+*   (SUCCESSFUL OR NOT) THE RESOURCE MANAGER PREVIOUSLY                 02630000
+*   ESTABLISHED BY ACQUIRE IS DELETED.                                  02640000
+*                                                                       02650000
+***************************************************************         02660000
+RELEASE  DS    0H                                                       02670000
+         BAS   R14,SENDREQ        $TSEND THE REQUEST & AWAIT REPLY      02680000
+         STM   R15,R1,RETREGS     RETAIN SERVICE COMPLETION STATUS      02690000
+                                                                        02700000
+         $RESMGR DELETE,          DELETE PREVIOUS RESOURCE MGR         X02710000
+               TOKEN=SRMSRMTK,                                         X02720000
+               OWNER=*SRMOWNER,                                        X02730000
+               MF=(E,$RESMFL)                                           02740000
+                                                                        02750000
+         LM    R15,R1,RETREGS     RESTORE COMPLETION REGS               02760000
+         B     RETURN                                                   02770000
+                                                                        02780000
+         EJECT                                                          02790000
+***************************************************************         02800000
+*                                                                       02810000
+*   RETURN COMPLETION STATUS TO CALLER                                  02820000
+*                                                                       02830000
+***************************************************************         02840000
+RETURN   DS    0H                                                       02850000
+         #EXIT ,                                                        02860000
+                                                                        02870000
+         EJECT                                                          02880000
+***************************************************************         02890000
+*                                                                       02900000
+* ROUTINE: SENDREQ - CONVERSE WITH $SRM PROCESS                         02910000
+*                                                                       02920000
+***************************************************************         02930000
+SENDREQ  DS    0H                                                       02940000
+         STM   R0,R15,REGSAVE     PRESERVE MAINLINE REGS                02950000
+                                                                        02960000
+*--------------------------------------------------------------         02970000
+*   SEND THE REQUEST                                                    02980000
+*--------------------------------------------------------------         02990000
+         $TSEND '$SRMTASK',                                            X03000000
+               TYPE=ITM_SRM_REQUEST,                                   X03010000
+               INFO=($PTSEND,$PTSENDL),                                X03020000
+               REPLY=YES,                                              X03030000
+               MF=(E,MFE_LIST)                                          03040000
+                                                                        03050000
+         B     *+4(R15)           ANALYZE COMPLETION CODE               03060000
+         B     SENDCPT               RC00 - COMPLETE                    03070000
+         EX    R0,*                  RC04 - UNKNOWN DESTINATION         03080000
+         EX    R0,*                  RC08 - INFO LENGTH (UNACCEPTABLE)  03090000
+         B     ERR_STG               RC12 - STORAGE MGMT FAILURE        03100000
+                                                                        03110000
+*--------------------------------------------------------------         03120000
+*   AWAIT REPLAY                                                        03130000
+*--------------------------------------------------------------         03140000
+SENDCPT  DS    0H                 SEND COMPLETED                        03150000
+         LR    R2,R1              ACCEPT SYSTEM EPB                     03160000
+                                                                        03170000
+         $TASK WAIT,EPB=(R2),                                          X03180000
+               MF=(E,$TASKMFL)                                          03190000
+                                                                        03200000
+*--------------------------------------------------------------         03210000
+*   RETURN COMPLETION STATUS TO REQUESTER                               03220000
+*--------------------------------------------------------------         03230000
+         LTR   R15,R0             POST CODE                             03240000
+         LM    R0,R14,REGSAVE     RESTORE MAINLINE REGS                 03250000
+         BR    R14                                                      03260000
+                                                                        03270000
+         EJECT                                                          03280000
+***************************************************************         03290000
+*                                                                       03300000
+*   CATASTROPHIC LOGIC FAILURES, ETC.                                   03310000
+*                                                                       03320000
+***************************************************************         03330000
+ERR_STG  DS    0H                                                       03340000
+         ST    R15,FWORD                                                03350000
+                                                                        03360000
+         $ABEND ABE_STORAGE,*FWORD,DUMP=YES,                           X03370000
+               TITLE='STORAGE MANAGMENT FAILURE'                        03380000
+                                                                        03390000
+         EJECT ,                                                        03400000
+***************************************************************         03410000
+*                                                                       03420000
+*   LOCAL READ/ONLY DATA AREAS, ETC.                                    03430000
+*                                                                       03440000
+***************************************************************         03450000
+SFXPAT   DC    X'F02120202020202020202020'                              03460000
+*                 0 1 2 3 4 5 6 7 8 9 A B                               03470000
+                                                                        03480000
+         LTORG ,                                                        03490000
+                                                                        03500000
+         PRINT NOGEN                                                    03510000
+         ICVT  ,                                                        03520000
+         ITASK ,                                                        03530000
+         IPCB  ,                                                        03540000
+         END   ,                                                        03550000

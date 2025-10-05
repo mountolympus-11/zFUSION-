@@ -1,0 +1,416 @@
+ITB@ANDX TITLE 'TABLE SERVICES - INDEX INSERT'                          00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE:  ITB@ANDX - Table services - index insert                    00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    Ref Knuth threaded tree algorithms I and S                         00080000
+*    Discuss complexities introduced by key duplication (add_left)      00090000
+*                                                                       00100000
+*                                                                       00110000
+* ON ENTRY:                                                             00120000
+*                                                                       00130000
+*    R1  points to a parameter list described by the ANDXPARM           00140000
+*        mapping macro. The plist is not AR qualified.                  00150000
+*                                                                       00160000
+*                                                                       00170000
+* ON EXIT:                                                              00180000
+*                                                                       00190000
+*    R15 contains one of the following return codes                     00200000
+*                                                                       00210000
+*         RC00 - insertion complete                                     00220000
+*                                                                       00230000
+*                R0  contains the slot number of the index              00240000
+*                    entry representing the new entry.  It              00250000
+*                    is provided to simplify the implementation         00260000
+*                    of xref utilities and update backout.              00270000
+*                                                                       00280000
+*                R1  contains the base address of the index             00290000
+*                    object possibly updated by storage                 00300000
+*                    allocation service                                 00310000
+*                                                                       00320000
+*         RC16 - index object failure                                   00330000
+*                                                                       00340000
+*                RSN32 - unable to access index                         00350000
+*                                                                       00360000
+*         RC20 - unable to extend index object                          00370000
+*                                                                       00380000
+**<DOC-OFF>****************************************************         00390000
+                                                                        00400000
+         EJECT                                                          00410000
+***************************************************************         00420000
+*                                                                       00430000
+* MAINTENANCE:                                                          00440000
+*                                                                       00450000
+*    05/xx/92 R. Turgeon                                                00460000
+*             Initial version                                           00470000
+*                                                                       00480000
+*    03/20/95 R. Turgeon                                                00490000
+*             Maintain index entry count in LOCINUSE                    00500000
+*                                                                       00510000
+*    06/20/95 R. Turgeon                                                00520000
+*             Use inline form of $OBJECT ACCESS to improve              00530000
+*             performance.  Ensure that LOCHWM (locator high-           00540000
+*             watermark) is correct after object extend.                00550000
+*                                                                       00560000
+*    10/23/95 R. Turgeon                                                00570000
+*             Implement the NOLOCATOR property                          00580000
+*                                                                       00590000
+*    11/07/95 R. Turgeon                                                00600000
+*             LINKAGE=DIRECT on $OBJECT STORAGE requests                00610000
+*                                                                       00620000
+***************************************************************         00630000
+                                                                        00640000
+         EJECT                                                          00650000
+***************************************************************         00660000
+*                                                                       00670000
+*   Working storage area                                                00680000
+*                                                                       00690000
+***************************************************************         00700000
+                                                                        00710000
+WORKAREA DSECT                                                          00720000
+                                                                        00730000
+         @WORK ,                  STANDARD WORKAREA                     00740000
+                                                                        00750000
+Q_OFFLNK DS    F                  NEW (Q) NODE OFFLINK                  00760000
+P_OFFLNK DS    F                  PREDECESSOR (P) NODE OFFLINK          00770000
+                                                                        00780000
+SLOT#    DS    F                  INDEX ENTRY SLOT NUMBER ASSIGNED      00790000
+                                                                        00800000
+WORKFREE DS    0D                 AVAILABLE TO SERVICE ROUTINES         00810000
+WORKLEN  EQU   *-WORKAREA         LENGTH OF WORKAREA                    00820000
+                                                                        00830000
+         EJECT                                                          00840000
+         ANDXPARM ,               INDEX INSERT LOCATION PLIST           00850000
+                                                                        00860000
+         EJECT                                                          00870000
+         LOCATOR ,                ROW AND INDEX LOCATOR FORMATS         00880000
+                                                                        00890000
+         EJECT                                                          00900000
+         INDEX ,                  FORMAT OF INDEX LOCATOR ENTRY (SLOT)  00910000
+                                                                        00920000
+         EJECT                                                          00930000
+         $TOKEN ,                 OBJECT TOKEN                          00940000
+                                                                        00950000
+         EJECT                                                          00960000
+         EQUS  LINKAGE=VCON                                             00970000
+                                                                        00980000
+         EJECT                                                          00990000
+ITB@ANDX @ENTER WORKA=(WORKAREA,WORKLEN),ASC=AR                         01000000
+                                                                        01010000
+*--------------------------------------------------------------         01020000
+*   Fetch and validate passed parameters                                01030000
+*--------------------------------------------------------------         01040000
+                                                                        01050000
+         LAE   R5,0(R1,0)         PARAMETER LIST                        01060000
+         USING ANDXPARM,R5                                              01070000
+         L     R1,ANDXALE         ALET QUALIFIER FOR MOST OBJECTS       01080000
+                                                                        01090000
+         L     R11,ANDXNDX        INDEX LOCATOR ORIGIN                  01100000
+         SAR   AR11,R1            OPEN WINDOW TO TABLE SPACE            01110000
+         USING LOCATOR,R11        IDENTIFY UNIQUE LOCATOR STRUCTURE     01120000
+         BAS   R14,VERFNDX                                              01130000
+                                                                        01140000
+*--------------------------------------------------------------         01150000
+*   Declare intention to update                                         01160000
+*--------------------------------------------------------------         01170000
+                                                                        01180000
+         $OBJECT ACCESS,INTENT=WRITE,OTOKEN=*ANDXTOKN,                 X01190000
+               INLINE=YES                                               01200000
+         BZ    FREE_NDX           LONG FORM ONLY FOR ERROR LOGGING      01210000
+                                                                        01220000
+         $OBJECT ACCESS,INTENT=WRITE,OTOKEN=*ANDXTOKN,                 X01230000
+               SHRPAGE=WORKFREE,MF=(E,MFE_LIST)                         01240000
+         BNZ   ENDXOBJ            INDEX OBJECT ACCESS FAILURE           01250000
+                                                                        01260000
+*--------------------------------------------------------------         01270000
+*   Fetch locator slot for new row                                      01280000
+*--------------------------------------------------------------         01290000
+                                                                        01300000
+FREE_NDX DS    0H                 ACQUIRE INDEX SLOT                    01310000
+         ICM   R9,15,LOCFREE      IDENTIFY A FREE SLOT                  01320000
+         BNZ   NDX_GO             FREE SLOT IS AVAILABLE                01330000
+                                                                        01340000
+         LAE   R1,LOCATOR         R1 <== INDEX BASE                     01350000
+         L     R0,ANDXTOKN        R0 <== INDEX OBJECT TOKEN             01360000
+         BAS   R14,LOCRXTND       EXTEND THE INDEX                      01370000
+         LTR   R15,R15            EXTEND COMPLETE?                      01380000
+         BNZ   ENDXSTG            UNABLE TO EXTEND                      01390000
+         LR    R11,R0             POSSIBLE RELOCATION OF INDEX          01400000
+         B     FREE_NDX           REDRIVE SLOT ACQUISITION              01410000
+                                                                        01420000
+*--------------------------------------------------------------         01430000
+*   Accept entry slot and update free list                              01440000
+*--------------------------------------------------------------         01450000
+                                                                        01460000
+NDX_GO   DS    0H                                                       01470000
+         ST    R9,SLOT#           RETAIN SLOT # FOR RETURN              01480000
+         BCTR  R9,0               ZERO RELATIVE SLOT                    01490000
+         MH    R9,LOCSLOSZ+2      OFFSET TO NEW SLOT                    01500000
+         LAE   R9,LOCSLOTS(R9)    ADDRESS OF SLOT                       01510000
+         MVC   LOCFREE,0(R9)      UPDATE FREE CHAIN                     01520000
+         NI    LOCFREE,X'7F'      REMOVE FREE LIST INDICATOR            01530000
+                                                                        01540000
+         ICM   R0,15,LOCINUSE     NUMBER OF ENTRIES IF MAINTAINED       01550000
+         BNM   *+12               VERSION FLAG IN HIGH ORDER BIT        01560000
+         AL    R0,=F'1'           ACCOUNT FOR NEW ROW                   01570000
+         ST    R0,LOCINUSE        SAVE LOCATOR ENTRY COUNT              01580000
+                                                                        01590000
+Q        USING INDEX,R9           NEW ENTRY                             01600000
+         XC    Q.INDEX(NDXLN),Q.INDEX                                   01610000
+         MVC   Q.NDXRID,ANDXRID INSERT ROW IDENTIFIER                   01620000
+                                                                        01630000
+         LR    R1,R9              ENTRY POINTER                         01640000
+         SR    R1,R11             OFFLINK                               01650000
+         ST    R1,Q_OFFLNK        DESCRIPTIVE                           01660000
+                                                                        01670000
+*--------------------------------------------------------------         01680000
+*   Locate subtree to which new entry will be attached                  01690000
+*--------------------------------------------------------------         01700000
+                                                                        01710000
+         L     R10,ANDXPRED       FETCH PREDECESSOR OFFLINK             01720000
+         ST    R10,P_OFFLNK       DESCRIPTIVE                           01730000
+         LAE   R10,0(R10,R11)     CONVERT TO POINTER WITHIN CURR INDEX  01740000
+P        USING INDEX,R10          KNUTH NOTATION                        01750000
+                                                                        01760000
+         ICM   R0,15,ANDXPRED     IDENTIFY SUBTREE FOR INSERT           01770000
+         BM    ADD_LEFT           LEFT SUBTREE                          01780000
+                                                                        01790000
+         EJECT                                                          01800000
+***************************************************************         01810000
+*                                                                       01820000
+*   Add entry (Q) to right subtree (of P) and update threads            01830000
+*                                                                       01840000
+***************************************************************         01850000
+                                                                        01860000
+         MVC   Q.NDXRIGHT,P.NDXRIGHT   RLINK(Q) <-- RLINK(P)?           01870000
+         MVC   P.NDXRIGHT,Q_OFFLNK     RLINK(P) <-- Q+                  01880000
+         MVC   Q.NDXLEFT,P_OFFLNK      LLINK(Q) <-- P-                  01890000
+         OI    Q.NDXLEFT,X'80'                                          01900000
+                                                                        01910000
+         ICM   R9,15,Q.NDXRIGHT        IF NO RIGHT SUBTREE(Q) THEN      01920000
+         BNP   INS_FIN                 WE'RE FINISHED                   01930000
+                                                                        01940000
+S_LEFT   DS    0H                      LOCATE SUCCESSOR OF Q (Q$)       01950000
+         ALR   R9,R11                  CONVERT OFFLINK TO ADDRESS       01960000
+         ICM   R0,15,Q.NDXLEFT         WORK TOWARDS LEFTMOST NODE       01970000
+         BNP   Q$                      SUCCESSOR LOCATED                01980000
+         LR    R9,R0                   ELSE INSPECT LEFT SUBTREE        01990000
+         B     S_LEFT                  AGAIN                            02000000
+                                                                        02010000
+Q$       DS    0H                      SUCCESSOR LOCATED                02020000
+         MVC   Q.NDXLEFT,Q_OFFLNK      SET PREDECESSOR THREAD PTR       02030000
+         OI    Q.NDXLEFT,X'80'         THREAD FLAG                      02040000
+         B     INS_FIN                 UPDATE COMPLETE                  02050000
+                                                                        02060000
+         EJECT                                                          02070000
+***************************************************************         02080000
+*                                                                       02090000
+*   Add entry to left subtree and update threads                        02100000
+*                                                                       02110000
+***************************************************************         02120000
+                                                                        02130000
+ADD_LEFT DS    0H                                                       02140000
+         MVC   Q.NDXLEFT,P.NDXLEFT     LLINK(Q) <-- LLINK(P)            02150000
+         MVC   P.NDXLEFT,Q_OFFLNK      LLINK(P) <-- Q+                  02160000
+         MVC   Q.NDXRIGHT,P_OFFLNK     RLINK(Q) <-- P-                  02170000
+         OI    Q.NDXRIGHT,X'80'                                         02180000
+                                                                        02190000
+         TM    ANDXFLGS,ANDX$EQ        KEY(Q) = KEY(P)?                 02200000
+         BNO   PREDSCAN                SKIP IF KEY(Q) < KEY(P)          02210000
+         MVC   FWORD,Q.NDXRID          ELSE INTERCHANGE ROW IDS         02220000
+         MVC   Q.NDXRID,P.NDXRID       ... ADDING TO LOGICAL GROUP END  02230000
+         MVC   P.NDXRID,FWORD          ... BUT PRESERVING STRUCTURE     02240000
+                                                                        02250000
+PREDSCAN DS    0H                                                       02260000
+         ICM   R9,15,Q.NDXLEFT         IF NO LEFT SUBTREE(Q) THEN       02270000
+         BNP   INS_FIN                 WE'RE FINISHED                   02280000
+                                                                        02290000
+S_RIGHT  DS    0H                      LOCATE PREDECESSOR OF Q ($Q)     02300000
+         ALR   R9,R11                  CONVERT OFFLINK TO ADDRESS       02310000
+         ICM   R0,15,Q.NDXRIGHT        WORK TOWARDS RIGHTMOST NODE      02320000
+         BNP   $Q                      SUCCESSOR LOCATED                02330000
+         LR    R9,R0                   ELSE INSPECT RIGHT SUBTREE       02340000
+         B     S_RIGHT                 AGAIN                            02350000
+                                                                        02360000
+$Q       DS    0H                      PREDECESSOR LOCATED              02370000
+         MVC   Q.NDXRIGHT,Q_OFFLNK     SET SUCCESSOR THREAD PTR         02380000
+         OI    Q.NDXRIGHT,X'80'        THREAD FLAG                      02390000
+         B     INS_FIN                 UPDATE COMPLETE                  02400000
+                                                                        02410000
+         EJECT                                                          02420000
+***************************************************************         02430000
+*                                                                       02440000
+*   Update index CRP                                                    02450000
+*                                                                       02460000
+***************************************************************         02470000
+                                                                        02480000
+INS_FIN  DS    0H                                                       02490000
+         L     R4,ANDXTOKN        OBJECT TOKEN                          02500000
+         LAE   R4,0(R4,0)         TOKEN RESIDES IN PSPACE               02510000
+         USING $TOKEN,R4          ADDRESSABILITY                        02520000
+         MVC   $APPLVAR,Q_OFFLNK  RESET INDEX CRP TO NEW ENTRY          02530000
+         DROP  R4                 $TOKEN                                02540000
+                                                                        02550000
+***************************************************************         02560000
+*                                                                       02570000
+*   Return completion status to caller                                  02580000
+*                                                                       02590000
+***************************************************************         02600000
+                                                                        02610000
+         LA    R15,RC00           UPDATE COMPLETE                       02620000
+                                                                        02630000
+         L     R0,SLOT#           INDEX ENTRY SLOT # ASSIGNMENT         02640000
+         CL    R0,LOCHWM          NEW HIGHWATER SLOT #?                 02650000
+         BNH   *+8                SKIP IF NOT                           02660000
+         ST    R0,LOCHWM          SET NEW HWM OTHERWISE                 02670000
+         B     EXIT               DONE                                  02680000
+                                                                        02690000
+ENDXOBJ  DS    0H                 UNABLE TO ACCESS INDEX OBJECT         02700000
+         @PUSHERR ,               IDENTIFY SERVICE ROUTINE FAILURES     02710000
+                                                                        02720000
+         LA    R0,RSN32           LOCAL REASON CODE                     02730000
+         LA    R15,RC16           AND RETURN CODE                       02740000
+         B     EXIT               DONE                                  02750000
+                                                                        02760000
+ENDXSTG  DS    0H                 UNABLE TO ACCESS INDEX OBJECT         02770000
+         @PUSHERR ,               IDENTIFY SERVICE ROUTINE FAILURES     02780000
+                                                                        02790000
+         LA    R15,RC20           SUFFICIENT SPACE STORAGE NOT AVAIL    02800000
+                                                                        02810000
+EXIT     DS    0H                                                       02820000
+         LR    R1,R11             REFRESH INDEX OBJECT PTR              02830000
+                                                                        02840000
+         @EXIT ,                                                        02850000
+                                                                        02860000
+         EJECT                                                          02870000
+***************************************************************         02880000
+*                                                                       02890000
+* ROUTINE: LOCRXTND - Locator extend                                    02900000
+*                                                                       02910000
+*                                                                       02920000
+* ON ENTRY:                                                             02930000
+*                                                                       02940000
+*    R1 - AR qualified addr of locator                                  02950000
+*    R0 - addr of locator object token                                  02960000
+*                                                                       02970000
+*                                                                       02980000
+* ON EXIT:                                                              02990000
+*                                                                       03000000
+*    R15 contains one of the following return codes                     03010000
+*                                                                       03020000
+*         RC00 - request complete                                       03030000
+*                                                                       03040000
+*                R0 - unqualified locator base address                  03050000
+*                                                                       03060000
+*         RCnn - $OBJECT STORAGE request completion code                03070000
+*                                                                       03080000
+***************************************************************         03090000
+                                                                        03100000
+LOCRXTND DS    0H                                                       03110000
+         BAKR  R14,0                                                    03120000
+         LR    R2,R0              LOCATOR OBJECT TOKEN                  03130000
+         LAE   R2,0(R2,0)         RESIDES IN PSPACE                     03140000
+                                                                        03150000
+         LAE   R11,0(,R1)         LOCATOR OBJECT ORIGIN                 03160000
+         USING LOCATOR,R11        OBJECT WINDOW                         03170000
+                                                                        03180000
+         $OBJECT STORAGE,         ACQUIRE STORAGE                      X03190000
+               OTOKEN=(R2),       OBJECT TOKEN                         X03200000
+               SIZE=*LOCSIZE,     DOUBLE THE AMOUNT OF AVAILABLE STG   X03210000
+               LINKAGE=DIRECT,    FAST PATH                            X03220000
+               SHRPAGE=WORKFREE,  GLOBAL SERVICE ROUTINE WORKAREA      X03230000
+               MF=(E,MFE_LIST)                                          03240000
+                                                                        03250000
+         BNP   LOCRXT             SUCCESS                               03260000
+                                                                        03270000
+         $OBJECT STORAGE,         ACQUIRE STORAGE, JOURNAL ERRORS      X03280000
+               OTOKEN=(R2),       OBJECT TOKEN                         X03290000
+               SIZE=*LOCSIZE,     DOUBLE THE AMOUNT OF AVAILABLE STG   X03300000
+               SHRPAGE=WORKFREE,  GLOBAL SERVICE ROUTINE WORKAREA      X03310000
+               MF=(E,MFE_LIST)                                          03320000
+                                                                        03330000
+         BP    LOCRESTG           OBJECT FAILURE                        03340000
+                                                                        03350000
+LOCRXT   DS    0H                                                       03360000
+                                                                        03370000
+*--------------------------------------------------------------         03380000
+*   Update locator slot management data                                 03390000
+*--------------------------------------------------------------         03400000
+                                                                        03410000
+         LR    R11,R0             REFRESH LOCATOR BASE ADDRESS          03420000
+         BAS   R14,VERFNDX        VERIFY                                03430000
+         L     R4,LOCMAX          PRESERVE CURRENT HIGH SLOT #          03440000
+                                                                        03450000
+         L     R3,LOCSIZE         SIZE OF EXTENSION REQUESTED           03460000
+         AR    R3,R3              DOUBLED SIZE                          03470000
+         ST    R3,LOCSIZE         NEW LOCATOR OBJECT SIZE               03480000
+         SH    R3,=AL2(LOCPFXLN)  BACKOUT SIZE OF MGMT AREA             03490000
+         SR    R2,R2              PREPARE FOR DIVIDE                    03500000
+         D     R2,LOCSLOSZ        TOTAL # COMPLETE SLOTS                03510000
+         ST    R3,LOCMAX          SAVE UPDATED MAX SLOT #               03520000
+                                                                        03530000
+         LA    R4,1(,R4)          NAME (#) OF FIRST NEW SLOT            03540000
+         ST    R4,LOCFREE         REINIT THE FREE CHAIN                 03550000
+         LR    R5,R4              SLOT # -1 ...                         03560000
+         BCTR  R5,0               TIME SLOT SIZE ...                    03570000
+         MH    R5,LOCSLOSZ+2      OFFSET TO FIRST NEW SLOT              03580000
+         LAE   R9,LOCSLOTS(R5)    PREPARE FOR INIT                      03590000
+                                                                        03600000
+*--------------------------------------------------------------         03610000
+*   Update locator slot management data                                 03620000
+*--------------------------------------------------------------         03630000
+                                                                        03640000
+LOCRCHN  DS    0H                 CHAIN FREE ENTRIES                    03650000
+         LA    R4,1(,R4)          NEXT SLOT #                           03660000
+         C     R4,LOCMAX          VS HIGHEST AVAILABLE SLOT             03670000
+         BH    LOCRFIN            DONE                                  03680000
+         ST    R4,0(,R9)          SET FORWARD LINK TO NEXT SLOT         03690000
+         OI    0(R9),X'80'        INDICATE SLOT IS IN FREE LIST         03700000
+         AL    R9,LOCSLOSZ        ADVANCE TO NEXT SLOT                  03710000
+         B     LOCRCHN            CHAIN ALL FREE SLOTS                  03720000
+                                                                        03730000
+*--------------------------------------------------------------         03740000
+*   Return completion status to caller                                  03750000
+*--------------------------------------------------------------         03760000
+                                                                        03770000
+LOCRFIN  DS    0H                 LOCATOR EXTENSION COMPLETE            03780000
+         LA    R15,RC00           INDICATE SUCCESS                      03790000
+         LA    R0,LOCATOR         RETURN UPDATED OBJECT BASE ADDR       03800000
+         B     LOCREXIT                                                 03810000
+                                                                        03820000
+LOCRESTG DS    0H                 UNABLE TO ACQUIRE OBJECT STORAGE      03830000
+         LR    R1,R15             PRESERVE SERVICE RTN RETCODE          03840000
+                                                                        03850000
+LOCREXIT DS    0H                 RETURN                                03860000
+         PR    ,                                                        03870000
+                                                                        03880000
+         EJECT                                                          03890000
+***************************************************************         03900000
+*                                                                       03910000
+* ROUTINE: VERFNDX - Validate index locator                             03920000
+*                                                                       03930000
+***************************************************************         03940000
+                                                                        03950000
+VERFNDX  DS    0H                                                       03960000
+         CLC   LOCTAG,=CL8'LOCATOR'                                     03970000
+         BE    *+8                                                      03980000
+         EX    R0,*                                                     03990000
+         CLC   LOCSLOSZ,=A(NDXLN)                                       04000000
+         BE    *+8                                                      04010000
+         EX    R0,*                                                     04020000
+         BR    R14                                                      04030000
+                                                                        04040000
+***************************************************************         04050000
+*                                                                       04060000
+*   Local read-only data areas, etc.                                    04070000
+*                                                                       04080000
+***************************************************************         04090000
+                                                                        04100000
+         LTORG ,                                                        04110000
+                                                                        04120000
+         PRINT NOGEN                                                    04130000
+         SPCBLOCK ,               $OBJECT INLINE=YES REQUIREMENT        04140000
+         OIE   ,                  $OBJECT INLINE=YES REQUIREMENT        04150000
+         END   ,                                                        04160000

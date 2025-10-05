@@ -1,0 +1,664 @@
+ISRMTASK TITLE 'ISRMTASK - Shared Resource Manager Task'                00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE: ISRMTASK - Shared Resource Manager Task                      00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*   The main purpose of this routine is to service Shared               00080000
+*   Resource Manager (SRM) requests originated by the $SRM              00090000
+*   request macro.  This is accomplished by registering                 00100000
+*   shared resource names in the locally maintained SRM                 00110000
+*   entity structure.  There are no serialization concerns              00120000
+*   with this entity structure since access is restricted               00130000
+*   to a single process, $SRMTASL.$$MAIN$$                              00140000
+*                                                                       00150000
+*   All $SRM requests are received as messages to the                   00160000
+*   SRM process.  There are three types of SRM requests                 00170000
+*   as follows:                                                         00180000
+*                                                                       00190000
+*      CREATE  - Register a new named shared resource                   00200000
+*      ACQUIRE - Assign ownership (usage) of the shared resource        00210000
+*      RELEASE - Release ownership of the shared resource               00220000
+*                                                                       00230000
+*   When all owning requestors of the shared resource have              00240000
+*   relinquished ownership, the associated destructor routine           00250000
+*   identified on the CREATE request is executed.  The execution        00260000
+*   of this process occurs under its own PCB to issolate $SRM           00270000
+*   from destuction.  The $SRM process will be suspended until          00280000
+*   the destructor routine process completes.                           00290000
+*                                                                       00300000
+*   Notification to the $SRM requestor is via the reply EPB             00310000
+*   of the requestor's message.  Refer to the SRM request message       00320000
+*   post completion codes to follow for a description.                  00330000
+*                                                                       00340000
+*                                                                       00350000
+* ON ENTRY: N/A                                                         00360000
+*                                                                       00370000
+* ON EXIT:  Upon termination of this process R15 will contain           00380000
+*           one of the following return codes                           00390000
+*                                                                       00400000
+*           R15 = RC00 - $SRM Process normal HALT termination           00410000
+*                 RC08 - $ENTITY initialization error                   00420000
+*                                                                       00430000
+*--------------------------------------------------------------         00440000
+*                                                                       00450000
+* SRM Request Message request:                                          00460000
+*                                                                       00470000
+*        Upon receipt of an SRM request message, TMSGINFO               00480000
+*        is the origin of the SRM request parameter list mapped         00490000
+*        by the PSRMP dsect ($SRM DSECT=YES).                           00500000
+*                                                                       00510000
+* SRM Request Message reply Post completion codes:                      00520000
+*                                                                       00530000
+*        RC00 - request complete                                        00540000
+*                                                                       00550000
+*        RC04 - ACQUIRE request, but the named resource                 00560000
+*               is already owned by the designated workunit             00570000
+*                                                                       00580000
+*        RC08 - ACQUIRE or RELEASE request, but the named rsrc          00590000
+*               is not registered                                       00600000
+*                                                                       00610000
+*        RC12 - RELEASE request, but the named resource is not          00620000
+*               owned                                                   00630000
+*                                                                       00640000
+*        RC16 - RELEASE request zeroed the resource use count.          00650000
+*               The destructor routine completed with a non-zero        00660000
+*               return code or ABENDed                                  00670000
+*                                                                       00680000
+*        RC20 - CREATE request, but the named resource already          00690000
+*               exists                                                  00700000
+*                                                                       00710000
+*        RC24 - CREATE or ACQUIRE request, $ENTITY ADD failure          00720000
+*                                                                       00730000
+*        RC28 - ACQUIRE or RELEASE request, $ENTITY UPDATE              00740000
+*               failure                                                 00750000
+*                                                                       00760000
+*        RC36 - Storage allocation error                                00770000
+*                                                                       00780000
+**<DOC-OFF>****************************************************         00790000
+                                                                        00800000
+***************************************************************         00810000
+*                                                                       00820000
+* MAINTENANCE:                                                          00830000
+*                                                                       00840000
+*    08/17/94 RON COLMONE         Par# 138533                           00850000
+*             Initial Version                                           00860000
+*                                                                       00870000
+***************************************************************         00880000
+                                                                        00890000
+         EJECT ,                                                        00900000
+         $SRM    DSECT=YES        SHARED RESOURCE MANAGER PLIST         00910000
+                                                                        00920000
+         EJECT ,                                                        00930000
+         SRMENTUD ,               SRM ENTITY USER DATA                  00940000
+                                                                        00950000
+         EJECT ,                                                        00960000
+         $ENTITY DSECT=YES        $ENTITY SERVICE PLIST                 00970000
+                                                                        00980000
+         EJECT ,                                                        00990000
+         $TASK   DSECT=YES        $TASK   SERVICE PLIST                 01000000
+                                                                        01010000
+         EJECT ,                                                        01020000
+         $PROC   DSECT=YES        $PROC   SERVICE PLIST                 01030000
+                                                                        01040000
+         EJECT ,                                                        01050000
+         TMSG  ,                  MESSAGE HEADER                        01060000
+                                                                        01070000
+         EJECT ,                                                        01080000
+         EVCODES ,                EVENT CODES                           01090000
+                                                                        01100000
+         EJECT ,                                                        01110000
+         MSGCODES ,               INTER TASK MESSAGE CODES              01120000
+                                                                        01130000
+         EJECT ,                                                        01140000
+         EQUS  ,                  GENERAL EQUATES                       01150000
+                                                                        01160000
+         EJECT ,                                                        01170000
+         #WORK ,                  READ/WRITE USER DATA                  01180000
+REGSAVE  DS    16F                REGISTER SAVEAREA                     01190000
+MSGBUFR  DS    XL512              MESSAGE BUFFER                        01200000
+                                                                        01210000
+REQPCODE DS    F                  REQUEST POST CODE (COMP STATUS)       01220000
+                                                                        01230000
+RETCODES DS    0D                 RETURN/REASON CODES                   01240000
+RETCODE  DS    F                  RETURN CODE                           01250000
+RSNCODE  DS    F                  REASON CODE                           01260000
+                                                                        01270000
+RESNAME  DS    A                  SHARED RESOURCE NAME                  01280000
+RESNAMEL DS    F                  SHARED RESOURCE NAME LENGTH           01290000
+                                                                        01300000
+ENTITY@  DS    A                  ENTITY STRUCTURE ANCHOR               01310000
+ETOKEN   DS    XL8                ENTITY ENTRY TOKEN                    01320000
+ESRMUD   DS    XL(SRMUDLN)        SRM ENTITY USER DATA                  01330000
+                                                                        01340000
+DESTERM  @EPB  TYPE=BLOCK         DESTRUCTOR PROCESS TERM EPB           01350000
+                                                                        01360000
+$TSK_MFL $TASK   MF=(L,*)         TASK   MANAGER PLIST                  01370000
+$PRC_MFL $PROC   MF=(L,*)         PROC   MANAGER PLIST                  01380000
+$ENT_MFL $ENTITY MF=(L,*)         ENTITY MANAGER PLIST                  01390000
+                                                                        01400000
+         #ENDWORK ,               END OF WORKAREA                       01410000
+                                                                        01420000
+         EJECT                                                          01430000
+ISRMTASK #ENTER BASE=R12                                                01440000
+                                                                        01450000
+         USING ITASK,R10          ITASK ADDRESSABILITY                  01460000
+         L     R9,TSKPCBC         ADDRESS OF CURRENT PCB                01470000
+         USING IPCB,R9            IPCB  ADDRESSABILITY                  01480000
+                                                                        01490000
+         USING SRMENTUD,ESRMUD    ENTITY USER DATA                      01500000
+                                                                        01510000
+*---------------------------------------------------------------        01520000
+*  Initialize the local PCB Message EPB                                 01530000
+*---------------------------------------------------------------        01540000
+         $TASK SETEPB,            INITIALIZE MESSAGE EPB               +01550000
+               EPB=TSKMEPB,                                            +01560000
+               ECODE=EC$MSG,                                           +01570000
+               MF=(E,$TSK_MFL)                                          01580000
+                                                                        01590000
+*---------------------------------------------------------------        01600000
+*  Initialize the SRM Entity Structure                                  01610000
+*---------------------------------------------------------------        01620000
+         $ENTITY INIT,            INITIALIZE ENTITY STRUCTURE          +01630000
+               ALLOWDUP=NO,                                            +01640000
+               ORDER=NO,                                               +01650000
+               QH=PCBSTG,                                              +01660000
+               SLOTS=128,                                              +01670000
+               ANCHOR=ENTITY@,                                         +01680000
+               MF=(E,$ENT_MFL)                                          01690000
+                                                                        01700000
+         BZ    INIT_NOT           NOTIFY INITIALIZATION SUCCESSFUL      01710000
+         LA    R15,RC08           ENTITY INITIALIZATION FAILED          01720000
+         ST    R15,RETCODE        SET RETURN CODE                       01730000
+                                                                        01740000
+*---------------------------------------------------------------        01750000
+*  Post Initialization completion status                                01760000
+*---------------------------------------------------------------        01770000
+INIT_NOT DS    0H                                                       01780000
+         ICM   R15,15,RETCODE     INITIALIZATION SUCCESSFUL?            01790000
+         BNZ   RETURN             NO, TERMINATE SRM PROCESS             01800000
+                                                                        01810000
+         EJECT ,                                                        01820000
+****************************************************************        01830000
+*                                                                       01840000
+*  The following task wait request begins the main processing           01850000
+*  loop for the $SRM request processor.  Currently only message         01860000
+*  events and the HALT EPB notification event are the only              01870000
+*  types of events processed by this PCB.  Note that events             01880000
+*  such as CANCEL and STOP are ignored assuming that $INTMAIN.          01890000
+*  $$MAIN$$ will send the termination message when all tasks and        01900000
+*  workunits have completed.                                            01910000
+*                                                                       01920000
+****************************************************************        01930000
+SRM_WAIT DS    0H                                                       01940000
+         $TASK WAIT,              WAIT FOR EVENT COMPLETION            +01950000
+               MESSAGE=SRM_MSG,                                        +01960000
+               MF=(E,$TSK_MFL)                                          01970000
+                                                                        01980000
+         B     SRM_WAIT           WAIT FOR NEXT EVENT                   01990000
+                                                                        02000000
+*---------------------------------------------------------------        02010000
+*                                                                       02020000
+* Message event notification:                                           02030000
+*                                                                       02040000
+*    - Reestablish message notification EPB                             02050000
+*    - Receive inter task message                                       02060000
+*                                                                       02070000
+*---------------------------------------------------------------        02080000
+SRM_MSG  DS    0H                                                       02090000
+         $TASK SETEPB,            INITIALIZE MESSAGE EPB               +02100000
+               EPB=TSKMEPB,                                            +02110000
+               ECODE=EC$MSG,                                           +02120000
+               MF=(E,$TSK_MFL)                                          02130000
+                                                                        02140000
+MSG_RECV DS    0H                                                       02150000
+         $TRECV MSGBUFR,          RECEIVE SRM REQUEST MESSAGE          +02160000
+               MF=(E,MFE_LIST)                                          02170000
+                                                                        02180000
+         B     *+4(R15)           BRANCH ON RETURN CODE                 02190000
+         B     MSG_CONT           MSG RECEIVED, CONTINUE                02200000
+         B     SRM_WAIT           NO MESSAGES PENDING, WAIT             02210000
+         EX    0,*                BUFFER TO SMALL, UNEXPECTED           02220000
+                                                                        02230000
+         EJECT ,                                                        02240000
+*---------------------------------------------------------------        02250000
+*  Verify message request is for standard SRM request.  If so,          02260000
+*  initialize message request processing.                               02270000
+*---------------------------------------------------------------        02280000
+MSG_CONT DS    0H                                                       02290000
+         LA    R6,MSGBUFR         ADDRESS OF MESSAGE BUFFER             02300000
+         USING TMSGSTD,R6         ADDRESSABILITY                        02310000
+                                                                        02320000
+         CLC   TMSGTYPE,=A(ITM_SRM_STOP)                                02330000
+         BE    RETURN             STOP REQUEST, SHUTDOWN                02340000
+                                                                        02350000
+         CLC   TMSGTYPE,=A(ITM_SRM_REQUEST)                             02360000
+         BE    SRM_REQ            PROCESS SRM REQUEST                   02370000
+                                                                        02380000
+         $TMSGDFT (R6)            DEFAULT MESSAGE PROCESSING            02390000
+                                                                        02400000
+         B     MSG_RECV           RECEIVE NEXT MESSAGE                  02410000
+                                                                        02420000
+*---------------------------------------------------------------        02430000
+*  Obtain shared resource name and length of name                       02440000
+*---------------------------------------------------------------        02450000
+SRM_REQ  DS    0h                                                       02460000
+         LA    R8,TMSGINFO        ADDRESS OF SRM REQUEST PLIST          02470000
+         USING PSRMP,R8           ADDRESSABILITY                        02480000
+                                                                        02490000
+         LA    R15,RC00           ASSUME NORMAL COMPLETION              02500000
+         ST    R15,REQPCODE       CLEAR REQUEST POST CODE               02510000
+         XC    ETOKEN,ETOKEN      CLEAR ENTITY TOKEN                    02520000
+                                                                        02530000
+*---------------------------------------------------------------        02540000
+*  Obtain shared resource name and length of name                       02550000
+*---------------------------------------------------------------        02560000
+         LH    R1,PSRMRIDO        OFFSET  TO RESOURCE NAME              02570000
+         LA    R1,PSRMP(R1)       ADDRESS OF RESOURCE NAME              02580000
+         ST    R1,RESNAME         SAVE RESOURCE NAME ADDRESS            02590000
+                                                                        02600000
+         LH    R1,PSRMRIDL        LENGTH OF RESOURCE NAME               02610000
+         ST    R1,RESNAMEL        SAVE LENGTH OF RESOURCE NAME          02620000
+                                                                        02630000
+*---------------------------------------------------------------        02640000
+*  Call appropriate routine for SRM request                             02650000
+*---------------------------------------------------------------        02660000
+         L     R2,PSRMFUNC        GET SRM FUNCTION                      02670000
+         B     *+4(R2)            BRANCH ON FUNCTION CODE               02680000
+         B     SRM_CREA           CREATE RESOURCE                       02690000
+         B     SRM_ACQ            ACQUIRE USE OF RESOURCE               02700000
+         B     SRM_REL            RELEASE USE OF RESOURCE               02710000
+                                                                        02720000
+         EJECT ,                                                        02730000
+****************************************************************        02740000
+*                                                                       02750000
+*  CREATE - Create/Register SRM resource entry                          02760000
+*                                                                       02770000
+****************************************************************        02780000
+SRM_CREA DS    0H                                                       02790000
+         BAS   R14,RESLOC         LOCATE RESOURCE NAME                  02800000
+         BZ    ERR_EXST           RESOURCE ALREADY EXIST                02810000
+                                                                        02820000
+         XC    SRMENTUD(SRMUDLN),SRMENTUD                               02830000
+         MVC   SRMUDRTN,PSRMDES   ADDRESS OF DESTRUCTION RTN            02840000
+         MVC   SRMUDPRM,PSRMDESP  ADDRESS OF DESTRUCTION PARMS          02850000
+         MVC   SRMUDUSE,=A(1)     INITIAL USE COUNT                     02860000
+                                                                        02870000
+         LA    R1,SRMUDEXT        ADDRESS OF EXTENSION LIST             02880000
+         BAS   R14,EXTADD         CREATE REQUESTOR EXTENSION            02890000
+         BNZ   ERR_STG            STORAGE FAILURE                       02900000
+                                                                        02910000
+         $ENTITY ADD,             ADD ENTITY ENTRY                     +02920000
+               ENTITY=(*RESNAME,*RESNAMEL),                            +02930000
+               TOKEN=ETOKEN,                                           +02940000
+               USERDATA=SRMENTUD,                                      +02950000
+               ANCHOR=ENTITY@,                                         +02960000
+               MF=(E,$ENT_MFL)                                          02970000
+                                                                        02980000
+         BNZ   ERR_ISRT           ENTITY FAILURE CREATING RESOURCE      02990000
+         B     REQ_POST           POST USER OF NORMAL COMPLETION        03000000
+                                                                        03010000
+         EJECT ,                                                        03020000
+****************************************************************        03030000
+*                                                                       03040000
+*  ACQUIRE - Acquire ownership of SRM resource                          03050000
+*                                                                       03060000
+****************************************************************        03070000
+SRM_ACQ  DS    0H                                                       03080000
+         BAS   R14,RESLOC         LOCATE RESOURCE NAME                  03090000
+         BNZ   ERR_NFND           REQUESTED ENTITY NOT FOUND            03100000
+                                                                        03110000
+         LA    R0,PSRMWUID        ADDRESS OF WORKUNIT ID                03120000
+         LA    R1,SRMUDEXT        ADDRESS OF REQUESTOR EXT LIST         03130000
+         BAS   R14,EXTLOC         LOCATE REQUESTOR EXT                  03140000
+         BZ    ERR_OWND           REQUESTOR ALREADY OWNS                03150000
+                                                                        03160000
+         L     R1,SRMUDUSE        CURRENT USE COUNT                     03170000
+         LA    R1,1(,R1)          INCREMENT USE COUNT                   03180000
+         ST    R1,SRMUDUSE        UPDATE  USE COUNT                     03190000
+                                                                        03200000
+         LA    R1,SRMUDEXT        ADDRESS OF REQUESTOR EXT LIST         03210000
+         BAS   R14,EXTADD         LOCATE REQUESTOR EXT                  03220000
+         BNZ   ERR_STG            STORAGE ERROR                         03230000
+                                                                        03240000
+         $ENTITY POST,            UPDATE SHARED RESOURCE ENTRY         +03250000
+               TOKEN=ETOKEN,                                           +03260000
+               USERDATA=SRMENTUD,                                      +03270000
+               ANCHOR=ENTITY@,                                         +03280000
+               MF=(E,$ENT_MFL)                                          03290000
+                                                                        03300000
+         BNZ   ERR_UPD            ENTITY FAILURE POSTING UPDATE         03310000
+         B     REQ_POST           POST USER OF NORMAL COMPLETION        03320000
+                                                                        03330000
+         EJECT ,                                                        03340000
+****************************************************************        03350000
+*                                                                       03360000
+*  RELEASE - Release ownership of SRM resource                          03370000
+*                                                                       03380000
+****************************************************************        03390000
+SRM_REL  DS    0H                                                       03400000
+         BAS   R14,RESLOC         LOCATE RESOURCE NAME                  03410000
+         BNZ   ERR_NFND           REQUEST ENTITY NOT FOUND              03420000
+                                                                        03430000
+         LA    R0,PSRMWUID        ADDRESS OF WORKUNIT ID                03440000
+         LA    R1,SRMUDEXT        ADDRESS OF REQUESTOR EXT LIST         03450000
+         BAS   R14,EXTLOC         LOCATE REQUESTOR EXT                  03460000
+         BNZ   ERR_NOWN           REQUESTOR DOES NOT OWN RESOURCE       03470000
+                                                                        03480000
+         LR    R0,R1              ADDRESS OF EXTENSION TO BE DEL        03490000
+         LA    R1,SRMUDEXT        ADDRESS OF REQUESTOR EXT LIST         03500000
+         BAS   R14,EXTDEL         DELETE REQUESTOR EXTENSION            03510000
+                                                                        03520000
+         L     R1,SRMUDUSE        CURRENT USE COUNT                     03530000
+         BCTR  R1,0               DECREMENT USE COUNT                   03540000
+         ST    R1,SRMUDUSE        SAVE UPDATE USE COUNT                 03550000
+                                                                        03560000
+         LTR   R1,R1              RESOURCE NO LONGER IN USE             03570000
+         BZ    SRM_DEL            PROCEED WITH DELETE                   03580000
+                                                                        03590000
+         $ENTITY POST,            UPDATE SHARED RESOURCE ENTRY         +03600000
+               TOKEN=ETOKEN,                                           +03610000
+               USERDATA=SRMENTUD,                                      +03620000
+               ANCHOR=ENTITY@,                                         +03630000
+               MF=(E,$ENT_MFL)                                          03640000
+                                                                        03650000
+         BNZ   ERR_UPD            ENTITY FAILURE POSTING UPDATE         03660000
+         B     REQ_POST           POST USER OF NORMAL COMPLETION        03670000
+                                                                        03680000
+*---------------------------------------------------------------        03690000
+*  Remove SRM Entity entry                                              03700000
+*---------------------------------------------------------------        03710000
+SRM_DEL  DS    0H                                                       03720000
+         $ENTITY DEL,             REMOVE SHARED RESOURCE ENTITY        +03730000
+               TOKEN=ETOKEN,                                           +03740000
+               ANCHOR=ENTITY@,                                         +03750000
+               MF=(E,$ENT_MFL)                                          03760000
+                                                                        03770000
+*---------------------------------------------------------------        03780000
+*  Initialize Destructor RTN (process) termination EPB                  03790000
+*---------------------------------------------------------------        03800000
+         $TASK SETEPB,            INITIALIZE DESTRUCTOR TERMEPB        +03810000
+               EPB=DESTERM,                                            +03820000
+               ECODE=EC$TERM_PROC,                                     +03830000
+               SCOPE=LOCAL,                                            +03840000
+               MF=(E,$TSK_MFL)                                          03850000
+                                                                        03860000
+*---------------------------------------------------------------        03870000
+*  Create process to run destructor routine and wait for                03880000
+*  termination of destructor routine.                                   03890000
+*---------------------------------------------------------------        03900000
+         $PROC CREATE,            CREATE PROCESS FOR DESTRUCTOR RTN    +03910000
+               NAME='$SRMDES',                                         +03920000
+               EP=*SRMUDRTN,                                           +03930000
+               PARM=*SRMUDPRM,                                         +03940000
+               TERMEPB=DESTERM,                                        +03950000
+               MF=(E,$PRC_MFL)                                          03960000
+                                                                        03970000
+         BNZ   ERR_DES            DESTRUCTOR ROUTINE FAILURE            03980000
+                                                                        03990000
+         $TASK WAIT,EPB=DESTERM,MF=(E,$TSK_MFL)                         04000000
+                                                                        04010000
+         LTR   R15,R0             DESTRUCTOR ROUTINE ERROR              04020000
+         BNZ   ERR_DES            DESTRUCTOR ROUTINE FAILURE            04030000
+         B     REQ_POST           ELSE, POST NORMAL COMPLETION          04040000
+                                                                        04050000
+         EJECT ,                                                        04060000
+*---------------------------------------------------------------        04070000
+*  SRM request failures                                                 04080000
+*---------------------------------------------------------------        04090000
+ERR_OWND DS    0H                                                       04100000
+         LA    R15,RC04           REQ ERROR - RESOURCE ALREADY OWNED    04110000
+         ST    R15,REQPCODE       SET POST CODE                         04120000
+         B     REQ_POST           NOTIFY REQUESTOR                      04130000
+                                                                        04140000
+ERR_NFND DS    0H                                                       04150000
+         LA    R15,RC08           REQ ERROR - RESOURCE NOT FOUND        04160000
+         ST    R15,REQPCODE       SET POST CODE                         04170000
+         B     REQ_POST           NOTIFY REQUESTOR                      04180000
+                                                                        04190000
+ERR_NOWN DS    0H                                                       04200000
+         LA    R15,RC12           REQ ERROR - RESOURCE NOT OWNED        04210000
+         ST    R15,REQPCODE       SET POST CODE                         04220000
+         B     REQ_POST           NOTIFY REQUESTOR                      04230000
+                                                                        04240000
+ERR_DES  DS    0H                                                       04250000
+         LA    R15,RC16           REQ ERROR - DESTRUCTOR FAILURE        04260000
+         ST    R15,REQPCODE       SET POST CODE                         04270000
+         B     REQ_POST           NOTIFY REQUESTOR                      04280000
+                                                                        04290000
+ERR_EXST DS    0H                                                       04300000
+         LA    R15,RC20           REQ ERROR - RESOURCE ALREADY EXIST    04310000
+         ST    R15,REQPCODE       SET POST CODE                         04320000
+         B     REQ_POST           NOTIFY REQUESTOR                      04330000
+                                                                        04340000
+ERR_ISRT DS    0H                                                       04350000
+         LA    R15,RC24           REQ ERROR - ENTITY ADD FAILURE        04360000
+         ST    R15,REQPCODE       SET POST CODE                         04370000
+         B     REQ_POST           NOTIFY REQUESTOR                      04380000
+                                                                        04390000
+ERR_UPD  DS    0H                                                       04400000
+         LA    R15,RC28           REQ ERROR - ENTITY UPD FAILURE        04410000
+         ST    R15,REQPCODE       SET POST CODE                         04420000
+         B     REQ_POST           NOTIFY REQUESTOR                      04430000
+                                                                        04440000
+ERR_STG  DS    0H                                                       04450000
+         LA    R15,RC36           REQ ERROR - STORAGE ALLOC FAILURE     04460000
+         ST    R15,REQPCODE       SET POST CODE                         04470000
+         B     REQ_POST           NOTIFY REQUESTOR                      04480000
+                                                                        04490000
+*---------------------------------------------------------------        04500000
+*  If $TSEND with REPLY=YES is specified,  then notify SRM              04510000
+*  requestor with completion status.                                    04520000
+*---------------------------------------------------------------        04530000
+REQ_POST DS    0H                                                       04540000
+         ICM   R3,15,TMSGEPB      MESSAGE REPLY REQUIRED                04550000
+         BZ    MSG_RECV           NO, RECEIVE NEXT MESSAGE              04560000
+                                                                        04570000
+         $TASK POST,EPB=(R3),PCODE=*REQPCODE,MF=(E,$TSK_MFL)            04580000
+                                                                        04590000
+         B     MSG_RECV           RECEIVE NEXT MESSAGE                  04600000
+                                                                        04610000
+         EJECT ,                                                        04620000
+****************************************************************        04630000
+*                                                                       04640000
+*  Return                                                               04650000
+*                                                                       04660000
+****************************************************************        04670000
+RETURN   DS    0H                                                       04680000
+         LM    R15,R0,RETCODES    RETURN/REASON CODES                   04690000
+         #EXIT ,                  RETURN                                04700000
+                                                                        04710000
+         EJECT ,                                                        04720000
+****************************************************************        04730000
+*                                                                       04740000
+* ROUTINE: RESLOC - Locate Shared Resource Entity Entry                 04750000
+*                                                                       04760000
+* DESCRIPTION:                                                          04770000
+*                                                                       04780000
+*    This routine will locate the Shared resource entity                04790000
+*    by name and update the ETOKEN and SRMENTUD for the                 04800000
+*    requested entry of available.                                      04810000
+*                                                                       04820000
+* ENTRY: N/A                                                            04830000
+*                                                                       04840000
+* EXIT:  R15 contains the Entity extract request return code            04850000
+*                                                                       04860000
+*           RC00 - Shared resource successfully located                 04870000
+*          >RC00 - Shared resource not registered                       04880000
+*                                                                       04890000
+****************************************************************        04900000
+RESLOC   DS    0H                                                       04910000
+         STM   R0,R15,REGSAVE     SAVE CALLER'S REGISTER                04920000
+                                                                        04930000
+         $ENTITY EXTR,            LOCATE SHARED RESOURCE ENTITY        +04940000
+               ENTITY=(*RESNAME,*RESNAMEL),                            +04950000
+               USERDATA=SRMENTUD,                                      +04960000
+               ANCHOR=ENTITY@,                                         +04970000
+               MF=(E,$ENT_MFL)                                          04980000
+                                                                        04990000
+         BNZ   *+10               ENTITY ENTRY NOT FOUND                05000000
+         MVC   ETOKEN,0(R1)       COPY ENTITY TOKEN                     05010000
+                                                                        05020000
+         LM    R0,R14,REGSAVE     RESTORE CALLER'S REGISTERS            05030000
+         BR    R14                                                      05040000
+                                                                        05050000
+         EJECT ,                                                        05060000
+****************************************************************        05070000
+*                                                                       05080000
+* ROUTINE: EXTLOC - Locate Requestor Resource Extension                 05090000
+*                                                                       05100000
+* DESCRIPTION:                                                          05110000
+*                                                                       05120000
+*    This routine will locate the shared resource requestor's           05130000
+*    (workunit's) extension entry.  The extension entry                 05140000
+*    contains the workunit information of an owner of the               05150000
+*    shared resource.                                                   05160000
+*                                                                       05170000
+* ENTRY: R0 -  Address of Requestor Workunit ID                         05180000
+*        R1 -  Address of Requestor Extension list                      05190000
+*                                                                       05200000
+* EXIT:  R15 Contains one of the following return codes:                05210000
+*                                                                       05220000
+*            RC00 - Requestor extension located successfully            05230000
+*                   R1 - Address of requestor extension                 05240000
+*                                                                       05250000
+*            RC04 - Requestor extension not found                       05260000
+*                                                                       05270000
+****************************************************************        05280000
+EXTLOC   DS    0H                                                       05290000
+         STM   R0,R15,REGSAVE     SAVE CALLER'S REGISTER                05300000
+                                                                        05310000
+         LR    R2,R0              ADDRESS OF WORKUNIT TOKEN             05320000
+         USING SRMENTX,R1         ADDRESSABILITY                        05330000
+                                                                        05340000
+XLOC_NXT DS    0H                                                       05350000
+         ICM   R1,15,SRMXNEXT     ADDRESS OF NEXT ENTRY                 05360000
+         BZ    XLOC_NF            NOT FOUND                             05370000
+         CLC   SRMXWUID,0(R2)     EXTENSION FOR REQUESTED WORKUNIT      05380000
+         BNE   XLOC_NXT           RETURN, WORKUNIT EXT AVAIL            05390000
+                                                                        05400000
+         LA    R15,RC00           REQUESTOR EXT LOCATED                 05410000
+         B     XLOC_RET           RETURN, NORMAL                        05420000
+                                                                        05430000
+XLOC_NF  DS    0H                                                       05440000
+         LA    R15,RC04           REQUESTOR EXT NOT FOUND               05450000
+                                                                        05460000
+XLOC_RET DS    0H                                                       05470000
+         LM    R2,R14,REGSAVE+8   RESTORE CALLER'S REGISTERS            05480000
+         LTR   R15,R15            SET CONDITION CODE                    05490000
+         BR    R14                RETURN                                05500000
+         DROP  R1                 SRMEXTX                               05510000
+                                                                        05520000
+         EJECT ,                                                        05530000
+****************************************************************        05540000
+*                                                                       05550000
+* ROUTINE: EXTADD - Add Resource Requsetor Extension                    05560000
+*                                                                       05570000
+* DESCRIPTION:                                                          05580000
+*                                                                       05590000
+*    This routine will add a requestor (workunit) extension             05600000
+*    entry to the list of owners of the Shared resource.                05610000
+*                                                                       05620000
+* ENTRY: R1 -  Address of requestor extension list                      05630000
+*                                                                       05640000
+* EXIT:  R15 Contains one of the following return codes:                05650000
+*                                                                       05660000
+*            RC00 - Requestor extension added                           05670000
+*            RC08 - Storage allocation failure                          05680000
+*                                                                       05690000
+****************************************************************        05700000
+EXTADD   DS    0H                                                       05710000
+         STM   R0,R15,REGSAVE     SAVE CALLER'S REGISTER                05720000
+         LR    R2,R1              ADDRESS OF REQUESTOR EXT LIST         05730000
+                                                                        05740000
+         STGGET SRMXLN,QH=PCBSTG  ALLOCATE REQ EXT ENTRY                05750000
+         BNZ   XADD_STG           STORAGE ALLOC FAILURE                 05760000
+                                                                        05770000
+         LR    R5,R1              ADDRESS OF WORKUNIT TOKEN             05780000
+         USING SRMENTX,R5         ADDRESSABILITY                        05790000
+                                                                        05800000
+         MVC   SRMXTASK,PSRMTASK  TASK    NAME                          05810000
+         MVC   SRMXPROC,PSRMTASK  PROCESS NAME                          05820000
+         MVC   SRMXWUID,PSRMWUID  WORKUNIT TOKEN ID                     05830000
+                                                                        05840000
+         MVC   SRMXNEXT,0(R2)     COPY CURRENT HEAD OF LIST             05850000
+         ST    R5,0(R2)           ADD EXT ENTRY TO HEAD OF LIST         05860000
+                                                                        05870000
+         LA    R15,RC00           EXT SUCCESSFULLY ADDED                05880000
+         B     XADD_RET           RETURN NORMAL                         05890000
+                                                                        05900000
+XADD_STG DS    0H                                                       05910000
+         LA    R15,RC08           STORAGE ALLOCATION ERROR              05920000
+                                                                        05930000
+XADD_RET DS    0H                                                       05940000
+         LM    R0,R14,REGSAVE     RESTORE CALLER'S REGISTERS            05950000
+         LTR   R15,R15            SET CONDITION CODE                    05960000
+         BR    R14                RETURN                                05970000
+         DROP  R5                 SRMXENT                               05980000
+                                                                        05990000
+         EJECT ,                                                        06000000
+****************************************************************        06010000
+*                                                                       06020000
+* ROUTINE: EXTDEL - Delete Requestor Resource Extension                 06030000
+*                                                                       06040000
+* DESCRIPTION:                                                          06050000
+*                                                                       06060000
+*    This routine will remove a requestor (workunit) extension          06070000
+*    entry from the Shared resource's extension entry list              06080000
+*    and release the associated storage.                                06090000
+*                                                                       06100000
+* ENTRY: R0 -  Address of requestor extension to delete                 06110000
+*        R1 -  Address of requestor extension list anchor               06120000
+*                                                                       06130000
+* EXIT:  R15 Contains one of the following return codes:                06140000
+*                                                                       06150000
+*            RC00 - Requestor extension deleted                         06160000
+*            RC04 - unable to locate requestor entry                    06170000
+*                                                                       06180000
+****************************************************************        06190000
+EXTDEL   DS    0H                                                       06200000
+         STM   R0,R15,REGSAVE     SAVE CALLER'S REGISTER                06210000
+                                                                        06220000
+         LR    R5,R0              ADDRESS OF WORKUNIT TOKEN             06230000
+X        USING SRMENTX,R5         ADDRESSABILITY DEL ENTRY              06240000
+         USING SRMENTX,R1         ADDRESSABILITY                        06250000
+                                                                        06260000
+XDEL_NXT DS    0H                                                       06270000
+         C     R5,SRMXNEXT        PRECEEDING ENTRY?                     06280000
+         BE    XDEL_REM           YES, REMOVE ENTRY                     06290000
+         ICM   R1,15,SRMXNEXT     ADDRESS OF NEXT ENTRY                 06300000
+         BNZ   XDEL_NXT           CHECK NEXT ENTRY                      06310000
+                                                                        06320000
+         LA    R15,RC04           ENTRY NOT FOUND                       06330000
+         B     XDEL_RET           RETURN                                06340000
+                                                                        06350000
+XDEL_REM DS    0H                                                       06360000
+         MVC   SRMXNEXT,X.SRMXNEXT  REMOVE ENTRY FROM LIST              06370000
+                                                                        06380000
+         STGRETN ADDR=(R5),LEN=SRMXLN,QH=PCBSTG                         06390000
+                                                                        06400000
+         LA    R15,RC00           NORMAL COMPLETION                     06410000
+                                                                        06420000
+XDEL_RET DS    0H                                                       06430000
+         LM    R0,R14,REGSAVE     RESTORE CALLER'S REGISTERS            06440000
+         LTR   R15,R15            SET CONDITION CODE                    06450000
+         BR    R14                RETURN                                06460000
+         DROP  R1,X               SRMEXTX                               06470000
+                                                                        06480000
+         EJECT ,                                                        06490000
+***************************************************************         06500000
+*                                                                       06510000
+*   LOCAL READ/ONLY DATA AREAS, ETC.                                    06520000
+*                                                                       06530000
+***************************************************************         06540000
+                                                                        06550000
+         LTORG ,                                                        06560000
+                                                                        06570000
+         PRINT NOGEN                                                    06580000
+         ICVT  ,                                                        06590000
+         ITASK ,                                                        06600000
+         IPCB  ,                                                        06610000
+         PRINT GEN                                                      06620000
+                                                                        06630000
+         END   ,                                                        06640000

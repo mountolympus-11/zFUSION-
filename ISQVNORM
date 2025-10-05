@@ -1,0 +1,449 @@
+ISQVNORM TITLE '- PREPLAN DATA NORMILIZATION VALIDATION'                00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE:  ISQVNORM - Preplan data normailization validation           00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This routine is used to ensure that the variables residing         00080000
+*    on each screen (set) referenced in $NAVPARM can be                 00090000
+*    collectively coerced into tablular format, or normalized.          00100000
+*    It considers only those variable and region relationships          00110000
+*    present on a single screen, and ignores normalization              00120000
+*    issues raised when variables are accumulated in the course         00130000
+*    of screen-to-screen traversal.  As such, this routine is           00140000
+*    referred to as "preplan" normalization validation.                 00150000
+*                                                                       00160000
+*    Normalization of non-repeating data is straight forward.           00170000
+*    Scalar variables can be slotted side-by-side into a table          00180000
+*    row.  However, when repeating variables are present, i.e.          00190000
+*    those residing in repeating reqions, multiple table rows           00200000
+*    are usually needed to "flatten" the relationships                  00210000
+*    displayed.                                                         00220000
+*                                                                       00230000
+*    The current runtime normalizer accepts hierarchically              00240000
+*    organized repeating regions and their associated variables         00250000
+*    only when strict parentage relationships are present.              00260000
+*    Normalization done in this fashion is often called                 00270000
+*    "projection".  It is accomplished (ref ITVBR*) by visiting         00280000
+*    the lowest level repeating groups in the hierarchy,                00290000
+*    extracting those variables while holding the higher levels         00300000
+*    constant (odometer style).                                         00310000
+*                                                                       00320000
+*    When repeating variables reside in two or more repeating           00330000
+*    regions that are not hierarchically related, the request           00340000
+*    is failed.  Normalization in this case would require               00350000
+*    the construction of a cross-product, or join, of the               00360000
+*    unrelated (i.e. independent) variables.                            00370000
+*                                                                       00380000
+*    Normalization failure return codes are augmented by the            00390000
+*    diagnostic information returned in the work area provided          00400000
+*    by the caller and mapped by VNRMDIAG.                              00410000
+*                                                                       00420000
+*                                                                       00430000
+* ON ENTRY:                                                             00440000
+*                                                                       00450000
+*    R1  contains the address of $NAVPARM                               00460000
+*                                                                       00470000
+*    R0  contains the address of an error information return            00480000
+*        area described by the VNRMDIAG mapping macro                   00490000
+*                                                                       00500000
+*                                                                       00510000
+* ON EXIT:                                                              00520000
+*                                                                       00530000
+*    R15 contains one of the following return codes                     00540000
+*                                                                       00550000
+*        RC00 - successful completion                                   00560000
+*                                                                       00570000
+*        RC04 - invalid $NAVPARM or IXRCOLDF entry                      00580000
+*                                                                       00590000
+*        RC08 - region nesting exceeds limits                           00600000
+*                                                                       00610000
+*               VNRMDIAG identifies the region tree entry               00620000
+*               where the error was detected                            00630000
+*                                                                       00640000
+*        RC12 - normalization error, request requires join              00650000
+*               of data residing in mutually independent                00660000
+*               repeating regions                                       00670000
+*                                                                       00680000
+*               VNRMDIAG identifies the screen and the                  00690000
+*               conflicting region tree entries (RGNTRY)                00700000
+*                                                                       00710000
+**<DOC-OFF>****************************************************         00720000
+                                                                        00730000
+         EJECT                                                          00740000
+***************************************************************         00750000
+*                                                                       00760000
+* MAINTENANCE:                                                          00770000
+*                                                                       00780000
+*    05/10/95 R. Turgeon      Rel 2.0.0 - Table select                  00790000
+*             Module rewritten to break normalization into              00800000
+*             preplan and postplan components. ISQVNORM is              00810000
+*             the preplan component.                                    00820000
+*                                                                       00830000
+***************************************************************         00840000
+                                                                        00850000
+         EJECT                                                          00860000
+         #WORK ,                                                        00870000
+                                                                        00880000
+PREVSTN  DS    A                       PREVIOUS SCREEN (NVSTN)          00890000
+PREVPRGN DS    A                       PREVIOUS PARENT REGION (RGNTRY)  00900000
+REGSAVE  DS    16F                     LOCAL ROUTINE SAVEAREA           00910000
+                                                                        00920000
+*--------------------------------------------------------------         00930000
+*   VECTOR OF REPEATING RGN ENTRIES REFERENCED BY NESTING LVL           00940000
+*--------------------------------------------------------------         00950000
+                                                                        00960000
+NESTDEEP DS    F                       OFFSET TO DEEPEST RGNTRY REF     00970000
+NESTVECT DS    XL256                   RGNTRY NESTING ARRAY             00980000
+NESTVEND EQU   *                       RGNTRY NESTING ARRAY END         00990000
+NESTMAX  EQU   L'NESTVECT/4            MAXIMUM REGION NESTING DEPTH     01000000
+                                                                        01010000
+         #ENDWORK ,                    END OF WORKAREA                  01020000
+                                                                        01030000
+         EJECT                                                          01040000
+         $NAVPARM ,                    SQL / NAVIGATOIN LINKAGE BLOCK   01050000
+                                                                        01060000
+         EJECT                                                          01070000
+         VNRMDIAG ,                    NORMALIZATION FAILURE DIAG INFO  01080000
+                                                                        01090000
+         EJECT                                                          01100000
+         REGION ,                      REGION STRUCTURES                01110000
+                                                                        01120000
+         EJECT                                                          01130000
+         ICATALOG VARIABLES,REGIONS    PROJECT CATALOG COMPONENT TABLES 01140000
+                                                                        01150000
+         EJECT                                                          01160000
+         NAV  ,                        NAVIGATIONAL STRUCTURES          01170000
+                                                                        01180000
+         EJECT                                                          01190000
+         EQUS  ,                                                        01200000
+                                                                        01210000
+         EJECT                                                          01220000
+ISQVNORM #ENTER BASE=R12,PREG=(R8,R9)                                   01230000
+                                                                        01240000
+         USING ITASK,R10               ITASK ADDRESSABILITY             01250000
+                                                                        01260000
+         EJECT                                                          01270000
+***************************************************************         01280000
+*                                                                       01290000
+*   Examine each column/variable IXRCOLDF entry in $NAVPARM.            01300000
+*   The entries are ordered by application, screen (STN), and           01310000
+*   region (RGNTRY); a $NAVPARM constructor obligation.  The            01320000
+*   application ordering is not relevant to this routine.               01330000
+*                                                                       01340000
+***************************************************************         01350000
+                                                                        01360000
+         USING VNRMDIAG,R9             NORMALIZATION FAILURE DIAG INFO  01370000
+         XC    VNRMDIAG(VNRMDLN),VNRMDIAG                               01380000
+                                                                        01390000
+         USING $NAVPARM,R8             PLIST ADDRESSABILITY             01400000
+                                                                        01410000
+         LH    R6,IXRNVARS             NUMBER OF COLUMN/VARIABLES       01420000
+         LTR   R6,R6                   REASONABLE?                      01430000
+         BNP   ERR_NAVP                FAIL IF NOT                      01440000
+                                                                        01450000
+         L     R5,IXREPOFF             OFFSET TO VARIABLE ARRAY         01460000
+         LA    R5,$NAVPARM(R5)         CONVERT TO ADDRESS               01470000
+         USING IXRCOLDF,R5             ENTRY FORMAT                     01480000
+                                                                        01490000
+*--------------------------------------------------------------         01500000
+*   VERIFY REGION/VARIABLE RELATIONSHIPS AT END SCREEN                  01510000
+*--------------------------------------------------------------         01520000
+                                                                        01530000
+NXTENTRY DS    0H                      IDENTIFY END OF SCREEN (SET)     01540000
+         CLC   PREVSTN,IXRSCRNA        CURR VAR IN SAME STATE AS PRIOR? 01550000
+         BE    FINSCRN                 CONTINUE ACCUMULATION IF SO      01560000
+                                                                        01570000
+         ICM   R15,15,NESTDEEP         NESTED RPTING RGNS THIS SCREEN?  01580000
+         BZ    *+8                     NO VALIDATION REQUIRED OTHERWISE 01590000
+         BAS   R14,$VSCREEN            COMPLETE SCREEN (SET) VALIDATION 01600000
+         LTR   R15,R15                 NORMALIZATION VIOLATIONS?        01610000
+         BNZ   ERR_JOIN                (R0,R1) CONTAIN ERROR RGNTRYS    01620000
+                                                                        01630000
+         MVC   PREVSTN,IXRSCRNA        PREPARE FOR NEW VALIDATION PASS  01640000
+         XC    PREVPRGN,PREVPRGN       REINIT PREV/CURR REGION          01650000
+         XC    NESTDEEP,NESTDEEP       REINIT REGION NESTING INFO       01660000
+         XC    NESTVECT,NESTVECT                                        01670000
+                                                                        01680000
+FINSCRN  DS    0H                                                       01690000
+                                                                        01700000
+         EJECT                                                          01710000
+***************************************************************         01720000
+*                                                                       01730000
+*   If the current variable does not reside in a repeating              01740000
+*   region or resides in the same region as the variable                01750000
+*   described by the previous $NAVPARM variable, all of the             01760000
+*   interesting relationships have been previously captured.            01770000
+*                                                                       01780000
+***************************************************************         01790000
+                                                                        01800000
+         TM    IXRSTAT1,IXRS1RPT       IF NOT A DIRECTLY OR INDIRECTLY  01810000
+         BNO   FINRGN                  RPTING RGN, ITS OF NO INTEREST   01820000
+                                                                        01830000
+         L     R1,IXRRGNTY             REGION TREE ENTRY                01840000
+         BAS   R14,$TESTRPT            REGION ENTRY IN R1 A REPEATER?   01850000
+         LTR   R3,R15                  RETURNS INNERMOST RPT RGN ENTRY  01860000
+         BZ    FINRGN                  VERY STRANGE                     01870000
+                                                                        01880000
+         USING RGNTRY,R3               REGION TREE ENTRY FORMAT         01890000
+         C     R3,PREVPRGN             CURR VAR IN SAME RGN AS PRIOR?   01900000
+         BE    FINRGN                  NO NEW INFORMATION IF SO         01910000
+         ST    R3,PREVPRGN             ACKNOWLEDGE THE RGN TRANSITION   01920000
+                                                                        01930000
+*--------------------------------------------------------------         01940000
+*   TRACK PRESENCE OF REPEATING REGIONS BY NESTING DEPTH                01950000
+*--------------------------------------------------------------         01960000
+                                                                        01970000
+         SR    R2,R2                   PREPARE FOR INSERT               01980000
+         BCTR  R2,0                    ONE'S COMPLEMENT                 01990000
+         ICM   R2,1,RGNSCOR#+(RGSLVL-RGNSCORE) COMPLEMENTED NEST LVL    02000000
+         LCR   R2,R2                   ACQUIRE DEPTH RELATIVE TO ONE    02010000
+         CH    R2,=AL2(NESTMAX)        MAX NESTING LEVEL SUPPORTED      02020000
+         BH    ERR_NEST                FAIL IF EXCEEDED                 02030000
+                                                                        02040000
+         BCTR  R2,0                    ZERO RELATIVE DEPTH              02050000
+         SLL   R2,2                    PTR ARRAY IN OFFSET FORMAT       02060000
+         C     R2,NESTDEEP             DEEPEST LEVEL YET REFERENCED?    02070000
+         BNH   *+8                     SKIP IF NOT                      02080000
+         ST    R2,NESTDEEP             RETAIN MAX NESTING DEPTH REACHED 02090000
+                                                                        02100000
+         LR    R1,R3                   CANDIDATE RGNTRY IN ERROR REG    02110000
+         LA    R15,NESTVECT(R2)        RPTING RGN SLOT FOR THIS DEPTH   02120000
+         ICM   R0,15,0(R15)            REPEATING RGN PREV IDENTIFIED?   02130000
+         BNZ   ERR_JOIN                PARRALLEL ARRAYS OF RPTING VARS  02140000
+         ST    R1,0(,R15)              ID OF RPTING RGN CONTAINING VARS 02150000
+         DROP  R3                      RGNTRY                           02160000
+                                                                        02170000
+FINRGN   DS    0H                                                       02180000
+                                                                        02190000
+*--------------------------------------------------------------         02200000
+*   PROCESS ALL COLUMN/VARIABLE ENTRIES                                 02210000
+*--------------------------------------------------------------         02220000
+                                                                        02230000
+         LA    R5,IXRCDLEN(,R5)        ADVANCE TO NEXT COLUMN/VARIABLE  02240000
+         BCT   R6,NXTENTRY             PROCESS ALL ENTRIES              02250000
+         DROP  R5                      IXRCOLDF                         02260000
+                                                                        02270000
+*--------------------------------------------------------------         02280000
+*   NORMALIZATION TESTS FOR THE FINAL SCREEN(SET)                       02290000
+*--------------------------------------------------------------         02300000
+                                                                        02310000
+         ICM   R15,15,NESTDEEP         NESTED RPTING RGNS THIS SCREEN?  02320000
+         BZ    *+8                     NO VALIDATION REQUIRED OTHERWISE 02330000
+         BAS   R14,$VSCREEN            COMPLETE SCREEN (SET) VALIDATION 02340000
+         LTR   R15,R15                 NORMALIZATION VIOLATIONS?        02350000
+         BNZ   ERR_JOIN                (R0,R1) CONTAIN ERROR RGNTRYS    02360000
+                                                                        02370000
+         EJECT                                                          02380000
+***************************************************************         02390000
+*                                                                       02400000
+*   Normal and abnormal completions                                     02410000
+*                                                                       02420000
+***************************************************************         02430000
+                                                                        02440000
+NORMRET  DS    0H                      COMPLETED WITHOUT ERROR          02450000
+         LA    R15,RC00                                                 02460000
+         B     EXIT                                                     02470000
+                                                                        02480000
+ERR_NAVP DS    0H                      INVALID $NAVPARM FORMAT          02490000
+         LA    R15,RC04                                                 02500000
+         B     EXIT                                                     02510000
+                                                                        02520000
+ERR_NEST DS    0H                      REGION NESTING EXCEEDS LIMIT     02530000
+         LA    R15,RC08                INDICATE ERROR                   02540000
+         ST    R3,VNRRGNM1             RGNTRY TRIGGERING THE ERROR      02550000
+         B     DIAGINFO                GENERATE DIAGNOSTIC INFO         02560000
+                                                                        02570000
+ERR_JOIN DS    0H                      IMPLICIT JOIN OF INDEPENDENT     02580000
+         LA    R15,RC12                REPEATING REGIONS                02590000
+         ST    R0,VNRRGNM1             RETAIN PTRS TO CONFLICTING       02600000
+         ST    R1,VNRRGNM2             RGNTRYS                          02610000
+                                                                        02620000
+*--------------------------------------------------------------         02630000
+*   COMPLETE DIAG RETURN AREA - CONVERT RGNTRYS TO REGION NAMES         02640000
+*--------------------------------------------------------------         02650000
+                                                                        02660000
+DIAGINFO DS    0H                                                       02670000
+         L     R4,PREVSTN              IDENTIFY FAILING SCREEN (SET)    02680000
+         USING NVSTN,R4                STN NODE FORMAT                  02690000
+         LA    R1,NVSTSSN              ASSUME STN REPRESENTS SCREEN SET 02700000
+         TM    NVSTSSN,BF              ASSUMPTION CORRECT?              02710000
+         BNZ   *+8                     SKIP IF SO                       02720000
+         LA    R1,NVSTNAME             ELSE SELECT THE SCREEN NAME      02730000
+         ST    R1,VNRSCRN1             RETURN SCREEN (SET) NAME ADDR    02740000
+                                                                        02750000
+         USING SYSRGN,R4               SYSREGIONS ROW FORMAT            02760000
+         USING RGNTRY,R3               REGION TREE ENTRY                02770000
+                                                                        02780000
+         ICM   R3,15,VNRRGNM1          REGION #1                        02790000
+         BZ    DIAGRGN1                NOT PROVIDED                     02800000
+         L     R4,RGNSRGN              TRAVERSE TO SYSREGIONS           02810000
+         LA    R0,SRNAME               REGION NAME                      02820000
+         ST    R0,VNRRGNM1             POST POINTER                     02830000
+                                                                        02840000
+DIAGRGN1 DS    0H                                                       02850000
+                                                                        02860000
+         ICM   R3,15,VNRRGNM2          REGION #2                        02870000
+         BZ    DIAGRGN2                NOT PROVIDED                     02880000
+         L     R4,RGNSRGN              TRAVERSE TO SYSREGIONS           02890000
+         LA    R0,SRNAME               REGION NAME                      02900000
+         ST    R0,VNRRGNM2             POST POINTER                     02910000
+                                                                        02920000
+DIAGRGN2 DS    0H                                                       02930000
+         DROP  R3,R4                   RGNTRY, SYSREGIONS               02940000
+                                                                        02950000
+*--------------------------------------------------------------         02960000
+*   RETURN TO CALLER                                                    02970000
+*--------------------------------------------------------------         02980000
+                                                                        02990000
+EXIT     DS    0H                                                       03000000
+                                                                        03010000
+         #EXIT ,                       RETURN                           03020000
+         DROP  R8                      $NAVPARM                         03030000
+                                                                        03040000
+         EJECT                                                          03050000
+***************************************************************         03060000
+*                                                                       03070000
+* ROUTINE:  $VSCREEN - repeating variable normalization                 03080000
+*                                                                       03090000
+* DESCRIPTION:                                                          03100000
+*                                                                       03110000
+*    Ensure that the chain from the most deeply nested region           03120000
+*    entry up to the top of the tree representing the entire            03130000
+*    presentation space spans all of the repeating regions              03140000
+*    referrenced by $NAVPARM variables.  If so, each of the             03150000
+*    respective regions are mutually repeating.  Otherwise,             03160000
+*    some type of cross-product (join) is required to normalize         03170000
+*    the independent repeating variables.                               03180000
+*                                                                       03190000
+*                                                                       03200000
+* ON ENTRY:                                                             03210000
+*                                                                       03220000
+*    NESTVEC and NESTDEEP describe the repeating regions that           03230000
+*    contain variables on a single screen (set).                        03240000
+*                                                                       03250000
+*                                                                       03260000
+* ON EXIT:                                                              03270000
+*                                                                       03280000
+*    R15 contains one of the following return codes                     03290000
+*                                                                       03300000
+*        RC00 - all regions, if any, are mutually repeating             03310000
+*                                                                       03320000
+*        RC04 - independently repeating regions encountered             03330000
+*                                                                       03340000
+*               R0 - region tree entry address #1 (RGNTRY)              03350000
+*               R1 - region tree entry address #2 (RGNTRY)              03360000
+*                                                                       03370000
+***************************************************************         03380000
+                                                                        03390000
+$VSCREEN DS    0H                                                       03400000
+         STM   R0,R15,REGSAVE          PRESERVE MAINLINE REGS           03410000
+                                                                        03420000
+*--------------------------------------------------------------         03430000
+*   WALK THE REGIONS OUTWARDS FROM THE INNERMOST REPEATER FOUND         03440000
+*--------------------------------------------------------------         03450000
+                                                                        03460000
+         LA    R6,4                    SCAN FROM INNERMOST RGN OUTWARD  03470000
+         LNR   R6,R6                   RUNNING THE RGN VECTOR BACKWARDS 03480000
+         LA    R7,NESTVECT             STOP VALIDATION AT PSPACE LVL    03490000
+         LA    R5,NESTVECT             ORIGIN OF NESTING VECTOR         03500000
+         AL    R5,NESTDEEP             LOCATE DEEPEST RPTING RGN        03510000
+                                                                        03520000
+         L     R3,0(,R5)               INIT RGNTRY PARENT CHAIN CURSOR  03530000
+         USING RGNTRY,R3               LOWEST LEVEL RGN CONTAINING VAR  03540000
+                                                                        03550000
+*--------------------------------------------------------------         03560000
+*   ENSURE STRAIGHT ANCESTRY LINE BACK TO PRESENTATION SPACE            03570000
+*--------------------------------------------------------------         03580000
+                                                                        03590000
+VSCRNEXT DS    0H                                                       03600000
+         ICM   R2,15,0(R5)             SIGNIFICANT RPTING RGN NOTED?    03610000
+         BZ    VSCRADV                 CONTINUE UP THE TREE IF NOT      03620000
+         CR    R3,R2                   STRICT ADHERENCE TO HIERARCHY?   03630000
+         BNE   VSCR_ERR                FAIL IF INDEPENDENT RPTING RGNS  03640000
+                                                                        03650000
+VSCRADV  DS    0H                                                       03660000
+         L     R3,RGNPAR               CLIMB UP TO REGION'S PARENT      03670000
+         BXH   R5,R6,VSCRNEXT          CORRESPONDING MOVE IN NEST VECT  03680000
+                                                                        03690000
+*--------------------------------------------------------------         03700000
+*   RETURN COMPLETION STATUS                                            03710000
+*--------------------------------------------------------------         03720000
+                                                                        03730000
+         LA    R15,RC00                NORMAL COMPLETION                03740000
+         B     VSCREXIT                DONE                             03750000
+                                                                        03760000
+VSCR_ERR DS    0H                      REGION / PARENTAGE CONFLICT      03770000
+         LA    R15,RC04                INDICATE ERROR                   03780000
+         LR    R0,R3                   EXPECTED PARENT                  03790000
+         LR    R1,R2                   ACTUAL PARENT                    03800000
+                                                                        03810000
+VSCREXIT DS    0H                                                       03820000
+         LM    R2,R14,REGSAVE+8        RESTORE MAINLINE REGS            03830000
+         BR    R14                     RETURN                           03840000
+         DROP  R3                      RGNTRY                           03850000
+                                                                        03860000
+         EJECT                                                          03870000
+***************************************************************         03880000
+*                                                                       03890000
+* ROUTINE: $TESTRPT - Identify variable array (repeating group)         03900000
+*                                                                       03910000
+* DESCRIPTION:                                                          03920000
+*                                                                       03930000
+*    Determine whether the region represented by a region tree          03940000
+*    entry provided as input is a repeating region, or is a             03950000
+*    subregion of a repeating region, returning the highest             03960000
+*    level repeating region.                                            03970000
+*                                                                       03980000
+* ON ENTRY:                                                             03990000
+*                                                                       04000000
+*    R1 - addr of RGNTRY                                                04010000
+*                                                                       04020000
+* ON EXIT:                                                              04030000
+*                                                                       04040000
+*    R15 contains one of the following return values                    04050000
+*                                                                       04060000
+*        00 - region does not repeat                                    04070000
+*                                                                       04080000
+*       ==> - region repeats or is subrgn of repeating region.          04090000
+*             highest level repeating region entry is returned.         04100000
+*                                                                       04110000
+***************************************************************         04120000
+                                                                        04130000
+$TESTRPT DS    0H                                                       04140000
+         LR    R15,R1                  CANDIDATE REGION ENTRY           04150000
+         USING RGNTRY,R15              REGION ENTRY                     04160000
+                                                                        04170000
+TESTRGN  DS    0H                                                       04180000
+         ICM   R1,15,RGNSRGN           ASSOCIATED REGION DEFINITION     04190000
+         BZ    TESTRNXT                QUITE STRANGE                    04200000
+                                                                        04210000
+         USING SYSRGN,R1               ADDRESSABILITY                   04220000
+         CLI   SRAHRPT,0               REPEATS HORIZONTALLY?            04230000
+         BNE   TESTRFIN                DONE IF SO                       04240000
+         CLI   SRAVRPT,0               REPEATS HORIZONTALLY?            04250000
+         BNE   TESTRFIN                DONE IF SO                       04260000
+                                                                        04270000
+TESTRNXT DS    0H                                                       04280000
+         ICM   R15,15,RGNPAR           UPWARDS TO PARENT REGION         04290000
+         BNZ   TESTRGN                 TEST FOR HIGHER LEVEL REPEATER   04300000
+                                                                        04310000
+TESTRFIN DS    0H                                                       04320000
+         LTR   R15,R15                 SET CC ACCORDINGLY               04330000
+         BR    R14                     RETURN                           04340000
+         DROP  R1,R15                  SYSRGN, RGNTRY                   04350000
+                                                                        04360000
+         EJECT                                                          04370000
+***************************************************************         04380000
+*                                                                       04390000
+*   LOCAL READ ONLY STORAGE                                             04400000
+*                                                                       04410000
+***************************************************************         04420000
+                                                                        04430000
+         LTORG ,                                                        04440000
+                                                                        04450000
+         PRINT NOGEN                                                    04460000
+         ICVT  ,                                                        04470000
+         ITASK ,                                                        04480000
+         END   ,                                                        04490000

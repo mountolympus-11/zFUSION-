@@ -1,0 +1,941 @@
+ISYSRU TITLE 'INTEGRATOR - TRANSACTION PROGRAM ROUTER'                  00010000
+**<DOC-ON>************************************************************* 00020000
+*                                                                       00030000
+* ROUTINE: ISYSRU - TRANSACTION PROGRAM ROUTER                          00040000
+*                                                                       00050000
+* DESCRIPTION: THIS ROUTINE IS CALLED BY ISYSDRVR AS AN INTERFACE TO    00060000
+*              THE TRANSACTION PROGRAMS THAT CAN BE ASSOCIATED WITH     00070000
+*              AN INTEGRATOR-TO-INTEGRATOR SESSION.  TRANSACTION        00080000
+*              PROGRAMS OPERATE AS A SUBROUTINE OF ISYSRU.              00090000
+*                                                                       00100000
+* ON ENTRY:                                                             00110000
+*                                                                       00120000
+*    R15 = ENTRY POINT ADDRESS                                          00130000
+*    R14 = RETURN ADDRESS                                               00140000
+*    R13 = AVAILABLE SAVE AREA                                          00150000
+*    R11 = ICVT ADDRESS                                                 00160000
+*    R10 = ITASK ADDRESS                                                00170000
+*    R09 = IVTAMCVT ADDRESS                                             00180000
+*    R08 = IPCB ADDRESS                                                 00190000
+*    R07 = ISYS ADDRESS                                                 00200000
+*    R01 = >0 --> RECEIVED MESSAGE ADDRESS                              00210000
+*                                                                       00220000
+*                 R0=DATA LENGTH                                        00230000
+*                                                                       00240000
+*          <0 --> ITWA ADDRESS                                          00250000
+*                                                                       00260000
+*                 R0=0 --> INITIATE A NEW TRANSACTION                   00270000
+*                 R0=-1--> CLEANUP TRANSACTION                          00280000
+*                                                                       00290000
+* ON EXIT:                                                              00300000
+*                                                                       00310000
+*    R15 = 0 CONTINUE NORMALLY                                          00320000
+*        = 4 TRANSACTION PROGRAM COULD NOT BE LOADED/STARTED            00330000
+*        = 8 FATAL PROTOCOL ERROR, END SESSION                          00340000
+*    R00 = 0                                                            00350000
+*    R01 = 0                                                            00360000
+*                                                                       00370000
+*    ALL OTHER REGISTERS ARE RESTORED.                                  00380000
+*                                                                       00390000
+**<DOC-OFF>************************************************************ 00400000
+                                                                        00410000
+         EJECT ,                                                        00420000
+*********************************************************************** 00430000
+*                                                                       00440000
+* MAINTENANCE:                                                          00450000
+*                                                                       00460000
+*   12/31/93 RANDY WITEK                                                00470000
+*   05/22/95 RANDY WITEK - USE ER PROTOCOL FOR SYSTEMS CONNECTION       00480000
+*   10/26/95 RANDY WITEK - FIX MVS LEVEL-DEPENDENT TIME USAGE           00490000
+*                                                                       00500000
+*********************************************************************** 00510000
+                                                                        00520000
+         EQUS  ,                  GENERAL EQUATES                       00530000
+                                                                        00540000
+RITASK   EQU   R10                                                      00550000
+RIVTAM   EQU   R9                                                       00560000
+RIPCB    EQU   R8                                                       00570000
+RISYS    EQU   R7                                                       00580000
+RMSG     EQU   R6                                                       00590000
+RIQTR    EQU   R5                                                       00600000
+RITWA    EQU   R4                                                       00610000
+                                                                        00620000
+         USING ITASK,RITASK       ESTABLISH ADDRESSIBILITY              00630000
+         USING IVTAMCVT,RIVTAM    ESTABLISH ADDRESSIBILITY              00640000
+         USING IPCB,RIPCB         ESTABLISH ADDRESSIBILITY              00650000
+         USING ISY,RISYS          ESTABLISH ADDRESSIBILITY              00660000
+         USING TMSGSTD,RMSG       ESTABLISH ADDRESSABILITY              00670000
+         USING IQT,RIQTR          ESTABLISH ADDRESSABILITY              00680000
+         USING ITWA,RITWA         ESTABLISH ADDRESSABILITY              00690000
+                                                                        00700000
+         USING ISMH,R3                                                  00710000
+                                                                        00720000
+WORKAREA #WORK ,                  GENERAL WORKAREA                      00730000
+                                                                        00740000
+$TASKMFL $TASK MF=L               $TASK REQUEST PLIST                   00750000
+                                                                        00760000
+RETR15   DS    F                                                        00770000
+RETR0    DS    F                                                        00780000
+RETR1    DS    F                                                        00790000
+RETREGS  EQU   RETR15,*-RETR15    RETURN REGSITERS                      00800000
+                                                                        00810000
+SENDAREA DS    F                                                        00820000
+SENDLEN  DS    F                                                        00830000
+                                                                        00840000
+RSPAREA  DS    XL(L'ISMMAX)       RESPONSE BUILD AREA                   00850000
+                                                                        00860000
+TIME     DS    F                                                        00870000
+DATE     DS    F                                                        00880000
+                                                                        00890000
+DATA@    DS    A                  INPUT RU ADDRESS                      00900000
+DATAL    DS    F                  INPUT RU LENGTH                       00910000
+                                                                        00920000
+SUB0SAVE DS    16F                LOCAL SUBROUTINE SAVEAREA #0          00930000
+SUB1SAVE DS    16F                LOCAL SUBROUTINE SAVEAREA #1          00940000
+                                                                        00950000
+         DS    0D                                                       00960000
+WRK256   DS    XL256              GENERAL PURPOSE WORKAREA              00970000
+                                                                        00980000
+DEQNOTE  DS    CL8                "ENDED   " OR "ABORTED "              00990000
+DEQQTIME DS    XL11               F021207A20207A20204B2020 HH:MM:SS.TH  01000000
+DEQSTIME DS    XL11               F021207A20207A20204B2020 HH:MM:SS.TH  01010000
+DEQETIME DS    XL11               F021207A20207A20204B2020 HH:MM:SS.TH  01020000
+DEQQDATE DS    XL8                40212020204B20202020     DDD.YYYY     01030000
+DEQSDATE DS    XL8                40212020204B20202020     DDD.YYYY     01040000
+DEQEDATE DS    XL8                40212020204B20202020     DDD.YYYY     01050000
+                                                                        01060000
+FLAG     DS    X                                                        01070000
+FLAGLOCK EQU   X'80'              VTAM GLOBAL LOCK HELD                 01080000
+FLAGLCKD EQU   X'40'              VTAM GLOBAL LOCK HELD ON ENTRY        01090000
+                                                                        01100000
+WORKLEN  #ENDWORK ,               WORKAREA END                          01110000
+                                                                        01120000
+         $MSGDFT PREFIX=ICTPID,COMPID='VTM',TABLE=*#MSGS,              +01130000
+               CONID=*ICTCONID,CONNAME=ICTCONNM,                       +01140000
+               MF=(E,WRK256)                                            01150000
+                                                                        01160000
+ISYSRU #ENTER BASE=R12,                                                +01170000
+               PREG=(R3,R2),       R1 --> R3, R0 --> R2                +01180000
+               AMODE=31,                                               +01190000
+               RMODE=ANY                                                01200000
+                                                                        01210000
+*---------------------------------------------------------------------- 01220000
+* INITIALIZATION                                                        01230000
+*---------------------------------------------------------------------- 01240000
+                                                                        01250000
+         LTR   R3,R3              DATA RU OR ITWA ADDRESS?              01260000
+         BM    GOTITWA            BRANCH IF ITWA ADDRESS                01270000
+                                                                        01280000
+*---------------------------------------------------------------------- 01290000
+* A DATA RU WAS RECEIVED                                                01300000
+*---------------------------------------------------------------------- 01310000
+                                                                        01320000
+         ST    R3,DATA@           SAVE DATA ADDRESS                     01330000
+         ST    R2,DATAL           SAVE DATA LENGTH                      01340000
+                                                                        01350000
+*                                                                       01360000
+* LOCATE THE ITWA FOR THE SPECIFIED FLOW (PRI-TO-SEC OR SEC-TO-PRI)     01370000
+*---------------------------------------------------------------------- 01380000
+                                                                        01390000
+         LA    RITWA,ISYPTWA      PRIMARY-TO-SECONDARY WORK AREA        01400000
+         TM    ISMF,ISMFPRI       IS THIS PRIMARY-TO-SECONDARY ?        01410000
+         BO    DATAGOTF           BRANCH IF YES                         01420000
+         LA    RITWA,ISYSTWA      SECONDARY-TO-PRIMARY WORK AREA        01430000
+                                                                        01440000
+DATAGOTF DS    0H                                                       01450000
+                                                                        01460000
+         ST    R3,ITWDATA@        SET FOR TRANSACTION PROGRAM           01470000
+         ST    R2,ITWDATAL        SET FOR TRANSACTION PROGRAM           01480000
+                                                                        01490000
+         L     R15,ISYRBYT#   SYS RECEIVE CHARACTER COUNT               01500000
+         ALR   R15,R2             PLUS THE NEW MESSAGE                  01510000
+         ST    R15,ISYRBYT#       STORE UPDATED CHARACTER COUNT         01520000
+                                                                        01530000
+         L     R15,ITWRBYT#   TRN RECEIVE CHARACTER COUNT               01540000
+         ALR   R15,R2             PLUS THE NEW MESSAGE                  01550000
+         ST    R15,ITWRBYT#       STORE UPDATED CHARACTER COUNT         01560000
+                                                                        01570000
+         L     R15,ISYRMSG#   SYS RECEIVE MESSAGE COUNT                 01580000
+         AL    R15,=F'1'          PLUS THE NEW MESSAGE                  01590000
+         ST    R15,ISYRMSG#       STORE UPDATED MESSAGE COUNT           01600000
+                                                                        01610000
+         L     R15,ITWRMSG#   TRN RECEIVE MESSAGE COUNT                 01620000
+         AL    R15,=F'1'          PLUS THE NEW MESSAGE                  01630000
+         ST    R15,ITWRMSG#       STORE UPDATED MESSAGE COUNT           01640000
+                                                                        01650000
+*                                                                       01660000
+* PROCESS THE START OF A NEW TRANSACTION FROM THE REMOTE PARTNER        01670000
+*---------------------------------------------------------------------- 01680000
+                                                                        01690000
+         TM    ITWF1,ITWF1ACT     IS A TRANSACTION ACTIVE?              01700000
+         BO    DATATACT           BRANCH IF YES, ALREADY RUNNING        01710000
+                                                                        01720000
+         CLI   ISMQR,C'Q'         IS THIS A REQUEST?                    01730000
+         BNE   ERRPRT01           BRANCH IF NOT, FATAL ERROR            01740000
+                                                                        01750000
+         L     R1,ITWTRAN#        LAST TRANSACTION NUMBER               01760000
+         AL    R1,=F'1'           BUMP BY ONE                           01770000
+         C     R1,ISMTRAN#        IS THIS THE EXPECTED TRAN#?           01780000
+         BNE   ERRPRT02           BRANCH IF NOT, FATAL ERROR            01790000
+         ST    R1,ITWTRAN#        SET UPDATED TRAN NUMBER               01800000
+                                                                        01810000
+         BAS   R14,CLEARTWA       CLEAR THE ITWA                        01820000
+                                                                        01830000
+         L     R1,ITWRSEQ#        LAST RECEIVE SEQUENCE NUMBER          01840000
+         AL    R1,=F'1'           BUMP BY ONE                           01850000
+         C     R1,ISMSEQ#         IS THIS THE EXPECTED SEQ#?            01860000
+         BNE   ERRPRT03           BRANCH IF NOT, FATAL ERROR            01870000
+         ST    R1,ITWRSEQ#        SET UPDATED RECEIVE SEQ NUMBER        01880000
+                                                                        01890000
+         MVC   ITWRMSG#,=F'1'     SET MSG COUNT AFTER CLEARING ITWA     01900000
+         MVC   ITWRBYT#,DATAL     SET BYT COUNT AFTER CLEARING ITWA     01910000
+                                                                        01920000
+         BAS   R14,GETTIME        GET THE CURRENT TIME/DATE             01930000
+         MVC   ITWSTIME,TIME      SET TRAN START TIME                   01940000
+         MVC   ITWSDATE,DATE      SET TRAN START DATE                   01950000
+                                                                        01960000
+         MVC   ITWDATA@,DATA@     SET DATA ADDRESS                      01970000
+         MVC   ITWDATAL,DATAL     SET DATA LENGTH                       01980000
+                                                                        01990000
+         MVC   ITWNAME,ISMDPROG   SET THE TRANSACTION NAME              02000000
+         OC    ITWNAME,=8C' '     UPPER CASE                            02010000
+                                                                        02020000
+         MVC   ITWRNAME,ISMOPROG  SET THE REMOTE TRANSACTION NAME       02030000
+         OC    ITWRNAME,=8C' '    UPPER CASE                            02040000
+                                                                        02050000
+         LOAD  EPLOC=ITWNAME,                                          +02060000
+               ERRET=STRTLERR                                           02070000
+                                                                        02080000
+         OI    ITWF1,ITWF1ACT     SHOW TRANSACTION ACTIVE               02090000
+         LR    R15,R0             COPY ENTRY ADDRESS                    02100000
+         ST    R0,ITWEP           ENTRY ADDRESS                         02110000
+         MVC   ITWPARM,=A(ITWPREQ)                                      02120000
+         LR    R1,RITWA           PASS THE ITWA                         02130000
+         LR    R0,RISYS           PASS THE ISYS ADDRESS                 02140000
+         BASR  R14,R15            LINK TO LOADED MODULE                 02150000
+         B     TRANRTRN           PROCESS RETURN FROM TP                02160000
+                                                                        02170000
+STRTLERR DS    0H                                                       02180000
+                                                                        02190000
+         MVC   ITWSENSE(2),=X'08FF'                                     02200000
+         BAS   R14,RESPOND        RESPOND TO THE RU                     02210000
+         LA    R0,4               DEQUEUE - ABORT                       02220000
+         BAS   R14,TRANDQ         DEQUEUE THE TRANSACTION               02230000
+         B     ERRLOAD            AND RETURN                            02240000
+                                                                        02250000
+*                                                                       02260000
+* PROCESS A REQUEST RU FOR AN ACTIVE TRANSACTION                        02270000
+*---------------------------------------------------------------------- 02280000
+                                                                        02290000
+DATATACT DS    0H                                                       02300000
+                                                                        02310000
+         CLI   ISMQR,C'Q'         IS THIS A REQUEST?                    02320000
+         BNE   DATARSP            BRANCH IF NOT                         02330000
+                                                                        02340000
+         TM    ITWF1,ITWF1RWT     ARE WE WAITING FOR A RESPONSE?        02350000
+         BO    ERRPRT04           BRANCH IF YES, FATAL ERROR            02360000
+                                                                        02370000
+         CLC   ITWTRAN#,ISMTRAN#  IS TRANSACTION NUMBER CORRECT?        02380000
+         BNE   ERRPRT02           BRANCH IF NOT, FATAL ERROR            02390000
+                                                                        02400000
+         L     R1,ITWRSEQ#        LAST RECEIVE SEQUENCE NUMBER          02410000
+         AL    R1,=F'1'           BUMP BY ONE                           02420000
+         C     R1,ISMSEQ#         IS THIS THE EXPECTED SEQ#?            02430000
+         BNE   ERRPRT03           BRANCH IF NOT, FATAL ERROR            02440000
+         ST    R1,ITWRSEQ#        SET UPDATED RECEIVE SEQ NUMBER        02450000
+                                                                        02460000
+         CLC   ITWNAME,ISMDPROG   IS DESTINATION PROGRAM CORRECT?       02470000
+         BNE   ERRPRT05           BRANCH IF NOT, FATAL ERROR            02480000
+                                                                        02490000
+         XC    ITWSENSE,ITWSENSE  CLEAR OLD SENSE INFO, IF ANY          02500000
+         MVC   ITWPARM,=A(ITWPREQ)                                      02510000
+         LR    R1,RITWA           PASS THE ITWA                         02520000
+         LR    R0,RISYS           PASS THE ISYS ADDRESS                 02530000
+         L     R15,ITWEP          ENTRY ADDRESS                         02540000
+         BASR  R14,R15            LINK TO LOADED MODULE                 02550000
+         B     TRANRTRN           PROCESS RETURN FROM TP                02560000
+                                                                        02570000
+*                                                                       02580000
+* PROCESS A RESPONSE RU FOR AN ACTIVE TRANSACTION                       02590000
+*---------------------------------------------------------------------- 02600000
+                                                                        02610000
+DATARSP  DS    0H                                                       02620000
+                                                                        02630000
+         CLI   ISMQR,C'R'         IS THIS A RESPONSE?                   02640000
+         BNE   ERRPRT06           BRANCH IF NOT, FATAL ERROR            02650000
+                                                                        02660000
+         TM    ITWF1,ITWF1RWT     ARE WE WAITING FOR A RESPONSE?        02670000
+         BNO   ERRPRT07           BRANCH IF NOT, FATAL ERROR            02680000
+                                                                        02690000
+         CLC   ITWTRAN#,ISMTRAN#  IS TRANSACTION NUMBER CORRECT?        02700000
+         BNE   ERRPRT02           BRANCH IF NOT, FATAL ERROR            02710000
+                                                                        02720000
+         CLC   ITWSSEQ#,ISMSEQ#   IS RESPONSE FOR CURRENT SEND SEQ#?    02730000
+         BNE   ERRPRT08           BRANCH IF NOT, FATAL ERROR            02740000
+                                                                        02750000
+         CLC   ITWNAME,ISMDPROG   IS DESTINATION PROGRAM CORRECT?       02760000
+         BNE   ERRPRT05           BRANCH IF NOT, FATAL ERROR            02770000
+                                                                        02780000
+         NI    ITWF1,255-ITWF1RWT NO LONGER WAITING FOR RESPONSE        02790000
+                                                                        02800000
+         MVC   ITWPARM,=A(ITWPRSP)                                      02810000
+         LR    R1,RITWA           PASS THE ITWA                         02820000
+         LR    R0,RISYS           PASS THE ISYS ADDRESS                 02830000
+         L     R15,ITWEP          ENTRY ADDRESS                         02840000
+         BASR  R14,R15            LINK TO LOADED MODULE                 02850000
+         B     TRANRTRN           PROCESS RETURN FROM TP                02860000
+                                                                        02870000
+*---------------------------------------------------------------------- 02880000
+* INITIATE A NEW TRANSACTION                                            02890000
+*---------------------------------------------------------------------- 02900000
+                                                                        02910000
+GOTITWA  DS    0H                                                       02920000
+                                                                        02930000
+         LA    RITWA,0(,R3)       ITWA ADDRESS                          02940000
+                                                                        02950000
+         LTR   R2,R2              START TRANSACTION?                    02960000
+         BNZ   CLEANUP            BRANCH IF NOT, END TRANSACTION        02970000
+                                                                        02980000
+         ICM   RIQTR,15,ISYWQ1ST  PICK UP THE FIRST QUEUED TRAN         02990000
+         BNP   ABN_ENV            BRANCH IF NONE QUEUED                 03000000
+         LA    RMSG,IQTTMSG       ADDRESS OF THE WORK REQUEST           03010000
+                                                                        03020000
+         BAS   R14,CLEARTWA       CLEAR THE ITWA                        03030000
+                                                                        03040000
+         BAS   R14,GETTIME        GET THE CURRENT TIME/DATE             03050000
+         MVC   ITWSTIME,TIME      SET TRAN START TIME                   03060000
+         MVC   ITWSDATE,DATE      SET TRAN START DATE                   03070000
+         MVC   ITWQTIME,IQTQTIME  SET TRAN QUEUE TIME                   03080000
+         MVC   ITWQDATE,IQTQDATE  SET TRAN QUEUE DATE                   03090000
+                                                                        03100000
+         L     R1,ITWTRAN#        LAST TRANSACTION NUMBER               03110000
+         AL    R1,=F'1'           BUMP BY ONE                           03120000
+         ST    R1,ITWTRAN#        SET UPDATED TRAN NUMBER               03130000
+                                                                        03140000
+         MVC   ITWNAME,TMSGINFO+4 SET THE TRANSACTION NAME              03150000
+         OC    ITWNAME,=8C' '     UPPER CASE                            03160000
+         MVC   ITWDATAL,TMSGINFL  SET WORKUNIT LENGTH                   03170000
+         LA    R1,TMSGINFO        ADDRESS OF WORKUNIT                   03180000
+         ST    R1,ITWDATA@        SET WORKUNIT ADDRESS                  03190000
+                                                                        03200000
+         LOAD  EPLOC=ITWNAME,                                          +03210000
+               ERRET=INITLERR                                           03220000
+                                                                        03230000
+         OI    ITWF1,ITWF1ACT+ITWF1INI TRANSACTION ACTIVE               03240000
+         LR    R15,R0             COPY ENTRY ADDRESS                    03250000
+         ST    R0,ITWEP           ENTRY ADDRESS                         03260000
+         MVC   ITWPARM,=A(ITWPINIT)                                     03270000
+         LR    R1,RITWA           PASS THE ITWA                         03280000
+         LR    R0,RISYS           PASS THE ISYS ADDRESS                 03290000
+         BASR  R14,R15            LINK TO LOADED MODULE                 03300000
+         B     TRANRTRN           PROCESS RETURN FROM TP                03310000
+                                                                        03320000
+INITLERR DS    0H                                                       03330000
+                                                                        03340000
+         LA    R0,4               DEQUEUE - ABORT                       03350000
+         BAS   R14,TRANDQ         DEQUEUE THE TRANSACTION               03360000
+         B     ERRLOAD            AND RETURN                            03370000
+                                                                        03380000
+*---------------------------------------------------------------------- 03390000
+* CLEANUP AN EXISTING TRANSACTION                                       03400000
+*---------------------------------------------------------------------- 03410000
+                                                                        03420000
+CLEANUP  DS    0H                                                       03430000
+                                                                        03440000
+         TM    ITWF1,ITWF1ACT     IS A TRANSACTION ACTIVE?              03450000
+         BNO   RETURN             BRANCH IF NOT, ALL DONE               03460000
+                                                                        03470000
+         MVC   ITWPARM,=A(ITWPCLN)                                      03480000
+         XC    ITWDATA@,ITWDATA@  NO DATA ADDRESS                       03490000
+         XC    ITWDATAL,ITWDATAL  NO DATA LENGTH                        03500000
+         LR    R1,RITWA           PASS THE ITWA                         03510000
+         LR    R0,RISYS           PASS THE ISYS ADDRESS                 03520000
+         L     R15,ITWEP          ENTRY ADDRESS                         03530000
+         BASR  R14,R15            LINK TO LOADED MODULE                 03540000
+         LA    R0,4               TRANSACTION BEING ABORTED             03550000
+         BAS   R14,TRANDQ         ISSUE MESSAGE AND DEQUEUE             03560000
+         BAS   R14,DELETE         DELETE THE LOAD MODULE                03570000
+         BAS   R14,CLEARTWA       CLEAN UP THE ITWA                     03580000
+         B     RETURN             AND EXIT                              03590000
+                                                                        03600000
+*---------------------------------------------------------------------- 03610000
+* A TRANSACTION PROGRAM WAS CALLED AND HAS RETURNED TO US.              03620000
+*                                                                       03630000
+* R15 = 0 --> RESPOND (IF APPROPRIATE) AND WAIT FOR A MESSAGE           03640000
+*     = 4 --> RESPOND (IF APPROPRIATE) AND SEND A MESSAGE               03650000
+*             R1 = MESSAGE ADDRESS                                      03660000
+*             R0 = MESSAGE LENGTH                                       03670000
+*     = 8 --> RESPOND (IF APPROPRIATE) AND END TRANSACTION              03680000
+*     =12 --> RESPOND (IF APPROPRIATE) AND END SYSTEMS CONNECTION       03690000
+*---------------------------------------------------------------------- 03700000
+                                                                        03710000
+TRANRTRN DS    0H                                                       03720000
+                                                                        03730000
+         LR    R2,R15                SAVE TRANSACTION PROGRAM'S RC      03740000
+         BAS   R14,RESPOND           SEND RESPONSE IF APPROPRIATE       03750000
+         LTR   R15,R15               WAS THERE A SEND ERROR?            03760000
+         BNZ   TRANFAIL              BRANCH IF YES                      03770000
+                                                                        03780000
+         N     R2,=X'0000000C'       ENSURE RC=0,4,8,12                 03790000
+         B     TRANRCJP(R2)          JUMP TO PROCESS RETURN CODE        03800000
+                                                                        03810000
+TRANRCJP B     RETURN             R2=0 --> WAIT FOR MESSAGE             03820000
+         B     TRANSEND           R2=4 --> SEND A MESSAGE               03830000
+         B     TRANEND            R2=8 --> PROGRAM END                  03840000
+         B     TRANKILL           R2=12--> TERMINATE SYSTEMS CONNCT'N   03850000
+                                                                        03860000
+TRANSEND DS    0H                                                       03870000
+                                                                        03880000
+X        USING ISMH,R1                                                  03890000
+                                                                        03900000
+         MVI   X.ISMQR,C'Q'          THIS IS A REQUEST                  03910000
+         NI    X.ISMF,ISMFEND        CLEAR FLAGS EXCEPT FOR END FLAG    03920000
+         OC    X.ISMF,ITWFLOW        SET THE FLOW INDICATOR             03930000
+         XC    X.ISMSENSE,X.ISMSENSE CLEAR SENSE                        03940000
+         MVC   X.ISMTRAN#,ITWTRAN#   SET TRANSACTION NUMBER             03950000
+                                                                        03960000
+         L     R14,ITWSSEQ#          LAST SEND SEQUENCE NUMBER          03970000
+         AL    R14,=F'1'             BUMP BY ONE                        03980000
+         ST    R14,ITWSSEQ#          SET UPDATED SEND SEQ NUMBER        03990000
+         MVC   X.ISMSEQ#,ITWSSEQ#    SET SEQUENCE NUMBER                04000000
+                                                                        04010000
+         MVC   X.ISMDPROG,ITWRNAME   SET DESTINATION PROGRAM NAME       04020000
+         MVC   X.ISMOPROG,ITWNAME    SET ORIGIN PROGRAM NAME            04030000
+                                                                        04040000
+         DROP  X                                                        04050000
+                                                                        04060000
+         BAS   R14,SENDRU            GO SEND THE MESSAGE                04070000
+         LTR   R15,R15               WAS THERE A SEND ERROR?            04080000
+         BNZ   TRANFAIL              BRANCH IF YES                      04090000
+                                                                        04100000
+         OI    ITWF1,ITWF1RWT        WAITING FOR A RESPONSE             04110000
+         B     RETURN                AND WE ARE DONE                    04120000
+                                                                        04130000
+TRANEND  DS    0H                                                       04140000
+                                                                        04150000
+         SR    R0,R0                 NORMAL END OF TRANSACTION          04160000
+         BAS   R14,TRANDQ            ISSUE MESSAGE AND DEQUEUE          04170000
+         BAS   R14,DELETE            DELETE THE LOAD MODULE             04180000
+         BAS   R14,CLEARTWA          CLEANUP THE ITWA                   04190000
+         B     RETURN                                                   04200000
+                                                                        04210000
+TRANKILL DS    0H                                                       04220000
+                                                                        04230000
+         SR    R0,R0                 NORMAL END OF TRANSACTION          04240000
+         BAS   R14,TRANDQ            ISSUE MESSAGE AND DEQUEUE          04250000
+         BAS   R14,DELETE            DELETE THE LOAD MODULE             04260000
+         BAS   R14,CLEARTWA          CLEANUP THE ITWA                   04270000
+         B     ERRPRT09                                                 04280000
+                                                                        04290000
+TRANFAIL DS    0H                                                       04300000
+                                                                        04310000
+         B     ERRPRT10                                                 04320000
+                                                                        04330000
+*---------------------------------------------------------------------- 04340000
+* EXCEPTION RETURNS                                                     04350000
+*---------------------------------------------------------------------- 04360000
+                                                                        04370000
+ERRPRT01 DS    0H                                                       04380000
+                                                                        04390000
+         MVI   RETR0+(L'RETR0-1),1                                      04400000
+         B     ERRPRT                                                   04410000
+                                                                        04420000
+ERRPRT02 DS    0H                                                       04430000
+                                                                        04440000
+         MVI   RETR0+(L'RETR0-1),2                                      04450000
+         B     ERRPRT                                                   04460000
+                                                                        04470000
+ERRPRT03 DS    0H                                                       04480000
+                                                                        04490000
+         MVI   RETR0+(L'RETR0-1),3                                      04500000
+         B     ERRPRT                                                   04510000
+                                                                        04520000
+ERRPRT04 DS    0H                                                       04530000
+                                                                        04540000
+         MVI   RETR0+(L'RETR0-1),4                                      04550000
+         B     ERRPRT                                                   04560000
+                                                                        04570000
+ERRPRT05 DS    0H                                                       04580000
+                                                                        04590000
+         MVI   RETR0+(L'RETR0-1),5                                      04600000
+         B     ERRPRT                                                   04610000
+                                                                        04620000
+ERRPRT06 DS    0H                                                       04630000
+                                                                        04640000
+         MVI   RETR0+(L'RETR0-1),6                                      04650000
+         B     ERRPRT                                                   04660000
+                                                                        04670000
+ERRPRT07 DS    0H                                                       04680000
+                                                                        04690000
+         MVI   RETR0+(L'RETR0-1),7                                      04700000
+         B     ERRPRT                                                   04710000
+                                                                        04720000
+ERRPRT08 DS    0H                                                       04730000
+                                                                        04740000
+         MVI   RETR0+(L'RETR0-1),8                                      04750000
+         B     ERRPRT                                                   04760000
+                                                                        04770000
+ERRPRT09 DS    0H                                                       04780000
+                                                                        04790000
+         MVI   RETR0+(L'RETR0-1),9                                      04800000
+         B     ERRPRT                                                   04810000
+                                                                        04820000
+ERRPRT10 DS    0H                                                       04830000
+                                                                        04840000
+         MVI   RETR0+(L'RETR0-1),10                                     04850000
+         B     ERRPRT                                                   04860000
+                                                                        04870000
+ERRPRT   DS    0H                                                       04880000
+                                                                        04890000
+         L     R2,RETR0               REASON CODE                       04900000
+         BCTR  R2,0                   MINUS ONE                         04910000
+         SLL   R2,5                   TIMES 32 (LENGTH OF TEXT)         04920000
+         L     R1,=A(RSNPRT01)        ADDRESS OF FIRST TEXT             04930000
+         LA    R2,0(R2,R1)            ADDRESS OF EXPLANATION TEXT       04940000
+                                                                        04950000
+         $MSG  023,                                                    +04960000
+               FIELDS=(ISYAPPID,                                       +04970000
+               RETR0,                                                  +04980000
+               ((R2),32))                                               04990000
+                                                                        05000000
+         MVI   RETR15+(L'RETR15-1),8  FATAL PROTOCOL ERROR              05010000
+         B     RETURN                                                   05020000
+                                                                        05030000
+ERRLOAD  DS    0H                                                       05040000
+                                                                        05050000
+         $MSG  020,                                                    +05060000
+               FIELDS=(ISYAPPID,                                       +05070000
+               ITWNAME)                                                 05080000
+                                                                        05090000
+         BAS   R14,CLEARTWA           CLEANUP THE ITWA                  05100000
+         MVI   RETR15+(L'RETR15-1),4  TP COULDN'T BE LOADED/STARTED     05110000
+         B     RETURN                                                   05120000
+                                                                        05130000
+*---------------------------------------------------------------------- 05140000
+* RETURN TO CALLER                                                      05150000
+*---------------------------------------------------------------------- 05160000
+                                                                        05170000
+RETURN   DS    0H                                                       05180000
+                                                                        05190000
+         LM    R15,R0,RETREGS     SET RETURN REGISTERS                  05200000
+                                                                        05210000
+         #EXIT R1=YES             RETURN W/R15,R0,R1                    05220000
+                                                                        05230000
+*---------------------------------------------------------------------- 05240000
+* CATASTROPHIC ERRORS                                                   05250000
+*---------------------------------------------------------------------- 05260000
+                                                                        05270000
+ABN_ENV  DS    0H                                                       05280000
+                                                                        05290000
+         STM   R15,R1,RETREGS                                           05300000
+                                                                        05310000
+         $ABEND ABE_VTDIAG,                                            +05320000
+               DUMP=YES,                                               +05330000
+               SCOPE=PCB,                                              +05340000
+               TITLE='ENVIRONMENTAL ERROR IN ISYSRU'                    05350000
+                                                                        05360000
+*---------------------------------------------------------------------- 05370000
+*                                                                       05380000
+* ROUTINE: RESPOND - SEND RESPONSE RU                                   05390000
+*                                                                       05400000
+* DESCRIPTION:                                                          05410000
+*                                                                       05420000
+*    THIS ROUTINE WILL SEND THE REQUIRED RESPONSE RU                    05430000
+*                                                                       05440000
+* ENTRY:   DATA@ = ADDRESS OF RU                                        05450000
+*          ITWSENSE = ASSOCIATED SENSE, IF ANY                          05460000
+*                                                                       05470000
+* EXIT:    ALL REGISTERS ARE RESTORED.                                  05480000
+*---------------------------------------------------------------------- 05490000
+                                                                        05500000
+RESPOND  DS    0H                                                       05510000
+                                                                        05520000
+         STM   R0,R15,SUB1SAVE    SAVE CALLER'S REGISTERS               05530000
+                                                                        05540000
+         SR    R15,R15            SET RC=0                              05550000
+         ST    R15,SUB1SAVE+(R15*4) SAVE SEND RETURN CODE               05560000
+                                                                        05570000
+         ICM   R3,15,DATA@        ADDRESS OF RU                         05580000
+         BZ    RSPDEXIT           BRANCH IF NO RU                       05590000
+                                                                        05600000
+         CLI   ISMQR,C'Q'         WAS IT A REQUEST?                     05610000
+         BNE   RSPDEXIT           BRANCH IF NOT                         05620000
+                                                                        05630000
+X        USING ISMH,RSPAREA                                             05640000
+                                                                        05650000
+         XC    X.ISMH(L'ISMMAX),X.ISMH                                  05660000
+         MVI   X.ISMQR,C'R'         FLAG AS RESPONSE MESSAGE            05670000
+         MVC   X.ISMF,ISMF          COPY FLAGS                          05680000
+         MVC   X.ISMSENSE,ITWSENSE  SET ASSOCIATED SENSE                05690000
+         MVC   X.ISMTRAN#,ISMTRAN#  COPY TRANSACTION NUMBER             05700000
+         MVC   X.ISMSEQ#,ISMSEQ#    COPY SEQUENCE NUMBER                05710000
+         MVC   X.ISMDPROG,ISMOPROG  DESTINATION IS REQUEST ORIGIN       05720000
+         MVC   X.ISMOPROG,ISMDPROG  ORIGIN IS REQUEST DESTINATION       05730000
+                                                                        05740000
+         LA    R1,X.ISMQR           RESPONSE ADDRESS                    05750000
+         LA    R0,L'ISMMAX          RESPONSE LENGTH                     05760000
+         BAS   R14,SENDRU           SEND THE RESPONSE                   05770000
+         ST    R15,SUB1SAVE+(R15*4) SAVE SEND RETURN CODE               05780000
+         B     RSPDEXIT             AND RETURN                          05790000
+                                                                        05800000
+         DROP  X                                                        05810000
+                                                                        05820000
+*                                                                       05830000
+* RETURN                                                                05840000
+*---------------------------------------------------------------------- 05850000
+                                                                        05860000
+RSPDEXIT DS    0H                                                       05870000
+                                                                        05880000
+         LM    R0,R15,SUB1SAVE    RESTORE CALLER'S REGISTERS            05890000
+         BR    R14                RETURN                                05900000
+                                                                        05910000
+*---------------------------------------------------------------------- 05920000
+*                                                                       05930000
+* ROUTINE: SENDRU - SEND SESSION DATA                                   05940000
+*                                                                       05950000
+* DESCRIPTION:                                                          05960000
+*                                                                       05970000
+*    THIS ROUTINE WILL SEND AN RU CHAIN TO THE SESSION PARTNER.         05980000
+*                                                                       05990000
+* ENTRY:   R1=DATA ADDRESS                                              06000000
+*          R0=DATA LENGTH                                               06010000
+*          RITWA=ITWA ADDRESS                                           06020000
+*                                                                       06030000
+* EXIT:    ALL REGISTERS ARE RESTORED.                                  06040000
+*---------------------------------------------------------------------- 06050000
+                                                                        06060000
+SENDRU   DS    0H                                                       06070000
+                                                                        06080000
+         STM   R0,R15,SUB0SAVE    SAVE CALLER'S REGISTERS               06090000
+                                                                        06100000
+         ST    R1,SENDAREA                                              06110000
+         ST    R0,SENDLEN                                               06120000
+                                                                        06130000
+*                                                                       06140000
+* UPDATE SEND CHARACTER COUNT                                           06150000
+*---------------------------------------------------------------------- 06160000
+                                                                        06170000
+         L     R15,ISYSBYT#   SYS SEND CHARACTER COUNT                  06180000
+         ALR   R15,R0             PLUS NEW MESSAGE                      06190000
+         ST    R15,ISYSBYT#       SET UPDATED COUNT                     06200000
+                                                                        06210000
+         L     R15,ITWSBYT#   TRN SEND CHARACTER COUNT                  06220000
+         ALR   R15,R0             PLUS NEW MESSAGE                      06230000
+         ST    R15,ITWSBYT#       SET UPDATED COUNT                     06240000
+                                                                        06250000
+         L     R15,ISYSMSG#   SYS SEND MESSAGE COUNT                    06260000
+         AL    R15,=F'1'          PLUS THE NEW MESSAGE                  06270000
+         ST    R15,ISYSMSG#       STORE UPDATED MESSAGE COUNT           06280000
+                                                                        06290000
+         L     R15,ITWSMSG#   TRN SEND MESSAGE COUNT                    06300000
+         AL    R15,=F'1'          PLUS THE NEW MESSAGE                  06310000
+         ST    R15,ITWSMSG#       STORE UPDATED MESSAGE COUNT           06320000
+                                                                        06330000
+*                                                                       06340000
+* ALLOCATE A PARAMETER LIST                                             06350000
+*---------------------------------------------------------------------- 06360000
+                                                                        06370000
+         $GETSTOR L'SPL,                                               +06380000
+               LOC=ANY,                                                +06390000
+               OWNER=(RITASK)     ALLOCATE SPLIST                       06400000
+                                                                        06410000
+         LR    R3,R1              SAVE SPLIST ADDRESS                   06420000
+                                                                        06430000
+*                                                                       06440000
+* ISSUE THE SEND REQUEST                                                06450000
+*---------------------------------------------------------------------- 06460000
+                                                                        06470000
+         $SESS $SESS_SEND_DATA,                                        +06480000
+               SESSION=ISYTK,                                          +06490000
+               AREA=*SENDAREA,                                         +06500000
+               AREALEN=*SENDLEN,                                       +06510000
+               BB=YES,EB=YES,BC=YES,EC=YES,DR1=NO,DR2=NO,ER1=YES,      +06520000
+               MF=(E,(R3))                                              06530000
+                                                                        06540000
+         ST    R15,SUB0SAVE+(R15*4) PASS SEND RETURN CODE               06550000
+                                                                        06560000
+*                                                                       06570000
+* RELEASE THE PARAMETER LIST                                            06580000
+*---------------------------------------------------------------------- 06590000
+                                                                        06600000
+         $RETSTOR (R3),                                                +06610000
+               OWNER=(RITASK)                                           06620000
+                                                                        06630000
+*                                                                       06640000
+* RETURN                                                                06650000
+*---------------------------------------------------------------------- 06660000
+                                                                        06670000
+         LM    R0,R15,SUB0SAVE    RESTORE CALLER'S REGISTERS            06680000
+         BR    R14                RETURN                                06690000
+                                                                        06700000
+*---------------------------------------------------------------------- 06710000
+*                                                                       06720000
+* ROUTINE: DELETE - DELETE THE TRANSACTION LOAD MODULE                  06730000
+*                                                                       06740000
+* DESCRIPTION:                                                          06750000
+*                                                                       06760000
+*    THIS ROUTINE ISSUES AN MVS DELETE TO REMOVE A TRANSACTION LOAD     06770000
+*    MODULE FROM STORAGE.                                               06780000
+*                                                                       06790000
+* ENTRY:   RITWA=ITWA ADDRESS                                           06800000
+*                                                                       06810000
+* EXIT:    ALL REGISTERS ARE RESTORED.                                  06820000
+*---------------------------------------------------------------------- 06830000
+                                                                        06840000
+DELETE   DS    0H                                                       06850000
+                                                                        06860000
+         STM   R0,R15,SUB0SAVE    SAVE CALLER'S REGISTERS               06870000
+                                                                        06880000
+         DELETE EPLOC=ITWNAME         DELETE THE LOADED MODULE          06890000
+                                                                        06900000
+         LM    R0,R15,SUB0SAVE    RESTORE CALLER'S REGISTERS            06910000
+         BR    R14                RETURN                                06920000
+                                                                        06930000
+*---------------------------------------------------------------------- 06940000
+*                                                                       06950000
+* ROUTINE: CLEARTWA - CLEAR THE TRANSACTION WORK AREA                   06960000
+*                                                                       06970000
+* DESCRIPTION:                                                          06980000
+*                                                                       06990000
+*    THIS ROUTINE WILL ZERO WORKING FIELDS IN THE ITWA                  07000000
+*    AT START/END OF A TRANSACTION.                                     07010000
+*                                                                       07020000
+* ENTRY:   RITWA=ITWA ADDRESS                                           07030000
+*                                                                       07040000
+* EXIT:    ALL REGISTERS ARE RESTORED.                                  07050000
+*---------------------------------------------------------------------- 07060000
+                                                                        07070000
+CLEARTWA DS    0H                                                       07080000
+                                                                        07090000
+         STM   R0,R15,SUB0SAVE    SAVE CALLER'S REGISTERS               07100000
+                                                                        07110000
+         XC    ITWFLAGS,ITWFLAGS  CLEAR FLAGS                           07120000
+         XC    ITWSENSE,ITWSENSE  CLEAR SENSE INFO                      07130000
+         XC    ITWEP,ITWEP        CLEAR ENTRY POINT ADDRESS             07140000
+         XC    ITWNAME,ITWNAME    CLEAR TRANSACTION PROGRAM NAME        07150000
+         XC    ITWRNAME,ITWRNAME  CLEAR REMOTE TRANSACTION PROGRAM NAME 07160000
+         XC    ITWPARM,ITWPARM    CLEAR PARM WORD                       07170000
+         XC    ITWDATA@,ITWDATA@  CLEAR DATA ADDRESS                    07180000
+         XC    ITWDATAL,ITWDATAL  CLEAR DATA LENGTH                     07190000
+         XC    ITWSSEQ#,ITWSSEQ#  CLEAR SEND SEQUENCE NUMBER            07200000
+         XC    ITWRSEQ#,ITWRSEQ#  CLEAR RECEIVE SEQUENCE NUMBER         07210000
+         XC    ITWSBYT#,ITWSBYT#  CLEAR SEND CHARACTER COUNT            07220000
+         XC    ITWRBYT#,ITWRBYT#  CLEAR RECEIVE CHARACTER COUNT         07230000
+         XC    ITWSMSG#,ITWSMSG#  CLEAR SEND MESSAGE COUNT              07240000
+         XC    ITWRMSG#,ITWRMSG#  CLEAR RECEIVE MESSAGE COUNT           07250000
+                                                                        07260000
+         LA    R0,ITWWORK         MOVE-TO ADDRESS                       07270000
+         LA    R1,L'ITWWORK       MOVE-TO LENGTH                        07280000
+         SR    R15,R15            MOVE NOTHING, ZERO PAD                07290000
+         MVCL  R0,R14             ZERO THE ITWA                         07300000
+                                                                        07310000
+         LM    R0,R15,SUB0SAVE    RESTORE CALLER'S REGISTERS            07320000
+         BR    R14                RETURN                                07330000
+                                                                        07340000
+*---------------------------------------------------------------------- 07350000
+*                                                                       07360000
+* ROUTINE: GETTIME - OBTAIN THE CURRENT TIME/DATE                       07370000
+*                                                                       07380000
+* DESCRIPTION:                                                          07390000
+*                                                                       07400000
+*    THIS ROUTINE CALLS THE MVS TIME SERVICE FOR CURRENT TIME/DATE.     07410000
+*                                                                       07420000
+* ENTRY:   N/A                                                          07430000
+*                                                                       07440000
+* EXIT:    ALL REGISTERS ARE RESTORED.                                  07450000
+*          TIME(4) = HHMMSSTH                                           07460000
+*          DATE(4) = 0DDDYYYY                                           07470000
+*---------------------------------------------------------------------- 07480000
+                                                                        07490000
+GETTIME  DS    0H                                                       07500000
+                                                                        07510000
+         STM   R0,R15,SUB1SAVE    SAVE CALLER'S REGISTERS               07520000
+                                                                        07530000
+         TIME  DEC,                                                    +07540000
+               LINKAGE=SVC        R0=HHMMSSTH R1=0CYYDDDF               07550000
+                                                                        07560000
+         LR    R2,R1              R2=0CYYDDDF                           07570000
+         SRL   R1,4               R1=00CYYDDD                           07580000
+         SLL   R1,20              R1=DDD00000                           07590000
+         SRL   R1,4               R1=0DDD0000                           07600000
+         SRL   R2,16              R2=00000CYY                           07610000
+         C     R2,=X'000000FF'    IS THIS 20TH CENTURY?                 07620000
+         BNH   GET20TH            BRANCH IF YES                         07630000
+         ICM   R2,B'0010',=X'20'  SET 21ST CENTURY                      07640000
+         B     GETBOTH            NOW COMBINE DAY AND YEAR              07650000
+                                                                        07660000
+GET20TH  DS    0H                                                       07670000
+                                                                        07680000
+         ICM   R2,B'0010',=X'19'  SET 20TH CENTURY                      07690000
+                                                                        07700000
+GETBOTH  DS    0H                                                       07710000
+                                                                        07720000
+         OR    R1,R2              R1=0DDDYYYY                           07730000
+         ST    R0,TIME            SAVE TIME                             07740000
+         ST    R1,DATE            SAVE DATA                             07750000
+                                                                        07760000
+         LM    R0,R15,SUB1SAVE    RESTORE CALLER'S REGISTERS            07770000
+         BR    R14                RETURN                                07780000
+                                                                        07790000
+*---------------------------------------------------------------------- 07800000
+*                                                                       07810000
+* ROUTINE: TRANDQ - DEQUEUE THE CURRENT TRANSACTION                     07820000
+*                                                                       07830000
+* DESCRIPTION:                                                          07840000
+*                                                                       07850000
+*    THIS ROUTINE REMOVES THE TRANSACTION AT THE HEAD OF THE QUEUE.     07860000
+*                                                                       07870000
+* ENTRY:   R0=0 --> NORMAL END OF TRANSACTION                           07880000
+*          R0!=0 --> TRANSACTION ABORTED                                07890000
+*                                                                       07900000
+* EXIT:    ALL REGISTERS ARE RESTORED.                                  07910000
+*---------------------------------------------------------------------- 07920000
+                                                                        07930000
+TRANDQ   DS    0H                                                       07940000
+                                                                        07950000
+         STM   R0,R15,SUB0SAVE    SAVE CALLER'S REGISTERS               07960000
+         LR    R2,R0                                                    07970000
+                                                                        07980000
+         BAS   R14,GETTIME        GET THE CURRENT TIME                  07990000
+                                                                        08000000
+         MVC   DEQNOTE,=CL8'ENDED'                                      08010000
+         LTR   R2,R2              NORMAL TRAN END?                      08020000
+         BZ    TDQNORM            BRANCH IF YES                         08030000
+         MVC   DEQNOTE,=CL8'ABORTED'                                    08040000
+                                                                        08050000
+TDQNORM  DS    0H                                                       08060000
+                                                                        08070000
+         MVC   WRK256(12),=XL12'F021207A20207A20204B2020'               08080000
+         ED    WRK256(12),ITWQTIME                                      08090000
+         MVC   DEQQTIME(11),WRK256+1                                    08100000
+                                                                        08110000
+         MVC   WRK256(12),=XL12'F021207A20207A20204B2020'               08120000
+         ED    WRK256(12),ITWSTIME                                      08130000
+         MVC   DEQSTIME(11),WRK256+1                                    08140000
+                                                                        08150000
+         MVC   WRK256(12),=XL12'F021207A20207A20204B2020'               08160000
+         ED    WRK256(12),TIME                                          08170000
+         MVC   DEQETIME(11),WRK256+1                                    08180000
+                                                                        08190000
+         MVC   WRK256(10),=XL10'40212020204B20202020'                   08200000
+         ED    WRK256(10),ITWQDATE                                      08210000
+         MVC   DEQQDATE(8),WRK256+2                                     08220000
+                                                                        08230000
+         MVC   WRK256(10),=XL10'40212020204B20202020'                   08240000
+         ED    WRK256(10),ITWSDATE                                      08250000
+         MVC   DEQSDATE(8),WRK256+2                                     08260000
+                                                                        08270000
+         MVC   WRK256(10),=XL10'40212020204B20202020'                   08280000
+         ED    WRK256(10),DATE                                          08290000
+         MVC   DEQEDATE(8),WRK256+2                                     08300000
+                                                                        08310000
+         $MSG  022,                                                    +08320000
+               FIELDS=(ITWTRAN#,                                       +08330000
+               ITWNAME,                                                +08340000
+               DEQNOTE,                                                +08350000
+               ISYAPPID,                                               +08360000
+               ISYSMFID,                                               +08370000
+               ITWRNAME,                                               +08380000
+               ITWSMSG#,                                               +08390000
+               ITWSBYT#,                                               +08400000
+               ITWRMSG#,                                               +08410000
+               ITWRBYT#,                                               +08420000
+               DEQQTIME,                                               +08430000
+               DEQQDATE,                                               +08440000
+               DEQSTIME,                                               +08450000
+               DEQSDATE,                                               +08460000
+               DEQETIME,                                               +08470000
+               DEQEDATE)                                                08480000
+                                                                        08490000
+         TM    ITWF1,ITWF1INI     ARE WE THE INITIATOR ?                08500000
+         BNO   TDQEXIT            BRANCH IF NOT, NOTHING TO DEQUEUE     08510000
+                                                                        08520000
+         ICM   R3,15,ISYWQ1ST     HEAD OF WORK QUEUE                    08530000
+         BNP   ABN_ENV            BRANCH IF NOTHING THERE               08540000
+         LM    R14,R15,IQTNEXT-IQT(R3) NEXT AND PREVIOUS POINTERS       08550000
+         ST    R14,IQTNEXT-IQT(,R15)                                    08560000
+         ST    R15,IQTPREV-IQT(,R14)                                    08570000
+                                                                        08580000
+         $VTAMRET (R3)            QUEUE TRAN FOR MAINTASK RELEASE       08590000
+                                                                        08600000
+TDQEXIT  DS    0H                                                       08610000
+                                                                        08620000
+         LM    R0,R15,SUB0SAVE    RESTORE CALLER'S REGISTERS            08630000
+         BR    R14                RETURN                                08640000
+                                                                        08650000
+*---------------------------------------------------------------------- 08660000
+*   SUBROUTINE: OBTAIN VTAM GLOBAL LOCK                                 08670000
+*---------------------------------------------------------------------- 08680000
+                                                                        08690000
+VTAMLOCK DS    0H                                                       08700000
+                                                                        08710000
+         TM    FLAG,FLAGLOCK        WAS THE LOCK ALREAY OBTAINED?       08720000
+         BOR   R14                  RETURN IF YES                       08730000
+         STM   R14,R2,SUB0SAVE      SAVE CALLER'S REGISTERS             08740000
+                                                                        08750000
+         $SER  OBTAIN,                                                 +08760000
+               VTAM                                                     08770000
+                                                                        08780000
+         C     R15,=F'4'            WAS LOCK ALREADY HELD?              08790000
+         BNE   VTAMLOEX             BRANCH IF NOT                       08800000
+         OI    FLAG,FLAGLCKD        REMEMBER LOCK HELD ON ENTRY         08810000
+                                                                        08820000
+VTAMLOEX DS    0H                                                       08830000
+                                                                        08840000
+         OI    FLAG,FLAGLOCK        REMEMBER LOCK IS HELD               08850000
+         LM    R14,R2,SUB0SAVE      RESTORE CALLER'S REGISTERS          08860000
+         BR    R14                  RETURN                              08870000
+                                                                        08880000
+*---------------------------------------------------------------------- 08890000
+*   SUBROUTINE: RELEASE VTAM GLOBAL LOCK                                08900000
+*---------------------------------------------------------------------- 08910000
+                                                                        08920000
+VTAMUNLK DS    0H                                                       08930000
+                                                                        08940000
+         TM    FLAG,FLAGLOCK        IS LOCK HELD?                       08950000
+         BNOR  R14                  BRANCH IF NOT                       08960000
+         TM    FLAG,FLAGLCKD        WAS LOCK HELD ON ENTRY?             08970000
+         BOR   R14                  DON'T RELEASE IF IT WAS             08980000
+         STM   R14,R2,SUB0SAVE      SAVE CALLER'S REGISTERS             08990000
+                                                                        09000000
+         $SER  RELEASE,                                                +09010000
+               VTAM                                                     09020000
+                                                                        09030000
+         NI    FLAG,255-FLAGLOCK    SHOW LOCK NOT HELD                  09040000
+         LM    R14,R2,SUB0SAVE      RESTORE CALLER'S REGISTERS          09050000
+         BR    R14                  RETURN                              09060000
+                                                                        09070000
+*---------------------------------------------------------------------- 09080000
+* LOCAL READ-ONLY CONSTANTS, ETC.                                       09090000
+*---------------------------------------------------------------------- 09100000
+                                                                        09110000
+         LTORG ,                                                        09120000
+                                                                        09130000
+RSNPRT01 DC    CL32'START REQUEST EXPECTED          '                   09140000
+RSNPRT02 DC    CL32'TRANSACTION NUMBER ERROR        '                   09150000
+RSNPRT03 DC    CL32'REQUEST SEQUENCE NUMBER ERROR   '                   09160000
+RSNPRT04 DC    CL32'RESPONSE EXPECTED, REQUEST RCV''D'                  09170000
+RSNPRT05 DC    CL32'TRANSACTION PROGRAM NAME ERROR  '                   09180000
+RSNPRT06 DC    CL32'MESSAGE NOT REQUEST OR RESPSONSE'                   09190000
+RSNPRT07 DC    CL32'UNEXPECTED RESPONSE RECEIVED    '                   09200000
+RSNPRT08 DC    CL32'RESPONSE SEQUENCE NUMBER ERROR  '                   09210000
+RSNPRT09 DC    CL32'TP REQUESTS SESSION TERMINATION '                   09220000
+RSNPRT10 DC    CL32'$SESS_SEND_DATA FAILED          '                   09230000
+                                                                        09240000
+         PRINT NOGEN                                                    09250000
+         ICVT  ,                                                        09260000
+         IVTAMCVT ,                                                     09270000
+         ITASK ,                                                        09280000
+         IPCB  ,                                                        09290000
+         IUSER ,                                                        09300000
+         ISTDBIND ,                                                     09310000
+         ISESS ,                                                        09320000
+         $TASK DSECT=YES          TASK MANAGEMENT PLIST                 09330000
+         $SESS DSECT=YES          SESSION MANAGEMENT PLIST              09340000
+         $SYSTEMS DSECT=YES       SYSTEMS SERVICES PLIST                09350000
+         TMSG  ,                  INTERTASK MESSAGE HEADER              09360000
+         ABCODES PRINT=NOGEN      $ABEND CODES                          09370000
+         MSGCODES ,               INTERTASK MESSAGE CODES               09380000
+         EVCODES ,                TASK EVENT CODES                      09390000
+         NAV ,                                                          09400000
+         END   ,                                                        09410000

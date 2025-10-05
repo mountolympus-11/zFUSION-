@@ -1,0 +1,337 @@
+ITB@DNDX TITLE 'TABLE SERVICES - INDEX DELETE'                          00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE:  ITB@DNDX - Index delete                                     00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This routine is used to delete a row reference from the            00080000
+*    specified index, repositioning current row position (CRP)          00090000
+*    within that index to the logical postorder predecessor of          00100000
+*    the deleted entry.                                                 00110000
+*                                                                       00120000
+*    The parameter list provides the physical parent (root) and         00130000
+*    subtree designator (left or right) of the delete target            00140000
+*    node.                                                              00150000
+*                                                                       00160000
+*                                                                       00170000
+* ON ENTRY:                                                             00180000
+*                                                                       00190000
+*    R1  points to a parameter list described by the DNDXPARM           00200000
+*        mapping macro. the plist is not AR qualified.                  00210000
+*                                                                       00220000
+*                                                                       00230000
+* ON EXIT:                                                              00240000
+*                                                                       00250000
+*    R15 contains one of the following return codes                     00260000
+*                                                                       00270000
+*        RC00 - Delete complete.  The CRP maintained in the             00280000
+*               index token has been set to the logical                 00290000
+*               postorder predecessor of the deleted entry.             00300000
+*                                                                       00310000
+*        RC08 - Delete failed                                           00320000
+*                                                                       00330000
+*               RSN04 - the tree root (DNDXPRED) does not               00340000
+*                       contain a node in the indicated subtree         00350000
+*                                                                       00360000
+*        RC16 - Index object failure                                    00370000
+*                                                                       00380000
+*               RSN32 - unable to access index                          00390000
+*                                                                       00400000
+**<DOC-OFF>****************************************************         00410000
+                                                                        00420000
+         EJECT                                                          00430000
+***************************************************************         00440000
+*                                                                       00450000
+* MAINTENANCE:                                                          00460000
+*                                                                       00470000
+*    05/xx/92 R. Turgeon                                                00480000
+*             Initial version                                           00490000
+*                                                                       00500000
+*    03/20/95 R. Turgeon                                                00510000
+*             Maintain index entry count in LOCINUSE                    00520000
+*                                                                       00530000
+*    06/20/95 R. Turgeon                                                00540000
+*             Use inline form of $OBJECT ACCESS to improve              00550000
+*             performance.                                              00560000
+*                                                                       00570000
+*    10/23/95 R. Turgeon                                                00580000
+*             Implement the NOLOCATOR property                          00590000
+*                                                                       00600000
+***************************************************************         00610000
+                                                                        00620000
+         EJECT                                                          00630000
+***************************************************************         00640000
+*                                                                       00650000
+*   Working storage area                                                00660000
+*                                                                       00670000
+***************************************************************         00680000
+                                                                        00690000
+WORKAREA DSECT                                                          00700000
+                                                                        00710000
+         @WORK ,                  STANDARD WORKAREA                     00720000
+                                                                        00730000
+WORKFREE DS    0D                 AVAILABLE TO SERVICE ROUTINES         00740000
+WORKLEN  EQU   *-WORKAREA         LENGTH OF WORKAREA                    00750000
+                                                                        00760000
+         EJECT                                                          00770000
+         DNDXPARM ,               INDEX INSERT LOCATION PLIST           00780000
+                                                                        00790000
+         EJECT                                                          00800000
+         LOCATOR ,                ROW AND INDEX LOCATOR FORMATS         00810000
+                                                                        00820000
+         EJECT                                                          00830000
+         INDEX ,                  FORMAT OF INDEX LOCATOR ENTRY (SLOT)  00840000
+                                                                        00850000
+         EJECT                                                          00860000
+         $TOKEN ,                 ADDR OF INDEX OBJECT TOKEN            00870000
+                                                                        00880000
+         EJECT                                                          00890000
+         EQUS  LINKAGE=VCON                                             00900000
+                                                                        00910000
+         EJECT                                                          00920000
+ITB@DNDX @ENTER WORKA=(WORKAREA,WORKLEN),ASC=AR                         00930000
+                                                                        00940000
+*--------------------------------------------------------------         00950000
+*   Fetch passed parameters and validate                                00960000
+*--------------------------------------------------------------         00970000
+                                                                        00980000
+         LAE   R5,0(R1,0)         PARAMETER LIST                        00990000
+         USING DNDXPARM,R5                                              01000000
+         L     R1,DNDXALE         ALET QUALIFIER FOR MOST OBJECTS       01010000
+                                                                        01020000
+         L     R11,DNDXNDX        INDEX LOCATOR ORIGIN                  01030000
+         SAR   AR11,R1            OPEN WINDOW TO TABLE SPACE            01040000
+         USING LOCATOR,R11        IDENTIFY UNIQUE LOCATOR STRUCTURE     01050000
+                                                                        01060000
+         CLC   LOCTAG,=CL8'LOCATOR'                                     01070000
+         BE    *+8                                                      01080000
+         EX    R0,*                                                     01090000
+                                                                        01100000
+         CLC   LOCSLOSZ,=A(NDXLN)                                       01110000
+         BE    *+8                                                      01120000
+         EX    R0,*                                                     01130000
+                                                                        01140000
+*--------------------------------------------------------------         01150000
+*   Declare intention to update the index                               01160000
+*--------------------------------------------------------------         01170000
+                                                                        01180000
+         $OBJECT ACCESS,INTENT=WRITE,OTOKEN=*DNDXTOKN,                 X01190000
+               INLINE=YES                                               01200000
+                                                                        01210000
+         BZ    SCAN_NDX           LONG FORM ONLY FOR ERROR LOGGING      01220000
+                                                                        01230000
+         $OBJECT ACCESS,INTENT=WRITE,OTOKEN=*DNDXTOKN,                 X01240000
+               SHRPAGE=WORKFREE,MF=(E,MFE_LIST)                         01250000
+                                                                        01260000
+         BNZ   ENDXOBJ            INDEX OBJECT ACCESS FAILURE           01270000
+                                                                        01280000
+*--------------------------------------------------------------         01290000
+*   Begin index tree scan                                               01300000
+*--------------------------------------------------------------         01310000
+                                                                        01320000
+SCAN_NDX DS    0H                                                       01330000
+         L     R10,DNDXPRED       FETCH PREDECESSOR OFFLINK             01340000
+         LAE   R10,LOCATOR(R10)   CONVERT TO POINTER                    01350000
+P        USING INDEX,R10          KNUTH NOTATION                        01360000
+                                                                        01370000
+         TM    DNDXPRED,X'80'     DETERMINE SUBTREE SPIN                01380000
+         BNO   RIGHTDEL           DELETE FROM RIGHT PRED SUBTREE        01390000
+         B     LEFTDEL            DELETE FROM LEFT PRED SUBTREE         01400000
+                                                                        01410000
+         EJECT ,                                                        01420000
+***************************************************************         01430000
+*                                                                       01440000
+*   Delete node from left subtree of predecessor                        01450000
+*                                                                       01460000
+***************************************************************         01470000
+                                                                        01480000
+LEFTDEL  DS    0H                                                       01490000
+         ICM   R9,15,P.NDXLEFT    LOCATE ENTRY TO DELETE                01500000
+         BNP   ENODEREF           ERROR                                 01510000
+         LAE   R9,LOCATOR(R9)     CONVERT OFFLINK TO ADDRESS            01520000
+Q        USING INDEX,R9           WE CALL TARGET 'Q'                    01530000
+         L     R7,Q.NDXLEFT       EXTRACT LOGICAL SUCCESSOR             01540000
+                                                                        01550000
+         LA    R4,P.INDEX         P IS SUCCESSOR OF Q                   01560000
+         MVC   P.NDXLEFT,Q.NDXLEFT   ASSUME TREE WILL COLLAPSE          01570000
+         ICM   R8,15,Q.NDXRIGHT   DOES Q HAVE A RIGHT SUBTREE?          01580000
+         BNP   LEFT_S$            ALMOST DONE IF NOT                    01590000
+                                                                        01600000
+*--------------------------------------------------------------         01610000
+*   Replace Q w/Q right subtree (R) - leftmost node is fwd link         01620000
+*--------------------------------------------------------------         01630000
+                                                                        01640000
+         ST    R8,P.NDXLEFT       REPLACE Q                             01650000
+         LAE   R10,LOCATOR(R8)    UPDATE P, CONVERT OFFLINK TO ADDR     01660000
+         LAE   R8,P.INDEX         FIND LEFTMOST NODE                    01670000
+R        USING INDEX,R8           SUBTREE R                             01680000
+                                                                        01690000
+LEFT_R   DS    0H                 LOCATE CONNECTOR NODE                 01700000
+         ICM   R1,15,R.NDXLEFT    TRAVERSE LEFTMOST SUBTREE             01710000
+         BNP   *+12               LEAF LOCATED                          01720000
+         LA    R8,LOCATOR(R1)     ELSE CONVERT TO ADDRESS               01730000
+         B     LEFT_R             AND CONTINUE DESCENT                  01740000
+                                                                        01750000
+         MVC   R.NDXLEFT,Q.NDXLEFT   REALIGN LEFT SUBTREE LINKS         01760000
+         LA    R4,R.INDEX         R IS THE SUCCESSOR OF Q               01770000
+         DROP  R                  SUBTREE R NOW INTEGRATED              01780000
+                                                                        01790000
+*--------------------------------------------------------------         01800000
+*   Point subtree (S), formerly left(Q), to new successor in R          01810000
+*--------------------------------------------------------------         01820000
+                                                                        01830000
+LEFT_S$  DS    0H                 FIND RIGTHMOST NODE OF S              01840000
+         ICM   R8,15,Q.NDXLEFT    LOCATE BASE OF SUBTREE                01850000
+         BNP   LEFT_FIN           DONE IF NO SUBTREE                    01860000
+         LAE   R8,LOCATOR(R8)     CONVERT OFFLINK TO ADDRESS            01870000
+S        USING INDEX,R8           SUBTREE S                             01880000
+                                                                        01890000
+S$_SCAN  DS    0H                 LOCATE CONNECTOR NODE                 01900000
+         ICM   R1,15,S.NDXRIGHT   TRAVERSE RIGHTMOST SUBTREE            01910000
+         BNP   *+12               LEAF LOCATED                          01920000
+         LA    R8,LOCATOR(R1)     ELSE CONVERT TO ADDRESS               01930000
+         B     S$_SCAN            AND CONTINUE DESCENT                  01940000
+                                                                        01950000
+         SLR   R4,R11             CONVERT SUCCESSOR PTR TO OFFLINK      01960000
+         ST    R4,S.NDXRIGHT      IMPLANT SUCCESSOR THREAD              01970000
+         OI    S.NDXRIGHT,X'80'   TAG LINK FIELD AS THREAD              01980000
+                                                                        01990000
+LEFT_FIN DS    0H                 TREE UPDATE COMPLETE                  02000000
+         B     FREE_Q                                                   02010000
+         DROP  S                  SUBTREE S RELINKED                    02020000
+                                                                        02030000
+         EJECT                                                          02040000
+***************************************************************         02050000
+*                                                                       02060000
+*   Delete node from right subtree of predecessor                       02070000
+*                                                                       02080000
+***************************************************************         02090000
+                                                                        02100000
+RIGHTDEL DS    0H                                                       02110000
+         ICM   R9,15,P.NDXRIGHT   LOCATE ENTRY TO DELETE                02120000
+         BNP   ENODEREF           ERROR                                 02130000
+         LAE   R9,LOCATOR(R9)     CONVERT OFFLINK TO ADDRESS            02140000
+Q        USING INDEX,R9           WE CALL TARGET 'Q'                    02150000
+         L     R7,Q.NDXLEFT       EXTRACT LOGICAL SUCCESSOR             02160000
+                                                                        02170000
+         MVC   P.NDXRIGHT,Q.NDXRIGHT  ASSUME TREE WILL COLLAPSE         02180000
+         ICM   R8,15,Q.NDXLEFT    DOES Q HAVE A LEFT SUBTREE?           02190000
+         BNP   RIGHT_$S           ALMOST DONE IF NOT                    02200000
+                                                                        02210000
+*--------------------------------------------------------------         02220000
+*   Replace Q w/Q left subtree (R) - rightmost node is fwd link         02230000
+*--------------------------------------------------------------         02240000
+                                                                        02250000
+         ST    R8,P.NDXRIGHT      REPLACE Q                             02260000
+         LAE   R10,LOCATOR(R8)    UPDATE P, CONVERT OFFLINK TO ADDR     02270000
+         LAE   R8,P.INDEX         FIND RIGHTMOST NODE                   02280000
+R        USING INDEX,R8           SUBTREE R                             02290000
+                                                                        02300000
+RIGHT_R  DS    0H                 LOCATE CONNECTOR NODE                 02310000
+         ICM   R1,15,R.NDXRIGHT   TRAVERSE RIGHTMOST SUBTREE            02320000
+         BNP   *+12               LEAF LOCATED                          02330000
+         LA    R8,LOCATOR(R1)     ELSE CONVERT TO ADDRESS               02340000
+         B     RIGHT_R            AND CONTINUE DESCENT                  02350000
+                                                                        02360000
+         MVC   R.NDXRIGHT,Q.NDXRIGHT  REALIGN RIGHT SUBTREE LINKS       02370000
+         DROP  R                  SUBTREE R NOW INTEGRATED              02380000
+                                                                        02390000
+*--------------------------------------------------------------         02400000
+*   Point subtree (S), formerly right(Q), to new predecessor P          02410000
+*--------------------------------------------------------------         02420000
+                                                                        02430000
+RIGHT_$S DS    0H                 FIND RIGTHMOST NODE OF S              02440000
+         ICM   R8,15,Q.NDXRIGHT   LOCATE BASE OF SUBTREE                02450000
+         BNP   RIGHTFIN           DONE IF NO SUBTREE                    02460000
+         LAE   R8,LOCATOR(R8)     CONVERT OFFLINK TO ADDRESS            02470000
+S        USING INDEX,R8           SUBTREE S                             02480000
+                                                                        02490000
+$S_SCAN  DS    0H                 LOCATE CONNECTOR NODE                 02500000
+         ICM   R1,15,S.NDXLEFT    TRAVERSE LEFTMOST SUBTREE             02510000
+         BNP   *+12               LEAF LOCATED                          02520000
+         LA    R8,LOCATOR(R1)     ELSE CONVERT TO ADDRESS               02530000
+         B     $S_SCAN            AND CONTINUE DESCENT                  02540000
+                                                                        02550000
+         SLR   R10,R11            CONVERT P TO OFFLINK(P)               02560000
+         ST    R10,S.NDXLEFT      IMPLANT PREDECESSOR THREAD            02570000
+         OI    S.NDXLEFT,X'80'    TAG LINK FIELD AS THREAD              02580000
+                                                                        02590000
+RIGHTFIN DS    0H                 TREE UPDATE COMPLETE                  02600000
+         B     FREE_Q                                                   02610000
+         DROP  S                  SUBTREE S RELINKED                    02620000
+                                                                        02630000
+         EJECT                                                          02640000
+***************************************************************         02650000
+*                                                                       02660000
+*   Release freed index entry to free slot list                         02670000
+*                                                                       02680000
+***************************************************************         02690000
+                                                                        02700000
+FREE_Q   DS    0H                                                       02710000
+         XC    Q.INDEX(NDXLN),Q.INDEX                                   02720000
+         LR    R1,R9              INDEX ENTRY ORIGIN                    02730000
+         LA    R2,LOCSLOTS        LOCATOR SLOT STORAGE ORIGIN           02740000
+         SLR   R1,R2              OFFSET TO AVAILABLE SLOT              02750000
+         SR    R0,R0              PREPARE FOR DIVIDE                    02760000
+         D     R0,LOCSLOSZ        ZERO RELATIVE SLOT NUMBER             02770000
+         LA    R1,1(,R1)          SLOT # PER CONVENTION                 02780000
+                                                                        02790000
+         MVC   Q.NDXRID,LOCFREE   PUSH NEWLY ACQUIRED SLOT              02800000
+         OI    Q.NDXRID,X'80'     INDICATE FREE LIST ENTRY              02810000
+         ST    R1,LOCFREE         PUSH COMPLETE                         02820000
+                                                                        02830000
+         ICM   R0,15,LOCINUSE     LOCATOR ENTRY COUNT IF MAINTAINED     02840000
+         BNM   *+12               HIGH ORDER BIT IS VERSION FLAG        02850000
+         SL    R0,=F'1'           ACCOUNT FOR ROW RELEASE               02860000
+         ST    R0,LOCINUSE        UPDATE SLOT COUNT                     02870000
+                                                                        02880000
+*--------------------------------------------------------------         02890000
+*   Reset index CRP to predecessor entry                                02900000
+*--------------------------------------------------------------         02910000
+                                                                        02920000
+         L     R6,DNDXTOKN        FETCH INDEX TOKEN PTR                 02930000
+         USING $TOKEN,R6          FORMATTED AREA                        02940000
+         LA    R1,0(,R7)          CLEAR THREAD FLAG                     02950000
+         ST    R1,$APPLVAR        UPDATE CRP                            02960000
+         DROP  R6                 TOKEEN                                02970000
+                                                                        02980000
+         EJECT                                                          02990000
+***************************************************************         03000000
+*                                                                       03010000
+*   Return completion status to caller                                  03020000
+*                                                                       03030000
+***************************************************************         03040000
+                                                                        03050000
+         SR    R0,R0              NO REASON CODES DEFINED               03060000
+         LA    R15,RC00           UPDATE COMPLETE                       03070000
+         B     EXIT               DONE                                  03080000
+                                                                        03090000
+ENODEREF DS    0H                 PREDECESSOR DOES NOT HAVE SUCCESSOR   03100000
+         LA    R0,RSN04           IN THE INDICATED SUBTREE              03110000
+         LA    R15,RC08           ERROR                                 03120000
+         B     EXIT               DONE                                  03130000
+                                                                        03140000
+ENDXOBJ  DS    0H                 UNABLE TO ACCESS INDEX OBJECT         03150000
+         @PUSHERR ,               IDENTIFY SERVICE ROUTINE FAILURES     03160000
+                                                                        03170000
+         LA    R0,RSN32           LOCAL REASON CODE                     03180000
+         LA    R15,RC16           AND RETURN CODE                       03190000
+         B     EXIT               DONE                                  03200000
+                                                                        03210000
+EXIT     NOP   0                                                        03220000
+         @EXIT ,                                                        03230000
+                                                                        03240000
+         EJECT                                                          03250000
+***************************************************************         03260000
+*                                                                       03270000
+*   LOCAL READ-ONLY DATA AREAS, ETC.                                    03280000
+*                                                                       03290000
+***************************************************************         03300000
+                                                                        03310000
+         LTORG ,                                                        03320000
+                                                                        03330000
+         PRINT NOGEN                                                    03340000
+         SPCBLOCK ,               $OBJECT INLINE=YES REQUIREMENT        03350000
+         OIE   ,                  $OBJECT INLINE=YES REQUIREMENT        03360000
+         END   ,                                                        03370000

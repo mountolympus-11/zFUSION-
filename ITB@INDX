@@ -1,0 +1,338 @@
+ITB@INDX TITLE 'TABLE SERVICES - ESTABLISH INDEX POSITION'              00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE:  ITB@INDX - Establish index position                         00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    :                                                                  00080000
+*    :                                                                  00090000
+*    :                                                                  00100000
+*                                                                       00110000
+*    When the candidate row key matches that of a stored entry,         00120000
+*    the return code reflects the potential introduction of a           00130000
+*    duplicate entry.  Thus, this routine can be used as a key          00140000
+*    lookup facility.                                                   00150000
+*                                                                       00160000
+*    When testing an index for a duplicate row and/or probing           00170000
+*    to acquire an insertion point (physical predecessor),              00180000
+*    always set the base table row identifier (ROWID in                 00190000
+*    INDXRID) to zero.  The predecessor returned in this case           00200000
+*    is appropriate for a subsequent add request.                       00210000
+*                                                                       00220000
+*    When performing a lookup for a specific row in preparation         00230000
+*    for a retrieval or delete, always specify the row                  00240000
+*    identifier (ROWID) of the specific row required.  The              00250000
+*    predecessor returned in this case is appropriate for a             00260000
+*    subsequent delete request.                                         00270000
+*                                                                       00280000
+*                                                                       00290000
+* ON ENTRY:                                                             00300000
+*                                                                       00310000
+*    R1  points to a parameter list described by the INDXPARM           00320000
+*        mapping macro. The plist is not AR qualified.                  00330000
+*                                                                       00340000
+*                                                                       00350000
+* ON EXIT:                                                              00360000
+*                                                                       00370000
+*    R15 contains one of the following return codes                     00380000
+*                                                                       00390000
+*         RC00 - insertion location returned                            00400000
+*                                                                       00410000
+*         RC04 - insertion location and matching rows returned          00420000
+*                                                                       00430000
+*         RC08 - index error detected                                   00440000
+*                                                                       00450000
+*                 RSN04 - index integrity compromised                   00460000
+*                 RSN08 - index contains invalid row reference          00470000
+*                 RSN12 - corrupted row                                 00480000
+*                                                                       00490000
+*    R1  contains the index slot offlink of the physical                00500000
+*        predecessor together with a left/right subtree                 00510000
+*        indicator in the high order bit (suitable for ITB@ANDX)        00520000
+*                                                                       00530000
+*    R0  offlink of the index slot describing a matching row            00540000
+*        in the base table, or zero if no match is found                00550000
+*                                                                       00560000
+**<DOC-OFF>****************************************************         00570000
+                                                                        00580000
+         EJECT                                                          00590000
+***************************************************************         00600000
+*                                                                       00610000
+* MAINTENANCE:                                                          00620000
+*                                                                       00630000
+*    10/23/95 R. Turgeon                                                00640000
+*             Implement the NOLOCATOR property                          00650000
+*                                                                       00660000
+***************************************************************         00670000
+                                                                        00680000
+         EJECT                                                          00690000
+***************************************************************         00700000
+*                                                                       00710000
+*   Working storage area                                                00720000
+*                                                                       00730000
+***************************************************************         00740000
+                                                                        00750000
+WORKAREA DSECT                                                          00760000
+                                                                        00770000
+         @WORK ,                  STANDARD WORKAREA                     00780000
+                                                                        00790000
+CMPRPLST DS    10F                PREBUILT ROW COMPARE PARAMETER LIST   00800000
+                                                                        00810000
+FLAGS    DS    X                  FLAG BYTE                             00820000
+$EQUAL   EQU   X'80'                 STORED KEY = CANDIDATE KEY         00830000
+                                                                        00840000
+WORKFREE DS    0D                 AVAILABLE TO SERVICE ROUTINES         00850000
+WORKLEN  EQU   *-WORKAREA         LENGTH OF WORKAREA                    00860000
+                                                                        00870000
+         EJECT                                                          00880000
+         INDXPARM ,               INDEX INSERT LOCATION PLIST           00890000
+                                                                        00900000
+         EJECT                                                          00910000
+         CMPRPARM ,               ROW COMPARE PLISTS                    00920000
+                                                                        00930000
+         EJECT                                                          00940000
+         LOCATOR ,                ROW AND INDEX LOCATOR FORMATS         00950000
+                                                                        00960000
+         EJECT                                                          00970000
+         INDEX ,                  FORMAT OF INDEX LOCATOR ENTRY (SLOT)  00980000
+                                                                        00990000
+         EJECT                                                          01000000
+         ROWPFX ,                 STORED ROW PREFIX FORMAT              01010000
+                                                                        01020000
+         EJECT                                                          01030000
+         EQUS  LINKAGE=VCON                                             01040000
+                                                                        01050000
+         EJECT                                                          01060000
+ITB@INDX @ENTER WORKA=(WORKAREA,WORKLEN),ASC=AR                         01070000
+                                                                        01080000
+*--------------------------------------------------------------         01090000
+*   Fetch and validate passed arguments                                 01100000
+*--------------------------------------------------------------         01110000
+                                                                        01120000
+         LAE   R5,0(R1,0)         PARAMETER LIST                        01130000
+         USING INDXPARM,R5                                              01140000
+         L     R1,INDXALE         ALET QUALIFIER FOR MOST OBJECTS       01150000
+                                                                        01160000
+         L     R11,INDXNDX        INDEX LOCATOR ORIGIN                  01170000
+         SAR   AR11,R1            OPEN WINDOW TO TABLE SPACE            01180000
+NDX      USING LOCATOR,R11        IDENTIFY UNIQUE LOCATOR STRUCTURE     01190000
+                                                                        01200000
+         CLC   NDX.LOCTAG,=CL8'LOCATOR'                                 01210000
+         BE    *+8                                                      01220000
+         EX    R0,*                                                     01230000
+                                                                        01240000
+         CLC   NDX.LOCSLOSZ,=A(NDXLN)                                   01250000
+         BE    *+8                                                      01260000
+         EX    R0,*                                                     01270000
+                                                                        01280000
+         SAR   AR10,R1            A/R10 AVAIL FOR TABLE SPACE OBJECTS   01290000
+*                                 ALET CARRIED FOR LIFE OF FUNCTION     01300000
+                                                                        01310000
+*--------------------------------------------------------------         01320000
+*   Construct the largely reusable row compare parameter list           01330000
+*--------------------------------------------------------------         01340000
+                                                                        01350000
+         LAE   R4,CMPRPLST        STATIC PLIST CONSTRUCTION AREA        01360000
+         USING CMPR$PRM,R4        LIFE-OF-SCAN ADDRESSABILITY           01370000
+         MVC   CMPR$ALE,INDXALE   ALET APPLIES TO ALL PASSED OBJECTS    01380000
+         MVC   CMPR$ORG,INDXBASE  BASE TABLE ADDRESS                    01390000
+         MVC   CMPR$KEY,INDXKEY   COLKEY DEFINITION ENTRY               01400000
+         MVC   CMPR$AL1,INDXALE   ROW #1 ALWAYS RESIDES IN TABLE SPACE  01410000
+         MVC   CMPR$OP2,INDXROW   CANDIDATE IS ALWAYS ROW #2            01420000
+         MVC   CMPR$AL2,INDXRALE  IDENTIFY ITS RESIDENCE AND FORMAT     01430000
+                                                                        01440000
+*--------------------------------------------------------------         01450000
+*   Create index tree header entry upon first use of index              01460000
+*--------------------------------------------------------------         01470000
+                                                                        01480000
+         L     R3,NDX.LOCFREE     INDEX PREVIOUSLY INITIALIZED?         01490000
+         CH    R3,=H'1'           HEADER RESIDES IN FIRST ENTRY         01500000
+         BNE   BT_INIT            DONE HERE IF SO                       01510000
+                                                                        01520000
+         L     R1,NDX.LOCFREE     FREE ENTRY NUMBER                     01530000
+         LA    R1,1(,R1)          FIRST ENTRY NO LONGER FREE            01540000
+         ST    R1,NDX.LOCFREE     UPDATE ACCORDINGLY                    01550000
+                                                                        01560000
+         LAE   R9,NDX.LOCSLOTS    CLAIM THE FIRST SLOT                  01570000
+         USING INDEX,R9           ENTRY FORMAT                          01580000
+         XC    INDEX(NDXLN),INDEX PREPARE FOR REUSE                     01590000
+         LA    R0,LOCSLOTS-LOCATOR   OFFLINK OF FIRST ENTRY             01600000
+         ST    R0,NDXRIGHT        WRAP LINK IS INITIAL STATE            01610000
+         DROP  R9                 INDEX ENTRY                           01620000
+                                                                        01630000
+BT_INIT  DS    0H                                                       01640000
+                                                                        01650000
+         EJECT                                                          01660000
+***************************************************************         01670000
+*                                                                       01680000
+*   We now define two pointers to entries in the index tree.            01690000
+*   P represents the current predecessor.  Q is a roving                01700000
+*   pointer set to either the left or right subtree of P                01710000
+*   depending on the result of the comparison of the stored             01720000
+*   row represented by P and the candidate entry. Keys less             01730000
+*   than or equal to that of P reside in the left subtree.              01740000
+*   keys greater than that of P reside in the right subtree.            01750000
+*                                                                       01760000
+***************************************************************         01770000
+                                                                        01780000
+         LAE   R9,NDX.LOCSLOTS    PREV PTR BEGINS AT TOP OF TREE        01790000
+P        USING INDEX,R9                                                 01800000
+                                                                        01810000
+         LAE   R8,0(,R9)          ROVING PTR FINDS FIRST NODE           01820000
+         L     R8,P.NDXLEFT       ... BY TRAVERSING LEFT SUBTREE        01830000
+Q        USING INDEX,R8           ... PER STANDARD CONVENTION           01840000
+                                                                        01850000
+         L     R3,$$LEFT          RETAIN DIRECTION OF MOVE              01860000
+         SR    R6,R6              P PTR BACKUP                          01870000
+                                                                        01880000
+*--------------------------------------------------------------         01890000
+*   Test for additional index levels, integrity, etc.                   01900000
+*--------------------------------------------------------------         01910000
+                                                                        01920000
+ADVANCE  DS    0H                                                       01930000
+         LTR   R8,R8              END OF BRANCH REACHED?                01940000
+         BNP   ENDTREE            NO MATCHING ENTRY IF SO               01950000
+         CL    R8,NDX.LOCSIZE     COARSE STRUCTURAL INTEGRITY TEST      01960000
+         BNL   EINTEG             SERIOUS PROBLEM                       01970000
+         LA    R8,NDX.LOCATOR(R8) CONVERT OFFLINK TO ADDRESS            01980000
+                                                                        01990000
+*--------------------------------------------------------------         02000000
+*   Convert index copy of ROWID to a row address                        02010000
+*--------------------------------------------------------------         02020000
+                                                                        02030000
+         ICM   R10,15,INDXLOCR    ROW LOCATOR IF USED                   02040000
+         BNZ   RIDSLOT            ROWID IS A SLOT NUMBER IF SO          02050000
+         L     R10,INDXBASE       TABLE BASE                            02060000
+                                                                        02070000
+         TBVRO 0(,R10),*INDXBSIZ,*Q.NDXRID                              02080000
+                                                                        02090000
+         BZ    RIDVADDR           ROWID APPEARS VALID AR/OFFLINK RET    02100000
+         B     EROWREF            INVALID ROW REFERENCE                 02110000
+                                                                        02120000
+RIDSLOT  DS    0H                 ROWID IS SLOT NUMBER                  02130000
+         TBFROW 0(,R10),*Q.NDXRID ACQUIRE ROW OFFLINK                   02140000
+                                                                        02150000
+         BNZ   EROWREF            SLOT TRANSLATION ERROR                02160000
+                                                                        02170000
+RIDVADDR DS    0H                                                       02180000
+         LAE   R7,0(,R1)          ACCEPT AR QUALIFIED OFFLINK           02190000
+         AL    R7,INDXBASE        CONVERT TO STORED ROW ADDRESS         02200000
+         LA    R0,RPFXLN(,R7)     LOCATE STORED ROW DATA                02210000
+         ST    R0,CMPR$OP1        POST OP#1 ADDR FOR ROW COMPARE        02220000
+                                                                        02230000
+*--------------------------------------------------------------         02240000
+*   Compare stored row to the candidate row                             02250000
+*--------------------------------------------------------------         02260000
+                                                                        02270000
+         @CALL ITB@CMPR,MF=(E,CMPR$PRM)                                 02280000
+                                                                        02290000
+         B     *+4(R15)           ANALYZE COMPARE RESULTS               02300000
+         B     EQUAL              ROWS ARE EQUAL                        02310000
+         B     LOW                INDEXED ROW IS LOW                    02320000
+         B     HIGH               INDEXED ROW IS HIGH                   02330000
+         B     EINVDATA           INVALID DATA ENCOUNTERED, ETC.        02340000
+                                                                        02350000
+LOW      DS    0H                 KEY(STORED ROW) < KEY(CANDIDATE ROW)  02360000
+         TM    FLAGS,$EQUAL       PREVIOUSLY FOUND A MATCH?             02370000
+         BO    ENDTREE            TERMINATE SCAN IF SO                  02380000
+         LR    R9,R8              ADVANCE ANCESTOR PTR                  02390000
+         L     R8,Q.NDXRIGHT      TRAVERSE RIGHT SUBTREE                02400000
+         L     R3,$$RIGHT         KEEP TRACK OF ROUTE                   02410000
+         B     ADVANCE            AGAIN                                 02420000
+                                                                        02430000
+HIGH     DS    0H                 KEY(STORED ROW) > KEY(CANDIDATE ROW)  02440000
+         TM    FLAGS,$EQUAL       PREVIOUSLY FOUND A MATCH?             02450000
+         BO    ENDTREE            TERMINATE SCAN IF SO                  02460000
+         LR    R9,R8              ADVANCE ANCESTOR PTR                  02470000
+         L     R8,Q.NDXLEFT       TRAVERSE LEFT SUBTREE                 02480000
+         L     R3,$$LEFT          KEEP TRACK OF ROUTE                   02490000
+         B     ADVANCE            AGAIN                                 02500000
+                                                                        02510000
+EQUAL    DS    0H                 KEY(STORED ROW) = KEY(CANDIDATE ROW)  02520000
+         ICM   R0,15,INDXRID      DID CALLER REQUEST ROWID MATCHUP      02530000
+         BP    EQROWID            ROWID COMPARE NEEDED IF SO            02540000
+         LR    R6,R9              BACKUP TRUE PREDECESSOR (P) PTR       02550000
+         LR    R9,R8              MUST ADD DUPS AFTER FIRST MATCH       02560000
+         L     R3,$$LEFT          KEEP TRACK OF ROUTE                   02570000
+         BZ    MATCH              SEARCHING FOR INSERT LOCATION         02580000
+         OI    FLAGS,$EQUAL       QUALIFYING ENTRY LOCATED              02590000
+         L     R8,Q.NDXLEFT       TRAVERSE LEFT SUBTREE                 02600000
+         B     ADVANCE            SEARCHING FOR LOGICAL FIRST ENTRY     02610000
+                                                                        02620000
+EQROWID  DS    0H                 ROW KEYS MATCH                        02630000
+         CL    R0,Q.NDXRID        ELSE TEST FOR SPECIFIC ENTRY          02640000
+         BE    MATCH              MATCHING ENTRY FOUND                  02650000
+         LR    R9,R8              ADVANCE ANCESTOR PTR                  02660000
+         L     R8,Q.NDXLEFT       TRAVERSE LEFT SUBTREE                 02670000
+         L     R3,$$LEFT          KEEP TRACK OF ROUTE                   02680000
+         B     ADVANCE            AGAIN                                 02690000
+                                                                        02700000
+         EJECT                                                          02710000
+***************************************************************         02720000
+*                                                                       02730000
+*   Return completion status                                            02740000
+*                                                                       02750000
+***************************************************************         02760000
+                                                                        02770000
+ENDTREE  DS    0H                 DETERMINE IF MATCHING ENTRIES FOUND   02780000
+         TM    FLAGS,$EQUAL       MATCHING ENTRY?                       02790000
+         BNO   NOMATCH            SKIP IF NOT                           02800000
+         LR    R8,R9              PARENT PTR POINTS TO MATCH            02810000
+         LR    R9,R6              RESTORE PARENT OF PARENT              02820000
+         B     MATCH              EXIT WITH MATCH                       02830000
+                                                                        02840000
+NOMATCH  DS    0H                                                       02850000
+         SR    R0,R0              OFFLINK INDICATES NO HIT              02860000
+         LA    R15,RC00           INDICATE NO MATCH / DUPLICATION       02870000
+         B     COMRET             REJOIN                                02880000
+                                                                        02890000
+MATCH    DS    0H                 STORED ROW FOUND EQUAL TO CANDIDATE   02900000
+         LA    R0,Q.INDEX         ADDRESS OF MATCHING ROW INDEX ENTRY   02910000
+         S     R0,INDXNDX         RETURN OFFLINK OF MATCHING NDX ENTRY  02920000
+         LA    R15,RC04           INDICATE MATCH / DUPLICATE            02930000
+                                                                        02940000
+COMRET   DS    0H                 RETURN INSERTION POINT                02950000
+         LA    R1,P.INDEX         ADDRESS OF PREDECESSOR ENTRY          02960000
+         S     R1,INDXNDX         RETURN OFFLINK OF ENTRY               02970000
+         OR    R1,R3              INSERT SUBTREE CODE                   02980000
+         B     EXIT               DONE                                  02990000
+                                                                        03000000
+*--------------------------------------------------------------         03010000
+*   Error handlers                                                      03020000
+*--------------------------------------------------------------         03030000
+                                                                        03040000
+EINTEG   DS    0H                 INDEX INTEGRITY                       03050000
+         LA    R0,RSN04                                                 03060000
+         B     ERR_RET                                                  03070000
+                                                                        03080000
+EROWREF  DS    0H                 INVALID ROW REFERENCE                 03090000
+         LA    R0,RSN08                                                 03100000
+         B     ERR_RET                                                  03110000
+                                                                        03120000
+EINVDATA DS    0H                 CORRUPTED ROW DATA                    03130000
+         LA    R0,RSN12                                                 03140000
+                                                                        03150000
+ERR_RET  DS    0H                                                       03160000
+         LA    R15,RC08                                                 03170000
+                                                                        03180000
+*--------------------------------------------------------------         03190000
+*   Return to caller                                                    03200000
+*--------------------------------------------------------------         03210000
+                                                                        03220000
+EXIT     DS    0H                                                       03230000
+         NOP   0                                                        03240000
+         @EXIT ,                                                        03250000
+                                                                        03260000
+         EJECT                                                          03270000
+***************************************************************         03280000
+*                                                                       03290000
+*   Local read-only data areas, etc.                                    03300000
+*                                                                       03310000
+***************************************************************         03320000
+                                                                        03330000
+$$LEFT   DC    A(X'80000000')     LEFT SUBTREE FLAG                     03340000
+$$RIGHT  DC    A(X'00000000')     RIGHT SUBTREE FLAG                    03350000
+                                                                        03360000
+         LTORG ,                                                        03370000
+         END   ,                                                        03380000
