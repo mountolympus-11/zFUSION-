@@ -1,0 +1,249 @@
+IDSOBJGS TITLE 'DATASPACE SERVICES - ACQUIRE OBJECT STORAGE'            00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE: IDSOBJGS - Acquire object storage                            00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This routine attepts to acquire storage on behalf of a             00080000
+*    given object, first from the free area located at the              00090000
+*    current end of the object.  If sufficient storage is               00100000
+*    not available and the object OIE is not marked fixed,              00110000
+*    the object will be reallocated, possibly (also) causing            00120000
+*    a space extend.                                                    00130000
+*                                                                       00140000
+*    When storage is successfully acquired and cleared, the AR          00150000
+*    qualified object base address is returned.  Requesters             00160000
+*    using the object address to generate relocatable pointers,         00170000
+*    etc. must use the new address in all subsequent storage            00180000
+*    address computations.                                              00190000
+*                                                                       00200000
+*                                                                       00210000
+* ON ENTRY:                                                             00220000
+*                                                                       00230000
+*    R1 points to an os/vs parameter list containing                    00240000
+*                                                                       00250000
+*        +00 - addr of the object token                                 00260000
+*        +04 - addr of the object OIE                                   00270000
+*        +08 - length of storage extent (bytes)                         00280000
+*        +12 - extendable object (TRUE: 1, FALSE: 0)                    00290000
+*                                                                       00300000
+*    A/R10 - AR qualified address of the storage SPCBLOCK               00310000
+*                                                                       00320000
+*                                                                       00330000
+* ON EXIT:                                                              00340000
+*                                                                       00350000
+*    R15 contains one of the following return codes                     00360000
+*                                                                       00370000
+*        -4 - storage successfully acquired, object extended            00380000
+*         0 - storage successfully acquired                             00390000
+*         4 - storage unavailable                                       00400000
+*        ## - service routine failure or other environ error            00410000
+*        20 - ALU translation error                                     00420000
+*                                                                       00430000
+*    For return codes less than or equal to zero                        00440000
+*                                                                       00450000
+*        R0 - AR qualified address of the object base                   00460000
+*        R1 - AR qualified address of the acquired extent               00470000
+*                                                                       00480000
+**<DOC-OFF>****************************************************         00490000
+                                                                        00500000
+         EJECT                                                          00510000
+***************************************************************         00520000
+*                                                                       00530000
+* MAINTENANCE:                                                          00540000
+*                                                                       00550000
+*    02/02/95 T. Weltzer   par# 167121                           167121 00560000
+*             Corrected IDSOBJAL return code test                167121 00570000
+*                                                                       00580000
+*    08/31/95 R. Turgeon                                                00590000
+*             Introduced serialization logic removed from               00600000
+*             IDSOBJAL.  This routine is now responsible for            00610000
+*             serializing object extension in multitasking              00620000
+*             environments.                                             00630000
+*                                                                       00640000
+***************************************************************         00650000
+                                                                        00660000
+         EJECT                                                          00670000
+***************************************************************         00680000
+*                                                                       00690000
+*   Read/write working storage area                                     00700000
+*                                                                       00710000
+***************************************************************         00720000
+                                                                        00730000
+WORKAREA DSECT                                                          00740000
+                                                                        00750000
+         @WORK ,                  STANDARD WORKAREA                     00760000
+                                                                        00770000
+OBJTOKEN DS    A                  ADDRESS OF OBJECT (OR SPACE) TOKEN    00780000
+STOKEN   DS    XL8                SPACE TOKEN                           00790000
+                                                                        00800000
+RESOWNER DS    X                  STORAGE MAP OWNER IF TRUE             00810000
+EXTFLAG  DS    X                  OBJECT EXTEND ATTEMPT IF NON-ZERO     00820000
+                                                                        00830000
+WORKLEN  EQU   *-WORKAREA         WORKAREA LENGTH                       00840000
+                                                                        00850000
+         EJECT                                                          00860000
+         SPCBLOCK ,                                                     00870000
+                                                                        00880000
+         EJECT                                                          00890000
+         OIE   ,                                                        00900000
+                                                                        00910000
+         EJECT                                                          00920000
+         EQUS  LINKAGE=VCON                                             00930000
+                                                                        00940000
+         EJECT                                                          00950000
+IDSOBJGS @ENTER WORKA=(WORKAREA,WORKLEN)                                00960000
+                                                                        00970000
+         USING SPCBLOCK,R10       CONVENTION                            00980000
+                                                                        00990000
+         LM    R1,R4,0(R1)        FETCH PASSED PARAMETERS               01000000
+         ST    R1,OBJTOKEN        SAVE ADDR OF OBJECT TOKEN             01010000
+*                                 R2 <== OIE ADDRESS                    01020000
+*                                 R3 <== EXTENT LENGTH (BYTES)          01030000
+*                                 R4 <== OBJECT EXTEND FLAG             01040000
+                                                                        01050000
+         LAE   R11,SPCBLOCK       OPEN WINDOW TO SPACE                  01060000
+                                                                        01070000
+         LR    R11,R2             ATTACH OIE ADDRESS                    01080000
+         USING OIE,R11            OIE ADDRESSABILITY                    01090000
+                                                                        01100000
+         EJECT                                                          01110000
+***************************************************************         01120000
+*                                                                       01130000
+*   Attempt allocation from object                                      01140000
+*                                                                       01150000
+***************************************************************         01160000
+                                                                        01170000
+BYTES    DS    0H                                                       01180000
+         LR    R6,R3              COPY OF LENGTH                        01190000
+         A     R6,OIESTHWM        APPEND TO FREE STORAGE END            01200000
+         LR    R7,R6              MODIFIABLE COPY FOR VALIDATION        01210000
+         BCTR  R7,0               ROUND DOWN FOR ALU RESIDENCY TEST     01220000
+         L     R15,SPC_ALU_POWER2 ALU / BYTE CONVERSION FACTOR          01230000
+         SRL   R7,0(R15)          CONVERT TO RELATIVE ALU               01240000
+         CL    R7,OIESTLEN        VS OBJECT ALU COUNT                   01250000
+         BL    RETSTORE           FINISH IF STORAGE IS AVAILABLE        01260000
+                                                                        01270000
+*--------------------------------------------------------------         01280000
+*   determine if object is extendable, serialize as required            01290000
+*--------------------------------------------------------------         01300000
+                                                                        01310000
+OBJECTS  DS    0H                                                       01320000
+         TM    OIEFLAGS,OIEFIXED  RELOCATION OF OBJECT ALLOWED?         01330000
+         BO    ERR_STG            MUST MAKE DO WITH PREALLOCATED STG    01340000
+         MVI   EXTFLAG,4          INDICATE OBJECT EXTENTION ATTEMPTED   01350000
+                                                                        01360000
+         MVC   STOKEN,SPC_STOKEN                                        01370000
+                                                                        01380000
+         @SERSPC OBTAIN,STOKEN    SPACE SERIALIZATION                   01390000
+                                                                        01400000
+         BNZ   *+8                SKIP IF NOT                           01410000
+         MVI   RESOWNER,1         INDICATE RESOURCE OWNERSHIP           01420000
+                                                                        01430000
+*--------------------------------------------------------------         01440000
+*   attempt to extend the object                                        01450000
+*--------------------------------------------------------------         01460000
+                                                                        01470000
+         LR    R8,R3              EXTENT LENGTH IN BYTES                01480000
+         A     R8,SPC_ALU_SIZE    ROUNDING UP TO # ALU'S                01490000
+         BCTR  R8,0                                                     01500000
+         L     R15,SPC_ALU_POWER2 ALU / BYTE CONVERSION FACTOR          01510000
+         SRL   R8,0(R15)          TOTAL # ALU'S FOR REALLOCATED OBJECT  01520000
+         A     R8,OIESTLEN        PLUS SIZE BEFORE EXTEND               01530000
+                                                                        01540000
+         @CALL IDSOBJAL,(OIE,(R8)),MF=(E,MFE_LIST)                      01550000
+                                                                        01560000
+         LR    R5,R15             RETAIN RETURN CODE                    01570000
+                                                                        01580000
+*--------------------------------------------------------------         01590000
+*   release space lock                                                  01600000
+*--------------------------------------------------------------         01610000
+                                                                        01620000
+         CLI   RESOWNER,0         PROGRAM OWNS RESOURCE?                01630000
+         BE    NOSER              SKIP IF NOT                           01640000
+                                                                        01650000
+         @SERSPC RELEASE,STOKEN   SPACE SERIALIZATION                   01660000
+                                                                        01670000
+NOSER    DS    0H                                                       01680000
+                                                                        01690000
+*--------------------------------------------------------------         01700000
+*   analyze object allocation request completion                        01710000
+*--------------------------------------------------------------         01720000
+                                                                        01730000
+         CH    R5,=AL2(RC12)      NEW STORAGE ACQUIRED?          167121 01740000
+         BL    BYTES              YES, RETRY OBJ BYTE ALLOCATION        01750000
+         BH    ERR_STG            ANY ERROR RESULTS IN REQ FAIL         01760000
+                                                                        01770000
+         EJECT                                                          01780000
+***************************************************************         01790000
+*                                                                       01800000
+*   Extend the space                                                    01810000
+*                                                                       01820000
+***************************************************************         01830000
+                                                                        01840000
+         L     R15,SPC_ALU_POWER2 ALU / BYTE CONVERSION FACTOR          01850000
+         SLL   R8,0(R15)          SPACE EXTENTION VALUE IN BYTES        01860000
+                                                                        01870000
+         @CALL IDSSPCXT,(*OBJTOKEN,(R8)),MF=(E,MFE_LIST)                01880000
+         LTR   R15,R15            SPACE EXPANED?                        01890000
+         BZ    OBJECTS            ATTEMPT OBJECT REALLOCATION           01900000
+         B     ERR_STG            ANY ERROR RESULTS IN REQ FAIL         01910000
+                                                                        01920000
+*--------------------------------------------------------------         01930000
+*   return the allocated storage                                        01940000
+*--------------------------------------------------------------         01950000
+                                                                        01960000
+RETSTORE DS    0H                                                       01970000
+         LAE   R1,OIE             QUALIFY STORAGE ADDRESS               01980000
+         L     R1,OIESTORG        OBJECT ORIGIN ALU #                   01990000
+         @ALU  (1)                CONVERT TO QUALIFIED ADDRESS          02000000
+         BNZ   ERR_ALU            ALU TRANSLATION ERROR                 02010000
+                                                                        02020000
+         LAE   R0,0(,R1)          R0 <== AR QUALIFIED OBJECT BASE ADDR  02030000
+         AL    R1,OIESTHWM        R1 <== FREE SPACE                     02040000
+                                                                        02050000
+         LAE   R4,0(,R1)          FREE SPACE ORIGIN                     02060000
+         LR    R5,R3              LENGTH OF EXTENT                      02070000
+         SR    R15,R15            PREPARE FOR CLEAR                     02080000
+         MVCL  R4,R14             RETURN ZEROED STORAGE                 02090000
+                                                                        02100000
+         AL    R3,OIESTHWM        ADDR OF NEXT AVAILABLE FREE BYTE      02110000
+         ST    R3,OIESTHWM        SAVE UPDATED HIGHWATER MARK           02120000
+         OI    OIEFLAGS,OIEWRITE  OIE UPDATED                           02130000
+                                                                        02140000
+         EJECT                                                          02150000
+***************************************************************         02160000
+*                                                                       02170000
+*   Return completion status to caller                                  02180000
+*                                                                       02190000
+***************************************************************         02200000
+                                                                        02210000
+         LA    R15,RC00           STORAGE SUCCESSFULLY ALLOCATED        02220000
+         CLI   EXTFLAG,0          OBJECT EXTENDED?                      02230000
+         BE    RET                DONE IF NOT                           02240000
+         LA    R15,RC04           ELSE INDICATE MOVEMENT TO CALLER      02250000
+         LCR   R15,R15            PER CONVENTION                        02260000
+         B     RET                                                      02270000
+                                                                        02280000
+ERR_STG  DS    0H                 STORAGE NOT AVAILABLE                 02290000
+         LR    R1,R5              SERVICE ROUTINE RETCODE               02300000
+         LR    R0,R14             DIAGNOSTIC CAPABILITY                 02310000
+         LA    R15,RC04                                                 02320000
+         B     RET                                                      02330000
+                                                                        02340000
+ERR_ALU  DS    0H                 ALU TRANSLATION ERROR                 02350000
+         LA    R15,RC20                                                 02360000
+                                                                        02370000
+RET      DS    0H                                                       02380000
+         @EXIT ,                                                        02390000
+                                                                        02400000
+         EJECT                                                          02410000
+***************************************************************         02420000
+*                                                                       02430000
+*   Read-only constants, etc.                                           02440000
+*                                                                       02450000
+***************************************************************         02460000
+                                                                        02470000
+         LTORG ,                                                        02480000
+         END   ,                                                        02490000

@@ -1,0 +1,325 @@
+IDSOBJCR TITLE 'DATASPACE SERVICES - OBJECT CREATE'                     00010000
+         EJECT ,                                                        00020000
+***************************************************************         00030000
+*                                                                       00040000
+*   READ / WRITE WORKING STORAGE AREA                                   00050000
+*                                                                       00060000
+***************************************************************         00070000
+WORKAREA DSECT                                                          00080000
+                                                                        00090001
+         @WORK ,                  STANDARD WORKAREA                     00100001
+                                                                        00110001
+REGSAVE  DS    16F                LOCAL REG SAVEAREA                    00120000
+                                                                        00130000
+NAMELEN  DS    F                  TRIMMED OBJECT NAME LENGTH            00140000
+ALUCOUNT DS    F                  # ALU'S REQUIRED TO HOUSE OBJECT      00150000
+OIOFFSET DS    F                  OFFSET OF OIE LIST IN OBJECT INDEX    00160000
+POINTOIE DS    A                  UNQUALIFIED ADDR OF CREATED OIE       00170000
+POOLBASE DS    A                  UNQUALIFIED ADDR OF OIE POOL ORIGIN   00180000
+                                                                        00190000
+FLAGS    DS    X                  FLAG BYTE                             00200000
+FREEOIE  EQU   X'80'                 OIE ACQUIRED FROM FREE LIST        00210000
+POOLOIE  EQU   X'40'                 OIE ACQUIRED FROM OIE POOL         00220000
+                                                                        00230000
+WORKLEN  EQU   *-WORKAREA         WORKAREA LENGTH                       00240000
+                                                                        00250001
+         EJECT                                                          00260001
+         OCRPARMS ,               OBJECT CREATE / LOCATE PLIST          00270000
+                                                                        00280001
+         EJECT                                                          00290001
+         SPCBLOCK ,                                                     00300000
+                                                                        00310001
+         EJECT                                                          00320001
+         OIE   ,                                                        00330000
+                                                                        00340001
+         EJECT                                                          00350001
+         $TOKEN ,                                                       00360000
+                                                                        00370001
+         EJECT                                                          00380001
+         EQUS  LINKAGE=VCON                                             00390000
+                                                                        00400001
+         EJECT                                                          00410001
+**<DOC-ON>*****************************************************         00420001
+*                                                                       00430000
+* ROUTINE: IDSOBJCR - OBJECT CREATE                                     00440000
+*                                                                       00450000
+* DESCRIPTION:                                                          00460000
+*                                                                       00470000
+*                                                                       00480000
+*                                                                       00490000
+* ON ENTRY:                                                             00500000
+*                                                                       00510000
+*    R1 POINTS TO AN A PARAMETER LIST DESCRIBED BY THE OCRPARMS         00520000
+*       MAPPING MACRO                                                   00530000
+*                                                                       00540000
+*    A/R10 - AR QUALIFIED ADDRESS OF THE STORAGE SPCBLOCK               00550000
+*                                                                       00560000
+*                                                                       00570000
+* ON EXIT:                                                              00580000
+*                                                                       00590000
+*    R15 CONTAINS ONE OF THE FOLLOWING RETURN CODES                     00600000
+*                                                                       00610000
+*         0 - OBJECT CREATED                                            00620000
+*         4 - DUPLICATE OBJECT NAME                                     00630000
+*         8 - SERVICE ROUTINE FAILURE - RC=R0, R1=OFFSET                00640000
+*        12 - STORAGE NOT AVAILABLE                                     00650000
+*        16 - INVALID REQUEST                                           00660000
+*        20 - ALU TRANSLATION ERROR                                     00670000
+*                                                                       00680000
+**<DOC-OFF>****************************************************         00690001
+                                                                        00700001
+         EJECT                                                          00710001
+IDSOBJCR @ENTER WORKA=(WORKAREA,WORKLEN)                                00720000
+         USING PSA,R0             PSA                                   00730000
+                                                                        00740000
+         LAE   R7,0(R1,0)         FETCH PASSED PARAMETERS               00750001
+         USING OCRPARMS,R7        PLIST ADDRESSABILITY                  00760000
+                                                                        00770000
+*--------------------------------------------------------------         00780000
+*   VALIDATE PASSED PARAMETERS - OPEN OBJECT SPACE WINDOWS              00790000
+*--------------------------------------------------------------         00800000
+         L     R2,OCRSTOKN        SPACE TOKEN                           00810000
+         LAE   R2,0(R2,0)         RESIDES IN PRIMARY                    00820001
+         USING $TOKEN,R2          ADDRESSABILITY                        00830000
+         CLC   $TOKTAG,=CL8'SPCTOKEN'                                   00840000
+         BNE   ERR_REQ            VALIDATED                             00850000
+                                                                        00860000
+         L     R10,$SPCBASE       ESTAB PRINCIPLE SPACE ACCESS WINDOW   00870000
+         USING SPCBLOCK,R10                                             00880000
+         LAM   R10,R10,$ALET                                            00890000
+         DROP  R2                 SPACE TOKEN                           00900000
+                                                                        00910000
+         LAE   R11,SPCBLOCK       OPEN WINDOW TO SPACE                  00920001
+         LAE   R9,SPCBLOCK        OPEN WINDOW TO SPACE                  00930001
+         LAE   R8,SPCBLOCK        OPEN WINDOW TO SPACE                  00940001
+                                                                        00950000
+         ICM   R4,15,OCRNAMLN     VALIDATE NAME LENGTH                  00960000
+         BNP   ERR_REQ            INVALID REQUEST                       00970000
+         CH    R4,=AL2(L'OIENAME) TOO LONG?                             00980000
+         BH    ERR_REQ            FAIL IF SO                            00990000
+         L     R5,OCRNAME         NAME STRING                           01000000
+         @TRIM 0(R5),0(R4),CHAR=C' '                                    01010000
+         LTR   R1,R1              VALID NAME?                           01020000
+         BNP   ERR_REQ            FAIL IF NOT                           01030000
+         ST    R1,NAMELEN         PRESERVE TRUE NAME LENGTH             01040000
+                                                                        01050000
+         ICM   R1,15,OCRSIZE      OBJECT SIZE IN BYTES                  01060000
+         BNP   ERR_REQ            INVALID REQUEST                       01070000
+         A     R1,SPC_ALU_SIZE    ROUND TO SUITABLE # ALU'S             01080000
+         BCTR  R1,0               PREPARE FOR ROUNDING                  01090000
+         L     R15,SPC_ALU_POWER2 BYTE/ALU CONVERSION FACTOR            01100000
+         SRL   R1,0(R15)          CONVERT TO # ALU'S                    01110000
+         ST    R1,ALUCOUNT        SAVE FOR LATER                        01120000
+                                                                        01130000
+*--------------------------------------------------------------         01140000
+*   ENSURE NAMED OBJECT DOES NOT ALREADY EXIST                          01150000
+*--------------------------------------------------------------         01160000
+         @CALL IDSOBJLU,(*NAMELEN,*OCRNAME),                           X01170000
+               MF=(E,MFE_LIST)                                          01180000
+                                                                        01190000
+         CH    R15,=AL2(RC04)     OBJECT NOT FOUND IS DESIRED           01200000
+         BL    ERR_DUPL           ERROR IF ALREADY DEFINED              01210000
+         BH    ERR_SERV           PASSTHRU MORE SERIOUS ERRORS          01220000
+         ST    R0,OIOFFSET        SAVE HASH TABLE ENTRY OFFSET          01230000
+                                                                        01240000
+*--------------------------------------------------------------         01250000
+*   DECLARE INTENT TO UPDATE OIEPOOL                                    01260000
+*--------------------------------------------------------------         01270000
+         LAE   R9,SPC_POOL_OIE    OIE POOL                              01280000
+         USING OIE,R9             ADDRESSABILITY                        01290000
+         OIECHG ,                 POOL WILL BE UPDATED                  01300000
+         DROP  R9                                                       01310000
+                                                                        01320000
+*--------------------------------------------------------------         01330000
+*   ACQUIRE NEW OIE - FIRST TRY FREE LIST, THEN OIE POOL                01340000
+*--------------------------------------------------------------         01350000
+         ICM   R2,15,SPC_OIE_FREE OIE'S IN FREE LIST?                   01360000
+         BZ    FROMPOOL           ACQUIRE FROM POOL IF NOT              01370000
+         L     R1,SPC_POOL_OIE+(OIESTORG-OIE)                           01380000
+         @ALU  (R1)               ACQUIRE OIE POOL ORIGIN ADDR          01390000
+         BNZ   ERR_ALU            ALU TRANSLATION ERROR                 01400000
+         ST    R1,POOLBASE        SAVE POOL ORIGIN ADDR                 01410000
+                                                                        01420000
+         LA    R9,0(R2,R1)        OIE IN SPACE WINDOW                   01430000
+         USING OIE,R9             OIE FOR NEW OBJECT                    01440000
+         MVC   SPC_OIE_FREE,OIEMSTRF                                    01450000
+         OI    FLAGS,FREEOIE      INDICATE SOURCE OF OIE                01460000
+         B     FIN_OIE            OIE SELECTED                          01470000
+                                                                        01480000
+FROMPOOL DS    0H                                                       01490000
+         OBJSTG *OCRSTOKN,SPC_POOL_OIE,OIELN,MF=(E,MFE_LIST)            01500000
+         BP    ERR_STG            STORAGE DEPLETED                      01510000
+                                                                        01520000
+         ST    R0,POOLBASE        SAVE POOL ORIGIN ADDR                 01530000
+         LR    R9,R1              OIE VIEWED THRU SPACE WINDOW          01540000
+         LR    R2,R1              COPY OIE ADDRESS                      01550000
+         SR    R2,R0              MINUS BASE GIVES OFFSET               01560000
+         OI    FLAGS,POOLOIE      INDICATE SOURCE OF OIE                01570000
+                                                                        01580000
+*--------------------------------------------------------------         01590000
+*   FORMAT NEW OIE                                                      01600000
+*--------------------------------------------------------------         01610000
+FIN_OIE  DS    0H                 INITIALIZE OIE                        01620000
+         ST    R9,POINTOIE        SAVE OIE ADDRESS                      01630000
+         XC    OIE(OIELN),OIE     CLEAR                                 01640000
+         ST    R2,OIEDISPL        SELF DESCRIPTIVE POOL OFFSET          01650000
+         MVC   OIEHASHX,OIOFFSET  ANCHOR INDEX IN HASH TABLE            01660000
+         MVC   OIETAG,=CL4'OIE '  EYECATCHER EARLY                      01670000
+         MVC   OIEOASCB,PSAAOLD   OWNERS ASCB                           01680000
+         MVC   OIEOTCB,PSATOLD    OWNERS TCB                            01690000
+                                                                        01700000
+         ICM   R0,15,OCRFIXED     OBJECT FIXED AT ORIGINAL POSITION?    01710000
+         BZ    *+8                SKIP IF NOT, MAY BE RELOCATED         01720000
+         OI    OIEFLAGS,OIEFIXED  INDICATE FIXED OBJECT                 01730000
+                                                                        01740000
+         L     R5,OCRNAME         LOCATE OBJECT NAME                    01750000
+         L     R4,NAMELEN         OBJECT NAME LENGTH                    01760000
+         STH   R4,OIENAMLN        SAVE LENGTH OF OBJECT NAME            01770000
+         BCTR  R4,0               PREPARE FOR EX                        01780000
+         EX    R4,*+4             APPEND OBJECT NAME TO OIE             01790000
+         MVC   OIENAME(*-*),0(R5) EX OBJECT                             01800000
+                                                                        01810000
+         OIECHG ,                                                       01820000
+                                                                        01830000
+*--------------------------------------------------------------         01840000
+*   ALLOCATE SPACE FOR OBJECT, SPACE EXTEND MAY BE REQUIRED             01850000
+*--------------------------------------------------------------         01860000
+OBJALLOC DS    0H                                                       01870000
+         @CALL IDSOBJAL,(OIE,*ALUCOUNT),                               X01880000
+               MF=(E,MFE_LIST)                                          01890000
+                                                                        01900001
+         CH    R15,=AL2(RC12)     SPACE AVAILABLE                       01910000
+         BL    OBJREADY           OBJECT SPACE ALLOCATED                01920000
+         BH    ERR_SERV           PASS THRU MORE SERIOUS ERRORS         01930000
+                                                                        01940000
+         @CALL IDSSPCXT,(*OCRSTOKN,*OCRSIZE),                          X01950000
+               MF=(E,MFE_LIST)                                          01960000
+                                                                        01970001
+         LTR   R15,R15            PRESERVE RETURN CODE MOMENTARILY      01980000
+         BNZ   ERR_STG            TERM IF STORAGE NOT AVAILABLE         01990000
+         B     OBJALLOC           ELSE RETRY                            02000000
+                                                                        02010000
+*--------------------------------------------------------------         02020000
+*   ADD OIE TO OIE MASTER LIST AND HASHED OBJECT INDEX                  02030000
+*--------------------------------------------------------------         02040000
+NEW      USING OIE,R9             NEWLY CREATED OIE                     02050000
+FIRST    USING OIE,R8             OIE AT FRONT OF LIST BEFORE INSERT    02060000
+                                                                        02070000
+OBJREADY DS    0H                                                       02080000
+         MVC   NEW.OIEMSTRF,SPC_OIE_LIST                                02090000
+         MVC   SPC_OIE_LIST,NEW.OIEDISPL                                02100000
+         ICM   R8,15,NEW.OIEMSTRF                                       02110000
+         BZ    FINMASTR                                                 02120000
+         A     R8,POOLBASE                                              02130000
+         MVC   FIRST.OIEMSTRB,NEW.OIEDISPL                              02140000
+                                                                        02150000
+FINMASTR DS    0H                                                       02160000
+         LA    R11,SPC_OBJ_INDEX  HASH TABLE ORIGIN                     02170000
+         A     R11,NEW.OIEHASHX   LOCATE DESIGNATED ENTRY               02180000
+         MVC   NEW.OIEHASHF,0(R11)                                      02190000
+         MVC   0(4,R11),NEW.OIEDISPL                                    02200000
+         ICM   R8,15,NEW.OIEHASHF                                       02210000
+         BZ    FINHASH                                                  02220000
+         A     R8,POOLBASE        CONVERT OIE DISPL TO ADDR             02230000
+         MVC   FIRST.OIEHASHB,NEW.OIEDISPL                              02240000
+                                                                        02250000
+FINHASH  DS    0H                                                       02260000
+         DROP  FIRST              FIRST OIE                             02270000
+                                                                        02280000
+*--------------------------------------------------------------         02290000
+*   CONSTRUCT TOKEN FOR NEW OBJECT                                      02300000
+*--------------------------------------------------------------         02310000
+         USING $TOKEN,R2          TOKEN ADDRESSABILITY                  02320000
+         L     R2,OCROTOKN        TOKEN RETURN AREA                     02330000
+         LAE   R2,0(R2,0)         CALLER AREAS RESIDE IN PRIMARY        02340001
+         L     R3,OCRSTOKN        SPACE TOKEN IS BASE                   02350000
+         LAE   R3,0(R3,0)         CALLER AREAS RESIDE IN PRIMARY        02360001
+         MVC   $TOKEN($TOKLN),0(R3)   OBJ TOKEN IS SPC TOKEN EXTENDED   02370000
+         MVC   $TOKTAG,=CL8'OBJTOKEN' LABEL OBJECT TOKEN ACCORDINGLY    02380000
+         MVC   $OBJID,NEW.OIEDISPL    INSERT OBJECT HANDLE              02390000
+         DROP  NEW,R2                 NEW OIE, OBJECT TOKEN             02400000
+                                                                        02410000
+         L     R15,SPC_OIE_COUNT  NUMBER OF OBJECTS                     02420000
+         LA    R15,1(,R15)        UPDATE COUNT                          02430000
+         ST    R15,SPC_OIE_COUNT  SAVE UPDATED VALUE                    02440000
+                                                                        02450000
+         EJECT ,                                                        02460000
+***************************************************************         02470000
+*                                                                       02480000
+*   RETURN COMPLETION STATUS TO CALLER                                  02490000
+*                                                                       02500000
+***************************************************************         02510000
+         LA    R15,RC00           NORMAL COMPLETION                     02520000
+         B     RET                                                      02530000
+                                                                        02540000
+ERR_DUPL DS    0H                 DUPLICATE OBJECT NAME                 02550000
+         LA    R15,RC04                                                 02560000
+         B     RET                                                      02570000
+                                                                        02580000
+ERR_REQ  DS    0H                 INVALID REQUEST                       02590000
+         LA    R15,RC16                                                 02600000
+         B     RET                                                      02610000
+                                                                        02620000
+ERR_ALU  DS    0H                 ALU TRANSLATION ERROR                 02630000
+         LA    R15,RC20                                                 02640000
+         B     RET                                                      02650000
+                                                                        02660000
+ERR_SERV DS    0H                 SERVICE ROUTINE FAILURE               02670000
+         CH    R15,=AL2(RC12)     STORAGE FAILURE?                      02680000
+         BE    RET                SEPARATE NOTIFICATION                 02690000
+                                                                        02700000
+         @PUSHERR ,                                                     02710000
+                                                                        02720000
+         LA    R15,RC08                                                 02730000
+         B     RET                                                      02740000
+                                                                        02750000
+ERR_STG  DS    0H                 STORAGE NOT AVAILABLE                 02760000
+         LA    R15,RC12                                                 02770000
+         B     RET                                                      02780000
+                                                                        02790000
+RET      DS    0H                                                       02800000
+         LTR   R15,R15            OBJECT CREATE SUCCESSFUL?             02810000
+         BZ    RETEXIT            DONE IF SO                            02820000
+                                                                        02830000
+*--------------------------------------------------------------         02840000
+*   DISCARD ACQUIRED OIE IF ERRORS ENCOUNTERED                          02850000
+*--------------------------------------------------------------         02860000
+BACKOUT  DS    0H                                                       02870000
+         SR    R1,R1              NO OBJECT HANDLE RETURNED             02880000
+         STM   R0,R15,REGSAVE     SAVE REGS                             02890000
+         L     R11,POINTOIE       FETCH OIE ADDRESS                     02900000
+         USING OIE,R11            ADDRESSABILITY THRU WINDOW            02910000
+                                                                        02920000
+RF1      TM    FLAGS,FREEOIE      OIE CAME FROM FREE LIST?              02930000
+         BNO   RF2                BIN, ELSE RETURN TO FREE LIST         02940000
+         MVC   OIEMSTRF,SPC_OIE_FREE                                    02950000
+         MVC   SPC_OIE_FREE,OIEDISPL                                    02960000
+         B     RF3                                                      02970000
+                                                                        02980000
+RF2      DS    0H                                                       02990000
+         TM    FLAGS,POOLOIE      OIE CAME FROM OIE POOL?               03000000
+         BNO   RF3                BIN, ELSE RELEASE STORAGE TO POOL     03010000
+         L     R2,OIEDISPL        STORAGE ALLOCATED FROM END OF POOL    03020000
+         ST    R2,SPC_POOL_OIE+(OIESTHWM-OIE)                           03030000
+                                                                        03040000
+RF3      DS    0H                                                       03050000
+         LM    R0,R15,REGSAVE     RESTORE REGS                          03060000
+         DROP  R11                                                      03070000
+                                                                        03080000
+*--------------------------------------------------------------         03090000
+*   RETURN COMPLETION STATUS TO CALLER                                  03100000
+*--------------------------------------------------------------         03110000
+RETEXIT  DS    0H                                                       03120000
+         @EXIT ,                                                        03130000
+                                                                        03140000
+         EJECT ,                                                        03150000
+***************************************************************         03160000
+*                                                                       03170000
+* READ ONLY CONSTANTS, ETC.                                             03180000
+*                                                                       03190000
+***************************************************************         03200000
+         LTORG ,                                                        03210000
+                                                                        03220000
+         PRINT NOGEN                                                    03230000
+         IHAPSA ,                                                       03240000
+         END   ,                                                        03250000

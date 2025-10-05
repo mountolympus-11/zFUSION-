@@ -1,0 +1,234 @@
+IDSOBJEP TITLE 'IDSOBJEP - OBJECT SERVICES ROUTER'                      00010000
+***************************************************************         00020000
+*                                                                       00030000
+*   READ / WRITE WORKING STORAGE AREA                                   00040000
+*                                                                       00050000
+***************************************************************         00060000
+WORKAREA DSECT                                                          00070000
+                                                                        00080000
+         @WORK ,                  STANDARD WORKAREA                     00090001
+                                                                        00100001
+SERIAL   DS    F                  OUR RESPONSIBILITY TO DEQ IF NON ZERO 00110000
+RETREGS  DS    4F                 PRESERVE GRS FOR RETURN               00120000
+ARETREGS DS    4F                 PRESERVE ARS FOR RETURN               00130000
+                                                                        00140000
+WORKLEN  EQU   *-WORKAREA                                               00150000
+                                                                        00160001
+         EJECT                                                          00170001
+         OIE   ,                                                        00180000
+                                                                        00190001
+         EJECT                                                          00200000
+         SPCBLOCK ,                                                     00210000
+                                                                        00220001
+         EJECT                                                          00230000
+         $TOKEN ,                                                       00240000
+                                                                        00250000
+         EJECT                                                          00260000
+         TRACODES PRINT=NOGEN                                           00270001
+                                                                        00280000
+         EQUS  LINKAGE=VCON                                             00290000
+                                                                        00300000
+         EJECT                                                          00310000
+**<DOC-ON>*****************************************************         00320000
+*                                                                       00330000
+* ROUTINE: IDSOBJEP - OBJECT SERVICES ROUTER                            00340000
+*                                                                       00350000
+* DESCRIPTION:                                                          00360000
+*                                                                       00370000
+*    THIS ROUTINE SERVES AS THE $OBJECT SERVICE FACILITY ROUTER,        00380000
+*    BRIDGING PRIMARY ASCMODE CALLERS TO AR ASCMODE AND AMODE31         00390000
+*    MAINTAINED BY THE $OBJECT MANAGEMENT ROUTINES.  THE $OBJECT        00400000
+*    MACRO IDENTIFIES SPECIFIC SERVICES BY A FUNCTION CODE              00410000
+*    THAT IS CONVERTED TO A MODULE ADDRESS BY THIS ROUTINE.             00420000
+*    IN ADDITION, THE SUITABILITY OF THE 4K WORKAREA PASSED             00430000
+*    VIA R0 IS VALIDATED.                                               00440000
+*                                                                       00450000
+*    THE ROUTER GENERATES TRACE INFORMATION UPON ENTRY AND EXIT.        00460000
+*    IN ADDITION, SERIALIZATION REQUIRED AT THE SERVICE LEVEL           00470000
+*    IS PERFORMED HERE.                                                 00480000
+*                                                                       00490000
+*                                                                       00500000
+* ON ENTRY:                                                             00510000
+*                                                                       00520000
+*    R1  POINTS TO A SERVICE-DEPENDENT OS/VS PARAMETER LIST             00530000
+*        RESIDING IN THE PRIMARY ADDRESS SPACE.                         00540000
+*                                                                       00550000
+*    R0  CONTAINS THE ADDRESS OF A WORKAREA USED BY DATASPACE           00560000
+*        SERVICE ROUTINES TO ACQUIRE SAVEAREAS (NON-ESA) AND            00570000
+*        OTHER WORKAREAS.                                               00580000
+*                                                                       00590000
+*    R15 CONTAINS A FUNCTION NUMBER USED TO ACQUIRE THE ENTRY           00600000
+*        POINT OF THE OBJECT MANAGEMENT ROUTINE.                        00610000
+*                                                                       00620000
+*                                                                       00630000
+* ON EXIT:                                                              00640000
+*                                                                       00650000
+*    R15 CONTAINS A SERVICE-DEPENDENT RETURN CODE.  R0 AND R1           00660000
+*        MAY ALSO CONTAIN RELATED REASON CODES AND/OR CONTROL           00670000
+*        BLOCK ADDRESSES USEFUL FOR PROBLEM RESOLUTION.  THE            00680000
+*        FOLLOWING RETURN CODES HAVE STANDARD MEANINGS ACROSS           00690000
+*        ALL DATASPACE SERVICES.                                        00700000
+*                                                                       00710000
+*        RC00 - NORMAL COMPLETION. THE REQUESTED FUNCTION               00720000
+*               COMPLETED WITHOUT ERROR.                                00730000
+*                                                                       00740000
+*        RC12 - REQUIRED STORAGE NOT AVAILABLE IN THE TARGET            00750000
+*               OBJECT SPACE.                                           00760000
+*                                                                       00770000
+*        RC16 - REQUEST IN ERROR.  THE REQUEST IS INVALID.              00780000
+*                                                                       00790000
+*        RC20 - ALU TRANSLATION ERROR.  A STORAGE EXTENT REFERRED       00800000
+*               TO BY NUMBER IN THE WORK SPACE IS NOT VALID OR IS       00810000
+*               NOT PROPERLY DEFINED TO THE STORAGE SERVICES.           00820000
+*                                                                       00830000
+*        RC24 - WORKAREA DOES NOT SATISFY SIZE/ALIGNMENT RQMTS          00840000
+*                                                                       00850000
+**<DOC-OFF>****************************************************         00860000
+                                                                        00870001
+         EJECT                                                          00880001
+IDSOBJEP @ENTER WORKA=(WORKAREA,WORKLEN),                              X00890001
+               ASC=,              NO CHANGE OF ASC MODE                X00900001
+               EPA=,              ENTERED WITHOUT ADDRESSABILITY       X00910001
+               SERVICE_EPA=YES    INITIAL ENTRY TO $OBJECT SERVICE      00920001
+                                                                        00930000
+         LA    R15,CONTINUE       BEGIN AMODE 31                        00940000
+         O     R15,=X'80000000'                                         00950000
+         BSM   0,R15                                                    00960001
+CONTINUE DS    0H                                                       00970000
+                                                                        00980001
+*--------------------------------------------------------------         00990000
+*   TRACE REQUEST                                                       01000000
+*--------------------------------------------------------------         01010000
+         EREG  R14,R1             EXTRACT ENTRY REGS                    01020000
+         STM   R14,R1,RETREGS     SAVE FOR TRACE RECORD                 01030000
+                                                                        01040000
+         $TRACE *=A(TRC_OBJECT_IN),4*4,STDENV=NO                        01050000
+         BNZ   *+10               REQUEST FAILED                        01060000
+         MVC   0(4*4,R1),RETREGS  INSERT REGS                           01070000
+                                                                        01080000
+*--------------------------------------------------------------         01090000
+*   PRELIMINARY VALIDATION, PREPARATION FOR SERIALIZATION               01100001
+*--------------------------------------------------------------         01110000
+         EREG  R1,R1              RESTORE PARM REG                      01120000
+         L     R1,0(,R1)          LOCATE TOKEN                          01130000
+         USING $TOKEN,R1          ALL FUNCTIONS PASS $TOKEN AS PARM1    01140000
+         CLC   =C'TOKEN',$TOKTAG+3                                      01150000
+         BNE   ERR_REQ            INVALID PARM LIST                     01160000
+                                                                        01170000
+         L     R10,$SPCBASE       OBJECT SPACE DESCRIPTOR ADDR          01180000
+         LAM   R10,R10,$ALET      PROPERLY QUALIFIED                    01190000
+         USING SPCBLOCK,R10       ESTABLISH ADDRESSABILITY              01200000
+         SAC   ASCAR              BEGIN ASC=AR MODE                     01210000
+                                                                        01220000
+*--------------------------------------------------------------         01230000
+*   FUNCTION SERIALIZATION                                              01240000
+*--------------------------------------------------------------         01250000
+         EREG  R15,R1             RESTORE PARM REGS                     01260000
+         LAE   R15,0(R15,0)       CLEAR AR                              01270000
+         BCTR  R15,0              ZERO RELATIVE FUNCTION CODE           01280000
+         LA    R15,SER_RQMT(R15)  SERIALIZATION TABLE ENTRY             01290000
+         SR    R2,R2              PREPARE FOR INSERT                    01300000
+         ICM   R2,1,0(R15)        SERIALIZATION RQMT FOR FUNC           01310000
+         BZ    CALLSERV           NO SERIALIZATION REQUIRED             01320000
+                                                                        01330000
+         LAE   R1,0(R1,0)         TOKENS RESIDE IN PRIMARY              01340000
+         L     R1,0(,R1)          FETCH OBJECT/SPACE TOKEN PTR          01350000
+         LA    R1,$STOKEN-$TOKEN(,R1)                                   01360000
+                                                                        01370000
+         @SERSPC OBTAIN,(R1)      ACCESS SERIALIZATION                  01380000
+                                                                        01390000
+         BNZ   *+10               SKIP IF SO                            01400000
+         MVC   SERIAL,=A($EXC)    ELSE NOTE OUR RESPONSIBILITIES        01410000
+                                                                        01420000
+*--------------------------------------------------------------         01430000
+*   INVOKE SERVICE ROUTINE                                              01440000
+*--------------------------------------------------------------         01450000
+CALLSERV DS    0H                                                       01460000
+         EREG  R15,R1             RESTORE PARM REGS                     01470000
+         BCTR  R15,0              ZERO RELATIVE FUNCTION CODE           01480000
+         SLL   R15,2              PTR ARRAY INDEX                       01490000
+         LAE   R15,0(R15,0)       PRIMARY SPACE REFERENCES              01500000
+         L     R15,FUNCDIR(R15)   FETCH EPA                             01510000
+         BASR  R14,R15            INVOKE DESIGNATED SERVICE RTN         01520000
+                                                                        01530000
+         STM   R15,R1,RETREGS+4      SAVE RETURN REGS                   01540000
+         STAM  AR15,AR1,ARETREGS+4   SAVE RETURN ARS                    01550000
+                                                                        01560000
+*--------------------------------------------------------------         01570000
+*   RELEASE SERIALIZATION                                               01580000
+*--------------------------------------------------------------         01590000
+         OC    SERIAL,SERIAL      SERIALIZATION ON OUR BEHALF           01600000
+         BZ    SKIPSER            NO SERIALIZATION REQUIRED             01610000
+                                                                        01620000
+         EREG  R1,R1              RESTORE PLIST PTR                     01630000
+         LAE   R1,0(R1,0)         TOKENS RESIDE IN PRIMARY              01640000
+         L     R1,0(,R1)          FETCH OBJECT/SPACE TOKEN PTR          01650000
+         LA    R1,$STOKEN-$TOKEN(,R1)                                   01660000
+                                                                        01670000
+         @SERSPC RELEASE,(R1)     ACCESS SERIALIZATION                  01680000
+                                                                        01690000
+SKIPSER  DS    0H                                                       01700000
+                                                                        01710000
+*--------------------------------------------------------------         01720000
+*   TRACE RESULTS                                                       01730000
+*--------------------------------------------------------------         01740000
+         $TRACE *=A(TRC_OBJECT_OUT),4*4,STDENV=NO                       01750000
+         BNZ   *+10               REQUEST FAILED                        01760000
+         MVC   0(4*4,R1),RETREGS  INSERT REGS                           01770000
+                                                                        01780000
+         LM    R15,R1,RETREGS+4   RESTORE COMPLETION STATUS             01790000
+         LAM   AR15,AR1,ARETREGS+4                                      01800000
+         B     RET                RETURN                                01810000
+                                                                        01820000
+*--------------------------------------------------------------         01830000
+*   RETURN COMPLETION STATUS TO CALLER                                  01840000
+*--------------------------------------------------------------         01850000
+ERR_REQ  DS    0H                 INVALID REQUEST (BAD TOKEN)           01860000
+         LA    R15,RC16           INDICATE ERROR                        01870000
+         LAE   R1,0                                                     01880000
+         LAE   R0,0                                                     01890000
+         B     RET                                                      01900000
+                                                                        01910000
+ERR_WKA  DS    0H                 INVALID WORKAREA                      01920000
+         LA    R15,RC24           INDICATE ERROR                        01930000
+         LAE   R1,0                                                     01940000
+         LAE   R0,0                                                     01950000
+                                                                        01960000
+RET      DS    0H                                                       01970000
+         @EXIT ,                                                        01980001
+                                                                        01990000
+         EJECT ,                                                        02000000
+***************************************************************         02010000
+*                                                                       02020000
+*   READ ONLY CONSTANTS, ETC.                                           02030000
+*                                                                       02040000
+***************************************************************         02050000
+FUNCDIR  DS    0A                                                       02060000
+         DC    V(IDSOBJCR)        01 CREATE                             02070000
+         DC    V(IDSOBJDE)        02 DESTROY                            02080000
+         DC    V(IDSOBJAC)        03 ACCESS                             02090000
+         DC    V(IDSOBJLC)        04 LOCATE                             02100000
+         DC    V(IDSOBJST)        05 STORAGE                            02110000
+         DC    V(IDSOBJHW)        06 SETHWM                             02120000
+         DC    V(IDSOBJRE)        07 RENAME                             02130000
+         DC    A(*-*)             08 RESERVED                           02140000
+                                                                        02150000
+*------- SERIALIZATION REQUIREMENTS --------------------------          02160000
+                                                                        02170000
+SER_RQMT DS    0A                                                       02180000
+         DC    AL1($EXC)          01 CREATE                             02190000
+         DC    AL1($EXC)          02 DESTROY                            02200000
+         DC    AL1(0)             03 ACCESS                             02210000
+         DC    AL1(0)             04 LOCATE                             02220000
+         DC    AL1(0)             05 STORAGE                            02230000
+         DC    AL1(0)             06 SETHWM                             02240000
+         DC    AL1($EXC)          07 RENAME                             02250000
+         DC    A(*-*)             08 RESERVED                           02260000
+                                                                        02270000
+$EXC     EQU   4                  EXCLUSIVE CONTROL                     02280000
+$SHR     EQU   8                  SHARED USE                            02290000
+                                                                        02300000
+*-------------------------------------------------------------          02310000
+                                                                        02320000
+         LTORG ,                                                        02330000
+         END   ,                                                        02340000

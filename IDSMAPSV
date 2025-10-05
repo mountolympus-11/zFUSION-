@@ -1,0 +1,376 @@
+IDSMAPSV TITLE 'DATASPACE SERVICES - SPACE MAP SERVICES'                00010000
+***************************************************************         00020000
+*                                                                       00030000
+*   READ / WRITE WORKING STORAGE AREA                                   00040000
+*                                                                       00050000
+***************************************************************         00060000
+WORKAREA DSECT                                                          00070000
+                                                                        00080000
+         @WORK ,                  STANDARD WORKAREA                     00090000
+                                                                        00100000
+UPDATFLG DS    X                  SET NONZERO IF SPACE MAP UPDATED      00110000
+         DS    XL3                RESERVED                              00120000
+                                                                        00130000
+ALUORG   DS    F                  ALU # OF EXTENT ORIGIN                00140000
+ALUCOUNT DS    F                  # ALU'S SPANNED BY EXTENT             00150000
+SPACEMAP DS    A                  SPACE MAP OVERRIDE OR ZERO            00160000
+                                                                        00170000
+UPDMASKS DS    0F,0F              MAP UPDATE MASKS, SIZE AND ORDER FBA  00180000
+SETMASK  DS    XL3,X                 INVERTABLE COPY OF ALU ALLOC MASK  00190000
+CHGMASK  DS    XL3,X                 INVERTABLE COPY OF ALU CHANGE MASK 00200000
+                                                                        00210000
+MSEGMENT MAPSEG TYPE=BLOCK        MAP SEGMENT                           00220000
+                                                                        00230000
+WORKLEN  EQU   *-WORKAREA         WORKAREA LENGTH                       00240000
+                                                                        00250000
+         EJECT                                                          00260000
+         SPCBLOCK ,                                                     00270000
+                                                                        00280000
+         EJECT                                                          00290000
+         SPCEQUS ,                                                      00300000
+                                                                        00310000
+         EJECT                                                          00320000
+         OIE   ,                                                        00330000
+                                                                        00340000
+         EJECT                                                          00350000
+         MAPSEG ,                                                       00360000
+                                                                        00370000
+         EJECT                                                          00380000
+         EQUS  ,                                                        00390000
+                                                                        00400000
+         EJECT                                                          00410000
+**<DOC-ON>*****************************************************         00420000
+*                                                                       00430000
+* ROUTINE: IDSMAPSV - SPACE MAP SERVICES                                00440000
+*                                                                       00450000
+* DESCRIPTION:                                                          00460000
+*                                                                       00470000
+*    THIS ROUTINE AND THE ASSOCIATED IDSMAPSG SERVICE PERFORM           00480000
+*    ALL STORAGE MAP OPERATIONS, PARTICULARLY THOSE TO ALLOCATE         00490000
+*    NEW SPACE EXTENTS, RELEASE THOSE EXTENTS, AND SEARCH FOR           00500000
+*    FREE SPACE.                                                        00510000
+*                                                                       00520000
+*    SPACE STORAGE ALLOCATION IS A TWO STEP PROCESS.  FIRST, THIS       00530000
+*    SERVICE MUST BE INVOKED WITH THE "STGLOC" FUNCTION TO              00540000
+*    DETERMINE WHETHER A SUITABLE (I.E. CONTIGUOUS) EXTENT OF THE       00550000
+*    PROPER SIZE EXISTS.  IF SO, THE SERVICE IS REINVOKED WITH THE      00560000
+*    "STGRSRV" FUNCTION TO MARK THAT EXTENT ALLOCATED.                  00570000
+*                                                                       00580000
+*    THE "STGRESET" FUNCTION IS USED BY IMPORT AND EXPORT TO RESET      00590000
+*    ALL ALU CHANGE TAGS.                                               00600000
+*                                                                       00610000
+*                                                                       00620000
+* ON ENTRY:                                                             00630000
+*                                                                       00640000
+*    R1  POINTS TO AN OS/VS PARAMETER LIST CONTAINING                   00650000
+*                                                                       00660000
+*         +00 - STORAGE FUNCTION CODE                                   00670000
+*                                                                       00680000
+*               STGLOC   - LOCATE AVAILABLE STORAGE EXTENT              00690000
+*               STGRSRV  - ACQUIRE STORAGE EXTENT                       00700000
+*               STGRLSE  - RELEASE STORAGE EXTENT                       00710000
+*               STGTEST  - TEST STORAGE EXTENT                          00720000
+*               STGRESET - RESET STORAGE UPDATE STATUS                  00730000
+*                                                                       00740000
+*         +04 - ALU # OF EXTENT ORIGIN                                  00750000
+*         +08 - # ALU'S SPANNED IN THE EXTENT                           00760000
+*                                                                       00770000
+*         +12 - PRIMARY ADDR OF SPACE MAP OR ZERO TO SELECT THE         00780000
+*               SPACE MAP ASSOCIATED WITH SPCBLOCK                      00790000
+*                                                                       00800000
+*    A/R10 - AR QUALIFIED ADDRESS OF THE STORAGE SPCBLOCK               00810000
+*                                                                       00820000
+*                                                                       00830000
+* ON EXIT:                                                              00840000
+*                                                                       00850000
+*    R15 CONTAINS ONE OF THE FOLLOWING RETURN CODES                     00860000
+*                                                                       00870000
+*        0 - SPACE FUNCTION COMPLETE / STORAGE AVAILABLE                00880000
+*        4 - STORAGE NOT AVAILABLE (STGTEST)                            00890000
+*       16 - INVALID REQUEST                                            00900000
+*       20 - ALU TRANSLATION ERROR                                      00910000
+*                                                                       00920000
+*                                                                       00930000
+*    R1  ALU # OF EXTENT ORIGIN                                         00940000
+*    R0  # ALU'S SPANNED IN THE EXTENT                                  00950000
+*                                                                       00960000
+**<DOC-OFF>****************************************************         00970000
+         EJECT ,                                                        00980000
+IDSMAPSV @ENTER WORKA=(WORKAREA,WORKLEN)                                00990000
+                                                                        01000000
+         USING SPCBLOCK,R10       CONVENTION                            01010000
+                                                                        01020000
+         LM    R2,R5,0(R1)        FETCH PASSED PARAMETERS               01030000
+*                                 R2 <== FUNCTION                       01040000
+         ST    R3,ALUORG          R3 <== ALU #                          01050000
+         ST    R4,ALUCOUNT        R4 <== # ALU'S                        01060000
+         ST    R5,SPACEMAP        R5 <== SPACE MAP ADDR OR ZERO         01070000
+                                                                        01080000
+         LTR   R4,R4              VALIDATE EXTENT LENGTH                01090000
+         BZ    ERR_REQ                                                  01100000
+*                                                                       01110000
+         CH    R2,=AL2(STGLOC)    LOCATE CALL?                          01120000
+         BNE   STDFUNC            OTHERS HANDLED SEPARATELY             01130000
+                                                                        01140000
+***************************************************************         01150000
+*                                                                       01160000
+*   STORAGE LOCATE FUNCTION HANDLED BY RECURSIVELY INVOKING             01170000
+*   THE 'TEST' FUNCTION TO IDENTIFY A SUITABLE SPACE STORAGE            01180000
+*   EXTENT.  THE SEARCH CONSIDERS ONLY THOSE EXTENTS WHOSE              01190000
+*   ORIGINS LIE ON ALU NUMBERS THAT ARE A MULTIPLE OF THE               01200000
+*   CANDIDATE EXTENT LENGTH.  IT IS CONJECTURED THAT THIS               01210000
+*   WILL HELP TO ACCOMODATE REQUESTS FOR OBJECTS OF GREATLY             01220000
+*   VARYING SIZES.                                                      01230000
+*                                                                       01240000
+***************************************************************         01250000
+         L     R1,SPC_ALU_PREFIX  FIRST CANDIDATE ALU                   01260000
+         AR    R1,R4              ROUNDING UP TO INTEGRAL BOUND         01270000
+         BCTR  R1,0               ADJUST FOR ROUNDING                   01280000
+         SR    R0,R0              PREPARE FOR DIVIDE                    01290000
+         D     R0,ALUCOUNT        DISCARD FRACTIONAL ALU'S              01300000
+         MH    R1,ALUCOUNT+2      ACQUIRE STARTING ALU #                01310000
+         LR    R3,R1              FIRST CANDIDATE ALU                   01320000
+                                                                        01330000
+*--------------------------------------------------------------         01340000
+*   LOOP THRU SPACE MAP SEARCHING FOR UNOCCUPIED EXTENT                 01350000
+*--------------------------------------------------------------         01360000
+TEST_TOP DS    0H                                                       01370000
+         ST    R3,ALUORG          PRESERVE CANDIDATE EXTENT ORIGIN      01380000
+                                                                        01390000
+         L     R15,=A(IDSMAPSV)                                         01400000
+         @CALL (R15),(STGTEST,(R3),(R4),(R5)),MF=(E,MFE_LIST)           01410000
+         B     *+4(R15)           ANALYZE COMPLETION STATUS             01420000
+         B     STDRET                0 - EXTENT LOCATED                 01430000
+         B     TEST_NXT              4 - CANDIDATE EXTENT OCCUPIED      01440000
+         EX    R0,*                  8 - N/A                            01450000
+         EX    R0,*                 12 - N/A                            01460000
+         B     ERR_STG              16 - INTERPRET AS STG NOT AVAIL     01470000
+         B     ERR_ALU              20 - ALU TRANSLATION ERROR          01480000
+                                                                        01490000
+TEST_NXT DS    0H                 CANDIDATE STORAGE IN USE              01500000
+         AR    R3,R4              ADVANCE TO NEXT CANDIDATE ALU         01510000
+         B     TEST_TOP                                                 01520000
+                                                                        01530000
+         EJECT ,                                                        01540000
+***************************************************************         01550000
+*                                                                       01560000
+*   ACQUIRE MAP SEGMENT DESCRIPTOR CORRESPONDING TO ALU EXTENT          01570000
+*                                                                       01580000
+***************************************************************         01590000
+STDFUNC  DS    0H                                                       01600000
+         LA    R15,0(R3,R4)       LOCATE END OF EXTENT                  01610000
+         C     R15,SPC_ALU_COUNT  USABLE STORAGE CAPACITY EXCEEDED?     01620000
+         BH    ERR_REQ            ERROR IF SO                           01630000
+                                                                        01640000
+         @CALL IDSMAPSG,((R3),(R4),MSEGMENT),MF=(E,MFE_LIST)            01650000
+                                                                        01660000
+         @LAE  R9,MSEGMENT        MAP SEGMENT RETURNED                  01670000
+         USING MAPSEG,R9          ADDRESSABILITY                        01680000
+         MVC   SETMASK,MSEGSET    MOD COPY OF ALU ALLOC MASK            01690000
+         MVC   CHGMASK,MSEGCHG    MOD COPY OF ALU CHANGE MASK           01700000
+                                                                        01710000
+*--------------------------------------------------------------         01720000
+*   PREPARE MASK FOR USE DEPENDING ON TYPE OF REQUEST FUNCTION          01730000
+*--------------------------------------------------------------         01740000
+         MVI   UPDATFLG,4         ASSUME SPACE MAP WILL BE UPDATED      01750000
+                                                                        01760000
+         B     *+4(R2)            ANALYZE FUNCTION CODE                 01770000
+         EX    R0,*                  0 - N/A                            01780000
+         B     TEST                  4 - STORAGE TEST                   01790000
+         B     RESERVE               8 - STORAGE RESERVE                01800000
+         B     RELEASE              12 - STORAGE RELEASE                01810000
+         B     RESET                16 - RESET UPDATE STATUS            01820000
+         B     CHANGED              20 - MARK STORAGE CHANGED           01830000
+         B     ERR_REQ              24 - N/A                            01840000
+                                                                        01850000
+TEST     DS    0H                 STORAGE ALLOCATION TEST               01860000
+         MVI   UPDATFLG,0         SPACE MAP NOT UPDATED BY FUNCTION     01870000
+         LA    R8,TESTINST        INSTRUCTIONS FOR SEGMENT TEST         01880000
+         B     SEGSTART           CONTINUE                              01890000
+                                                                        01900000
+RESERVE  DS    0H                 STORAGE RESERVE                       01910000
+         L     R15,SPC_ALU_ALLOC  # ALLOCATED ALUS                      01920000
+         AR    R15,R4             ACCOUNT FOR RESERVE                   01930000
+         ST    R15,SPC_ALU_ALLOC  # ALLOCATED ALUS                      01940000
+         LA    R8,RSRVINST        INSTRUCTIONS FOR RESERVE ACTION       01950000
+         B     SEGSTART           CONTINUE                              01960000
+                                                                        01970000
+RELEASE  DS    0H                 STORAGE RELEASE                       01980000
+         L     R15,SPC_ALU_ALLOC  # ALLOCATED ALUS                      01990000
+         SR    R15,R4             ACCOUNT FOR RELEASE                   02000000
+         ST    R15,SPC_ALU_ALLOC  # ALLOCATED ALUS                      02010000
+         LA    R8,RLSEINST        INSTRUCTIONS FOR RELEASE ACTION       02020000
+         XC    SETMASK,=4X'FF'    INVERT MASK FOR RELEASE FUNCTION      02030000
+         B     SEGSTART           CONTINUE                              02040000
+                                                                        02050000
+RESET    DS    0H                 STORAGE UPDATE RESET                  02060000
+         LA    R8,RSETINST        INSTRUCTIONS FOR RESET ACTION         02070000
+         XC    CHGMASK,=4X'FF'    INVERT / RESET CHANGE BITS            02080000
+         B     SEGSTART           CONTINUE                              02090000
+                                                                        02100000
+CHANGED  DS    0H                 STORAGE UPDATE                        02110000
+         LA    R8,CHGINST         INSTRUCTIONS FOR CHANGE ACTION        02120000
+         B     SEGSTART           CONTINUE                              02130000
+                                                                        02140000
+         EJECT ,                                                        02150000
+***************************************************************         02160000
+*                                                                       02170000
+*   ACQUIRE BITMAP EXTENT LOCATION AND UPDATE MASKS                     02180000
+*                                                                       02190000
+***************************************************************         02200000
+SEGSTART DS    0H                                                       02210000
+         ICM   R11,15,SPACEMAP    SPACE MAP PROVIDED BY CALLER?         02220000
+         BZ    SEGMAP             USE STANDARD MAP IF NOT               02230000
+         @LAE  R11,0(R11,0)       OVERRIDES FROM PSPACE                 02240000
+         B     MAPSTART           READY                                 02250000
+                                                                        02260000
+SEGMAP   DS    0H                                                       02270000
+         @LAE  R11,SPC_STGMAP_OIE LOCATE STORAGE MAP IOE                02280000
+         USING OIE,R11            OIE ADDRESSABILITY                    02290000
+         CLI   UPDATFLG,0         SPACE MAP WILL BE UPDATED?            02300000
+         BE    SEGLOC             SKIP OIE POSTING IF NOT               02310000
+         OIECHG ,                 SPACE MAP UPDATED                     02320000
+                                                                        02330000
+SEGLOC   DS    0H                 CONVERT ALU TO ADDRESS                02340000
+         L     R1,OIESTORG        STORAGE MAP ORIGIN ALU                02350000
+         @ALU  (1)                CONVERT TO ADDRESS                    02360000
+         BNZ   ERR_ALU            SYSTEM FAILURE                        02370000
+         LR    R11,R1             AR QUALIFIED MAP PTR                  02380000
+         DROP  R11                OIE                                   02390000
+                                                                        02400000
+         EJECT ,                                                        02410000
+***************************************************************         02420000
+*                                                                       02430000
+*   APPLY SPECIFIED ACTION AGAINST SPACE MAP SEGMENT                    02440000
+*                                                                       02450000
+*      R11 - ADDR OF NEXT MAP SEGMENT BYTE                              02460000
+*                                                                       02470000
+***************************************************************         02480000
+MAPSTART DS    0H                                                       02490000
+         A     R11,MSEGOFF        SPACE MAP SEGMENT ADDRESS             02500000
+         L     R3,MSEGLEN         BYTE LENGTH OF MAP SEGMENT            02510000
+                                                                        02520000
+MAP_LAST DS    0H                                                       02530000
+         CLI   MSEGSET+2,0        MASK UPDATE FOR LAST BYTE?            02540000
+         BE    MAP_1ST            NOT A SPECIAL CASE                    02550000
+         LR    R2,R11             SAVE ADDR OF MAP SEGMENT BASE         02560000
+         AR    R11,R3             LAST BYTE OF EXTENT + 1               02570000
+         BCTR  R11,0              ADDRESS LAST BYTE                     02580000
+         LA    R1,SETMASK+2       LAST BYTE UPDATE MASKS                02590000
+         BAS   R14,$UPDATE        PERFORM UPDATE                        02600000
+         BCTR  R3,0               ACCOUNT FOR UPDATE ACTION             02610000
+         LR    R11,R2             RESTORE MAP SEGMENT BASE              02620000
+                                                                        02630000
+MAP_1ST  DS    0H                 FIRST BYTE OF MAP SEGMENT             02640000
+         CLI   MSEGSET+0,0        MASK UPDATE FOR FIRST BYTE?           02650000
+         BE    MAP_MID            NOT A SPECIAL CASE                    02660000
+         LA    R1,SETMASK+0       FIRST BYTE UPDATE MASKS               02670000
+         BAS   R14,$UPDATE        PERFORM UPDATE                        02680000
+         LA    R11,1(,R11)        ADVANCE TO MIDDLE/END SEGMENT         02690000
+         BCTR  R3,0               ACCOUNT FOR UPDATE ACTION             02700000
+                                                                        02710000
+MAP_MID  DS    0H                 UPDATE MIDDLE BYTES                   02720000
+         CLI   MSEGSET+1,0        MASK FOR INTERMEDIATE BYTES           02730000
+         BE    STDRET             DONE IF NOT                           02740000
+                                                                        02750000
+MAP_MIDX DS    0H                                                       02760000
+         LA    R1,SETMASK+1       INTERMEDIATE BYTE UPDATE MASK         02770000
+         BAS   R14,$UPDATE        PERFORM UPDATE                        02780000
+         LA    R11,1(,R11)        ADVANCE MAP SEGMENT PTR               02790000
+         BCT   R3,MAP_MIDX        PROCESS ALL MIDDLE BYTES              02800000
+         B     STDRET             DONE IF NOT                           02810000
+         DROP  R9                 MAPSEG                                02820000
+                                                                        02830000
+         EJECT ,                                                        02840000
+***************************************************************         02850000
+*                                                                       02860000
+*   RETURN COMPLETION STATUS TO CALLER                                  02870000
+*                                                                       02880000
+***************************************************************         02890000
+STDRET   DS    0H                 NORMAL COMPLETION                     02900000
+         LA    R15,RC00                                                 02910000
+         B     RET                                                      02920000
+                                                                        02930000
+ERR_STG  DS    0H                 OCCUPIED / STORAGE NOT AVAILABLE      02940000
+         LA    R15,RC04                                                 02950000
+         B     RET                                                      02960000
+                                                                        02970000
+ERR_REQ  DS    0H                 INVALID REQUEST                       02980000
+         LA    R15,RC16                                                 02990000
+         B     RET                                                      03000000
+                                                                        03010000
+ERR_ALU  DS    0H                 ALU TRANSLATION ERROR                 03020000
+         LA    R15,RC20                                                 03030000
+                                                                        03040000
+RET      DS    0H                                                       03050000
+         L     R1,ALUORG          RETURN ALU # OF EXTENT ORIGIN         03060000
+         L     R0,ALUCOUNT        RETURN # ALU'S SPANNED BY EXTENT      03070000
+                                                                        03080000
+         @EXIT ,                                                        03090000
+                                                                        03100000
+         EJECT                                                          03110000
+***************************************************************         03120000
+*                                                                       03130000
+* ROUTINE:  MAP UPDATE, CHANGE RECORDING, AND ALLOCATION TEST           03140000
+*                                                                       03150000
+* ON ENTRY:                                                             03160000
+*                                                                       03170000
+*    0(R1) - UPDATE MASK                                                03180000
+*    4(R1) - CHANGE MASK                                                03190000
+*    0(R8) - UPDATE INSTRUCTION VECTOR                                  03200000
+*                                                                       03210000
+* ON EXIT:                                                              03220000
+*                                                                       03230000
+*    NON-STD EXIT PERFORMED WHEN ALLOCATION TEST IS POSITIVE            03240000
+*                                                                       03250000
+***************************************************************         03260000
+$UPDATE  DS    0H                 *** MAP UPDATE ***                    03270000
+         IC    R15,4(,R1)         CHANGE RECORDING MASK                 03280000
+         EX    R15,IREC(,R8)      PERFORM ACTION ON BYTE                03290000
+         IC    R15,0(,R1)         ALLOCATION ACTION MASK                03300000
+         EX    R15,ISET(,R8)      PERFORM ACTION ON BYTE                03310000
+         EX    R0,ITEST(,R8)      PERFORM RESULT TEST                   03320000
+         BR    R14                RETURN                                03330000
+                                                                        03340000
+         EJECT ,                                                        03350000
+***************************************************************         03360000
+*                                                                       03370000
+* READ ONLY CONSTANTS, ETC.                                             03380000
+*                                                                       03390000
+***************************************************************         03400000
+IREC     EQU   0                  STORAGE MAP CHANGE RECORDING          03410000
+ISET     EQU   4                  STORAGE MAP ACTION INST               03420000
+ITEST    EQU   8                  STORAGE MAP TEST INST                 03430000
+                                                                        03440000
+TESTINST DS    0H                 TEST ALU ALLOCATE STATUS              03450000
+         TM    0(R11),*-*         REC:  NO ACTION                       03460000
+         TM    0(R11),*-*         SET:  TEST ALU ALLOCATE BIT           03470000
+         BNZ   ERR_STG            TEST: FAST EXIT IF SET (ALLOC)        03480000
+                                                                        03490000
+RSRVINST DS    0H                 ALLOCATE ALU                          03500000
+         TM    0(R11),*-*         REC:  NO ACTION                       03510000
+         OI    0(R11),*-*         SET:  MARK ALU ALLOCATED              03520000
+         NOP   0                  TEST                                  03530000
+                                                                        03540000
+RLSEINST DS    0H                 RELEASE ALU                           03550000
+         OI    0(R11),*-*         REC:  ALU CHANGED                     03560000
+         NI    0(R11),*-*         SET:  ALU UNALLOCATE                  03570000
+         NOP   0                  TEST                                  03580000
+                                                                        03590000
+RSETINST DS    0H                 RESET CHANGE BIT                      03600000
+         NI    0(R11),*-*         REC:  ALU NOT CHANGED                 03610000
+         TM    0(R11),*-*         SET:  NO ACTION                       03620000
+         NOP   0                  TEST                                  03630000
+                                                                        03640000
+CHGINST  DS    0H                 SET CHANGE BIT                        03650000
+         OI    0(R11),*-*         REC:  ALU CHANGED                     03660000
+         TM    0(R11),*-*         SET:  NO ACTION                       03670000
+         NOP   0                  TEST                                  03680000
+                                                                        03690000
+***************************************************************         03700000
+*                                                                       03710000
+*   LOCAL READ-ONLY DATA AREAS                                          03720000
+*                                                                       03730000
+***************************************************************         03740000
+         LTORG ,                                                        03750000
+         END   ,                                                        03760000
