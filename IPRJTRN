@@ -1,0 +1,978 @@
+IPRJTRN  TITLE 'INTEGRATOR - PROJECT TRANSFER SERVICES'                 00010000
+**<DOC-ON>************************************************************* 00020000
+*                                                                       00030000
+* ROUTINE: IPRJTRN - PROJECT TRANSFER SERVICES                          00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    IPRJTRN provides services to import/export a project.  Projects    00080000
+*    are transfered ALU-by-ALU.  Three subfunctions of an IMPORT/EXPORT 00090000
+*    request are needed to transfer a project and must be issued in     00100000
+*    the following sequence:                                            00110000
+*                                                                       00120000
+*       INIT          - to initialize a project import/export           00130000
+*       <unspecified> - to import/export an ALU of the project          00140000
+*       END           - to terminate a project import/export            00150000
+*                                                                       00160000
+*    All subfunctions require a caller supplied project-transfer        00170000
+*    control area (TPC).  It's contents must be preserved between       00180000
+*    calls until the transfer is ENDed.                                 00190000
+*                                                                       00200000
+*    The TERM subfunction is also available to force the release of     00210000
+*    all resources currently in use.  The caller is responsible for     00220000
+*    issuing the TERM function after any failed request.                00230000
+*                                                                       00240000
+* METHOD                                                                00250000
+*                                                                       00260000
+*    An INIT subfunction causes:  the caller supplied TPC to be         00270000
+*    initialized, the specified project is OPENed (export) or NEWed     00280000
+*    (import) to populate a data space, and a data SPACE IMPORT/EXPORT  00290000
+*    is initiated.  Status and control information is saved in the TPC. 00300000
+*                                                                       00310000
+*    An unspecified subfunction causes: an ALU to be imported/exported  00320000
+*    (based on the function value supplied on the INIT request).        00330000
+*                                                                       00340000
+*    An END subfuction causes:  the space import/export to be ended,    00350000
+*    and the project to be closed.  For an import request the project   00360000
+*    is saved to the database prior to closing.                         00370000
+*                                                                       00380000
+*    A TERM subfuction causes:  the space import/export to be ended,    00390000
+*    and the project to be closed WITHOUT saving.  Any errors           00400000
+*    encountered while releasing resources are ignored. It is intended  00410000
+*    for cleanup purposes.                                              00420000
+*                                                                       00430000
+* NOTES:                                                                00440000
+*                                                                       00450000
+*    ALU 0 must be provided on an IMPORT,INIT but it is not imported.   00460000
+*    A seperate ALU import operation is required to actually import     00470000
+*    ALU 0 data.                                                        00480000
+*                                                                       00490000
+*    Workbench access is required to import/export a project.           00500000
+*                                                                       00510000
+* ON ENTRY:                                                             00520000
+*                                                                       00530000
+*    R15 = ENTRY POINT ADDRESS                                          00540000
+*    R14 = RETURN ADDRESS                                               00550000
+*    R13 = WORK AREA                                                    00560000
+*    R11 = ICVT ADDRESS                                                 00570000
+*    R10 = ITASK ADDRESS                                                00580000
+*    R01 = TPR ADDRESS                                                  00590000
+*                                                                       00600000
+* ON EXIT:                                                              00610000
+*                                                                       00620000
+*    R15 = 0 - request successful                                       00630000
+*                                                                       00640000
+*        R0 = IPROJ address (INIT only)                                 00650000
+*        R1 = ALU size (EXPORT INIT only)                               00660000
+*                                                                       00670000
+*    R15 = 4 - end-of-space (EXPORT only)                               00680000
+*                                                                       00690000
+*    R15 = 8 - service error                                            00700000
+*                                                                       00710000
+*        return code, reason code and info are in TPC                   00720000
+*                                                                       00730000
+*    R15 = 12 - project request error                                   00740000
+*                                                                       00750000
+*        R0 = project return code                                       00760000
+*                                                                       00770000
+*    R15 = 16 - request error                                           00780000
+*                                                                       00790000
+*    ALL OTHER REGISTERS ARE RESTORED.                                  00800000
+*                                                                       00810000
+**<DOC-OFF>************************************************************ 00820000
+         EJECT ,                                                        00830000
+*********************************************************************** 00840000
+*                                                                       00850000
+* MAINTENANCE:                                                          00860000
+*                                                                       00870000
+*   04/22/94 TIM WELTZER                                                00880000
+*                                                                       00890000
+*   12/06/94 R. Turgeon                                                 00900000
+*            Removed PAGE= / SHRPAGE= for $SPACE, $OBJECT,              00910000
+*            and TB* service requests                                   00920000
+*                                                                       00930000
+*   05/03/95 T. Weltzer                                                 00940000
+*            Corrected data source-length value for MVCL in DAT2ALU.    00950000
+*                                                                       00960000
+*********************************************************************** 00970000
+                                                                        00980000
+         EJECT ,                                                        00990000
+         EQUS  ,                                                        01000000
+                                                                        01010000
+RICVT    EQU   R11                ICVT                                  01020000
+RITASK   EQU   R10                ITASK                                 01030000
+RTPR     EQU   R9                 PROJECT TRANSFER REQUEST              01040000
+RTPC     EQU   R8                 PROJECT TRANSFER CONTROL              01050000
+RIPCB    EQU   R2                 IPCB                                  01060000
+                                                                        01070000
+         EJECT ,                                                        01080000
+         $PRJTRN DSECT=YES                                              01090000
+                                                                        01100000
+         EJECT ,                                                        01110000
+         $SAF DSECT=YES           SECURITY                              01120000
+                                                                        01130000
+         EJECT ,                                                        01140000
+WRK      #WORK                                                          01150000
+                                                                        01160000
+WKSAFMFL $SAF  MF=(L,*)           $SAF PLIST                            01170000
+                                                                        01180000
+WREGS    DS    16F                SUBROUTINE REGISTER SAVE AREA         01190000
+                                                                        01200000
+WDFMT    DS    X                  ALU DATA FORMAT FLAGS                 01210000
+#WDFTRIM EQU   X'01'                TRIMMED                             01220000
+#WDFSQSH EQU   X'02'                SQUISHED                            01230000
+                                                                        01240000
+WDLEN    DS    F                  ALU DATA LENGTH                       01250000
+WISYS    DS    F                  ISYS ADDRESS                          01260000
+WTOKLEN  DS    F                  UTOKEN LENGTH                         01270000
+WERRORL  DS    F                  LENGTH OF ERROR DATA                  01280000
+WRKMSGB  DS    XL512              MESSAGE BUFFER                        01290000
+WRK256   DS    XL256              PLIST AREA                            01300000
+                                                                        01310000
+         #ENDWORK                                                       01320000
+                                                                        01330000
+         EJECT ,                                                        01340000
+                                                                        01350000
+         $MSGDFT PREFIX=ICTPID,COMPID='PRJ',TABLE=*#MSGS,              +01360000
+               CONID=*ICTCONID,CONNAME=ICTCONNM,                       +01370000
+               MF=(E,WRK256)                                            01380000
+                                                                        01390000
+         EJECT ,                                                        01400000
+IPRJTRN  #ENTER BASE=R12,                                              +01410000
+               PREG=(RTPR),                                            +01420000
+               AMODE=31,                                               +01430000
+               RMODE=ANY                                                01440000
+                                                                        01450000
+         USING ITASK,RITASK       RITASK --> ITASK                      01460000
+         USING TPR,RTPR           RTPR --> TPR                          01470000
+*                                                                       01480000
+* Validate/route request.                                               01490000
+*                                                                       01500000
+         ICM   RTPC,B'1111',TPRTPC@ TPC SUPPLIED ?                      01510000
+         BZ    ERR_NOTPC            NO, ERROR                           01520000
+                                                                        01530000
+         USING TPC,RTPC           RTPC --> TPC                          01540000
+                                                                        01550000
+         L     R1,TPRSFUNC        SUBFUNCTION                           01560000
+                                                                        01570000
+         C     R1,=A(#TPRSINI)    INIT ?                                01580000
+         BE    INIT_TRN             YES, INITIALIZE IMPORT/EXPORT       01590000
+                                                                        01600000
+         CLC   TPCTAG,=C'TPC*'    TAG OK ?                              01610000
+         BNE   ERR_BADTAG           NO, ERROR                           01620000
+                                                                        01630000
+         C     R1,=A(#TPRSEND)    END ?                                 01640000
+         BE    END_TRN              YES, END IMPORT/EXPORT              01650000
+                                                                        01660000
+         C     R1,=A(#TPRSTRM)    TERMINATE ?                           01670000
+         BE    TRM_TRN              YES, TERMINATE IMPORT/EXPORT        01680000
+                                                                        01690000
+         LTR   R1,R1              VALID ?                               01700000
+         BNZ   ERR_BADSF            NO, ERROR                           01710000
+                                                                        01720000
+         TM    TPCFLAGS,#TPCFERR  PRIOR ERROR ?                         01730000
+         BO    ERR_ERR              YES, ERROR                          01740000
+                                                                        01750000
+         ICM   R1,B'1111',TPRDATA@ ALU DATA SUPPLIED ?                  01760000
+         BZ    ERR_ALU@             NO, ERROR                           01770000
+                                                                        01780000
+         ICM   R1,B'1111',TPRALU#@ ALU NUMBER SUPPLIED ?                01790000
+         BZ    ERR_ALU#              NO, ERROR                          01800000
+                                                                        01810000
+         L     R1,TPCFUNC         INIT'S FUNCTION                       01820000
+         ICM   R2,B'1111',TPRFUNC REQUEST'S FUNCTION                    01830000
+         BZ    USE_INIT           SUPPLIED ? NO, USE INIT'S             01840000
+                                                                        01850000
+         CR    R2,R1              SAME AS INIT'S ?                      01860000
+         BNE   ERR_NOMATCH          NO, ERROR                           01870000
+                                                                        01880000
+USE_INIT DS 0H                                                          01890000
+         C     R1,=A(#TPRFEXP)    EXPORT ?                              01900000
+         BE    EXPORT               YES, EXPORT                         01910000
+                                                                        01920000
+*---------------------------------------------------------------------- 01930000
+* Import                                                                01940000
+*---------------------------------------------------------------------- 01950000
+                                                                        01960000
+IMPORT   DS 0H                                                          01970000
+                                                                        01980000
+         BAS   R14,DAT2ALU        CONVERT ALU-DATA TO ALU FORMAT        01990000
+                                                                        02000000
+         $SPACE IMPORT,           IMPORT AN ALU                        +02010000
+               ADDR=*TPCALU@,     I/  - SOURCE BUFFER                  +02020000
+               ALU=*TPRALU#@,     I/  - ALU NUMBER                     +02030000
+               TOKEN=*TPCPTKN@,   I/  - SPACE HANDLE                   +02040000
+               MF=(E,WRK256)                                            02050000
+                                                                        02060000
+         BNZ   ERR_SPIMP          IMPORTED ? NO, ERROR                  02070000
+         LA    R15,0              INICATE IMPORT SUCCESSFUL             02080000
+         B     RETURN             IMPORTED - EXIT                       02090000
+                                                                        02100000
+*---------------------------------------------------------------------- 02110000
+* Export                                                                02120000
+*---------------------------------------------------------------------- 02130000
+                                                                        02140000
+EXPORT   DS 0H                                                          02150000
+                                                                        02160000
+         $SPACE EXPORT,           EXPORT AN ALU                        +02170000
+               ADDR=*TPCALU@,      /O - TARGET BUFFER                  +02180000
+               ALU=*TPRALU#@,      /O - ALU NUMBER                     +02190000
+               CHKPT=TPCSPCHK,    I/O - CHECKPOINT AREA                +02200000
+               TOKEN=*TPCPTKN@,   I/  - PROJECT SPACE TOKEN            +02210000
+               MF=(E,WRK256)                                            02220000
+                                                                        02230000
+         C     R15,=F'4'          ERROR ?                               02240000
+         BH    ERR_SPEXP            YES, ERROR                          02250000
+         BE    RETURN               END-OF-SPACE ? YES, INDICATE END    02260000
+                                                                        02270000
+         BAS   R14,ALU2DAT        CONVERT ALU TO ALU-DATA FORMAT        02280000
+                                                                        02290000
+         LA    R15,0              INICATE EXPORT SUCCESSFUL             02300000
+         B     RETURN             EXPORTED - EXIT                       02310000
+                                                                        02320000
+*---------------------------------------------------------------------- 02330000
+* INIT subfunction (IMPORT/EXPORT function)                             02340000
+*---------------------------------------------------------------------- 02350000
+                                                                        02360000
+INIT_TRN DS 0H                                                          02370000
+*                                                                       02380000
+* Validate IMPORT/EXPORT INIT parms and initialize TPC                  02390000
+*                                                                       02400000
+         LA    R14,TPC            CLEAR TPC                             02410000
+         LA    R15,TPCLEN                                               02420000
+         SR    R1,R1                                                    02430000
+         MVCL  R14,0                                                    02440000
+                                                                        02450000
+         MVC   TPCTAG,=C'TPC*'    TAG TPC                               02460000
+         ICM   R1,B'1111',TPRPROJ@ PROJECT SUPPLIED ?                   02470000
+         BZ    ERR_NOPROJ            NO, ERROR                          02480000
+                                                                        02490000
+         MVC   TPCPROJ,0(R1)      SAVE PROJECT NAME                     02500000
+                                                                        02510000
+         L     R1,TPRFUNC         GET FUNCTION                          02520000
+         LTR   R1,R1              FUNCTION TOO SMALL ?                  02530000
+         BNP   ERR_BADFUNC          YES, ERROR                          02540000
+                                                                        02550000
+         C     R1,=A(#TPRFMAX)    FUNCTION TOO BIG ?                    02560000
+         BH    ERR_BADFUNC          YES, ERROR                          02570000
+                                                                        02580000
+         ST    R1,TPCFUNC         SAVE FUNCTION                         02590000
+         MVC   TPCCONF,TPRCONF    SAVE REPLACE CONFIRMATION             02600000
+         L     R2,TPROPTS         SAVE CONTROL OPTIONS                  02610000
+         STC   R2,TPCOPTS                                               02620000
+                                                                        02630000
+         LA    R2,ISAFA$RD        ASSUME EXPORT - READ ACCESS REQUIRED  02640000
+         C     R1,=A(#TPRFIMP)    IMPORT ?                              02650000
+         BNE   NOT_IMP              NO, CHECK SECURITY                  02660000
+*                                                                       02670000
+* IMPORT,INIT only parm validation                                      02680000
+*                                                                       02690000
+         LA    R2,ISAFA$CN        IMPORT - CONTROL ACCESS REQUIRED      02700000
+                                                                        02710000
+         ICM   R1,B'1111',TPRDATA@ ALU BUFFER SUPPLIED ?                02720000
+         BZ    ERR_ALU@             NO, ERROR. REQUIRED FOR IMPORT      02730000
+                                                                        02740000
+         ICM   R1,B'1111',TPRALUL ALU SIZE SUPPLIED ?                   02750000
+         BZ    ERR_ALUL             NO, ERROR. REQUIRED FOR IMPORT      02760000
+                                                                        02770000
+         ST    R1,TPCALUL         REMEMBER ALU SIZE                     02780000
+                                                                        02790000
+NOT_IMP  DS 0H                                                          02800000
+*                                                                       02810000
+* Check security                                                        02820000
+*                                                                       02830000
+         L     R3,TPRUTKN@        UTOKEN (IF ANY)                       02840000
+         L     R5,TPRMSGBL        ASSUME MESSAGE BUFFER PROVIDED        02850000
+         ICM   R4,B'1111',TPRMSGB@ PROVIDED ?                           02860000
+         BNZ   HAV_BUF              YES, SKIP LOCAL BUFFER USAGE        02870000
+                                                                        02880000
+         LA    R4,WRKMSGB         USE LOCAL BUFFER                      02890000
+         LA    R5,L'WRKMSGB                                             02900000
+                                                                        02910000
+HAV_BUF  DS 0H                                                          02920000
+         $SAF  RESCHK,            AUTHORIZATION TEST                   +02930000
+               CLASS='PROJECT',   PROJECT ACCESS                       +02940000
+               ENTITY=(TPCPROJ),                                       +02950000
+               ACCESS=(R2),                                            +02960000
+               UTOKEN=(R3),                                            +02970000
+               MSGAREA=(R4),                                           +02980000
+               MSGLEN=(R5),                                            +02990000
+               MF=(E,WKSAFMFL)                                          03000000
+                                                                        03010000
+         C     R15,=A(RC04)       VIOLATION LIKELY?                     03020000
+         BH    ERR_SECURITY         YES, DONE                           03030000
+                                                                        03040000
+*                                                                       03050000
+* Protect current open project (if any)                                 03060000
+*                                                                       03070000
+         L     R1,TSKPCBC                                               03080000
+         USING IPCB,R1            R1 --> IPCB                           03090000
+         ICM   R1,B'1111',PCBUSER IUSER ?                               03100000
+         BZ    INI_NOIUSER          NO, SKIP PROJECT SAVE               03110000
+                                                                        03120000
+         USING IUSER,R1           R1 --> IUSER                          03130000
+         MVC   TPCUPROJ,USRPROJ   SAVE OPEN PROJECT                     03140000
+         DROP  R1                                                       03150000
+                                                                        03160000
+INI_NOIUSER DS 0H                                                       03170000
+*                                                                       03180000
+* Function dependent initialization                                     03190000
+*                                                                       03200000
+         L     R1,TPCFUNC         FUNCTION DEPENDENT INITIALIZATION     03210000
+         SLL   R1,2                                                     03220000
+         B     *(R1)                                                    03230000
+         B     INI_IMPORT                                               03240000
+         B     INI_EXPORT                                               03250000
+                                                                        03260000
+*---------------------------------------------------------------------- 03270000
+* IMPORT INIT                                                           03280000
+*---------------------------------------------------------------------- 03290000
+                                                                        03300000
+INI_IMPORT DS 0H                                                        03310000
+*                                                                       03320000
+* Allocate ALU buffer                                                   03330000
+*                                                                       03340000
+         $GETSTOR *TPCALUL,LOC=RES ALLOCATE ALU BUFFER                  03350000
+                                                                        03360000
+         ST    R1,TPCALU@         SAVE ALU BUFFER ADDRESS               03370000
+                                                                        03380000
+         BAS   R14,DAT2ALU        CONVERT ALU-DATA TO ALU FORMAT        03390000
+*                                                                       03400000
+* Prepare for project import                                            03410000
+*                                                                       03420000
+         MVC   TPCPACC,=A(IPJXA_WB) WORKBENCH ACCESS REQUIRED           03430000
+                                                                        03440000
+         $PRJREQ NEW,             OPEN PROJECT                         +03450000
+               NAME=TPCPROJ,      I/  - PROJECT TO OPEN                +03460000
+               ACCESS=*TPCPACC,   I/  - ACCESS TYPE                    +03470000
+               RETINFO=TPCPXRET,   /O - RETURN INFORMATION             +03480000
+               USING=*TPCALU@,    I/  - ALU MODEL                      +03490000
+               CONF=*TPCCONF,     I/  - "REPLACE" CONFIRMATION         +03500000
+               ERROR=ERR_PRJN,    I/  - ERROR EXIT                     +03510000
+               MF=(E,WRK256)                                            03520000
+                                                                        03530000
+         LTR   R1,R1              IPROJ EXIST ?                         03540000
+         BZ    ERR_IPROJ            NO, ERROR                           03550000
+                                                                        03560000
+         USING IPROJ,R1           R1 --> IPROJ                          03570000
+         ST    R1,TPCIPROJ        SAVE IPROJ ADDRESS                    03580000
+         LA    R1,PRJTOKEN        SAVE $SPACE TOKEN ADDRESS ...         03590000
+         DROP  R1                                                       03600000
+         ST    R1,TPCPTKN@        ... ALSO, PROJECT OPENED INDICATOR    03610000
+*                                                                       03620000
+* Prepare for space import                                              03630000
+*                                                                       03640000
+         $SPACE IMPORT,START,     SIGNAL START-OF-SPACE-IMPORT         +03650000
+               TOKEN=*TPCPTKN@,   I/  - PROJECT $SPACE TOKEN           +03660000
+               MF=(E,WRK256)                                            03670000
+                                                                        03680000
+         BNZ   ERR_STRSPIMP       STARTED ? NO, ERROR                   03690000
+                                                                        03700000
+         OI    TPCFLAGS,#TPCFSPC  REMEMBER STARTED                      03710000
+         L     R0,TPCIPROJ        R0 = IPROJ ADDRESS                    03720000
+         LA    R15,0              INDICATE SUCCESS                      03730000
+         B     RETURN             RETURN TO CALLER                      03740000
+                                                                        03750000
+*---------------------------------------------------------------------- 03760000
+* EXPORT INIT                                                           03770000
+*---------------------------------------------------------------------- 03780000
+                                                                        03790000
+INI_EXPORT DS 0H                                                        03800000
+*                                                                       03810000
+* Prepare for project export                                            03820000
+*                                                                       03830000
+         MVC   TPCPACC,=A(IPJXA_WB) WORKBENCH ACCESS                    03840000
+                                                                        03850000
+         $PRJREQ OPEN,            OPEN PROJECT                         +03860000
+               NAME=TPCPROJ,      I/  - PROJECT TO OPEN                +03870000
+               ACCESS=*TPCPACC,   I/  - ACCESS TYPE                    +03880000
+               RETINFO=TPCPXRET,   /O - RETURN INFORMATION             +03890000
+               CONF=*TPCCONF,     I/  - "REPLACE" CONFIRMATION         +03900000
+               ERROR=ERR_PRJO,    I/  - ERROR ROUTINE                  +03910000
+               MF=(E,WRK256)                                            03920000
+                                                                        03930000
+         LTR   R1,R1              IPROJ EXIST ?                         03940000
+         BZ    ERR_IPROJ            NO, ERROR                           03950000
+                                                                        03960000
+         USING IPROJ,R1           R1 --> IPROJ                          03970000
+         ST    R1,TPCIPROJ        SAVE IPROJ ADDRESS                    03980000
+         LA    R1,PRJTOKEN        SAVE $SPACE TOKEN ADDRESS ...         03990000
+         DROP  R1                                                       04000000
+                                                                        04010000
+         ST    R1,TPCPTKN@        ... ALSO, PROJECT OPENED INDICATOR    04020000
+*                                                                       04030000
+* Prepare space export                                                  04040000
+*                                                                       04050000
+         $SPACE EXPORT,START,     SIGNAL START-OF-SPACE-EXPORT         +04060000
+               SELECT=ACTIVE,     I/  - ALL ALU'S                      +04070000
+               CHKPT=TPCSPCHK,     /O - CHECKPOINT AREA                +04080000
+               TOKEN=*TPCPTKN@,   I/  - PROJECT $SPACE TOKEN           +04090000
+               MF=(E,WRK256)                                            04100000
+*                                                                       04110000
+* R15=0 implies ok, r1 = alu size                                       04120000
+* R15=4 implies objects updated, r1 = ALU size                          04130000
+*                                                                       04140000
+         C     R15,=F'4'          SPACE EXPORT STARTED ?                04150000
+         BH    ERR_STRSPEXP         NO, ERROR                           04160000
+                                                                        04170000
+         OI    TPCFLAGS,#TPCFSPC  REMEMBER STARTED                      04180000
+         ST    R1,TPCALUL         SAVE ALU SIZE                         04190000
+*                                                                       04200000
+* Allocate ALU buffer                                                   04210000
+*                                                                       04220000
+         $GETSTOR *TPCALUL,LOC=RES ALLOCATE ALU BUFFER                  04230000
+                                                                        04240000
+         ST    R1,TPCALU@         SAVE ALU BUFFER ADDRESS               04250000
+                                                                        04260000
+         L     R0,TPCIPROJ        R0=IPROJ ADDRESS                      04270000
+         L     R1,TPCALUL         R1=ALU SIZE                           04280000
+         LA    R15,0              INDICATE SUCCESS                      04290000
+         B     RETURN             RETURN TO CALLER                      04300000
+                                                                        04310000
+         EJECT ,                                                        04320000
+*---------------------------------------------------------------------- 04330000
+* END subfunction (IMPORT/EXPORT function)                              04340000
+*---------------------------------------------------------------------- 04350000
+                                                                        04360000
+END_TRN  DS 0H                                                          04370000
+         CLC   TPCFUNC,=A(#TPRFIMP) IMPORT ?                            04380000
+         BE    END_IMPORT             YES, END IMPORT                   04390000
+                                                                        04400000
+         BAS   R14,ENDSPEXP       END SPACE EXPORT                      04410000
+         BNZ   ERR_ENDSPEXP       ERROR ? YES, REPORT IT                04420000
+         B     END_COMMON                                               04430000
+                                                                        04440000
+END_IMPORT DS 0H                                                        04450000
+         BAS   R14,ENDSPIMP       END SPACE IMPORT                      04460000
+         BNZ   ERR_ENDSPIMP       ERROR ? YES, REPORT IT                04470000
+                                                                        04480000
+         ICM   R1,B'1111',TPCPTKN@ PROJECT OPENED ?                     04490000
+         BZ    END_COMMON           NO, SKIP SAVE                       04500000
+                                                                        04510000
+         TM    TPCFLAGS,#TPCFERR  PRIOR ERROR ?                         04520000
+         BO    END_COMMON           YES, SKIP SAVE                      04530000
+                                                                        04540000
+         $PRJREQ SAVEALL,         SAVE PROJECT                         +04550000
+               NAME=TPCPROJ,      I/  - PROJECT NAME                   +04560000
+               ACCESS=*TPCPACC,   I/  - ACCESS TYPE                    +04570000
+               RETINFO=TPCPXRET,   /O - RETURN INFORMATION             +04580000
+               CONF=*TPCCONF,     I/  - "REPLACE" CONFIRMATION         +04590000
+               ERROR=ERR_PRJS,    I/  - ERROR EXIT                     +04600000
+               MF=(E,WRK256)                                            04610000
+                                                                        04620000
+END_COMMON DS 0H                                                        04630000
+         BAS   R14,CLOSEPRJ       CLOSE PROJECT                         04640000
+         BNZ   ERR_PRJS           ERROR ? YES, REPORT IT                04650000
+         BAS   R14,FREEBUFF       FREE ALU BUFFER                       04660000
+*                                                                       04670000
+* Restore open project (if any)                                         04680000
+*                                                                       04690000
+         L     R2,TSKPCBC                                               04700000
+         USING IPCB,R2            R2 --> IPCB                           04710000
+         ICM   R2,B'1111',PCBUSER IUSER ?                               04720000
+         BZ    END_NOIUSER          NO, SKIP PROJECT RESTORE            04730000
+                                                                        04740000
+         USING IUSER,R2           R2 --> IUSER                          04750000
+         MVC   USRPROJ,TPCUPROJ   RESOTRE OPEN PROJECT                  04760000
+         DROP  R2                                                       04770000
+                                                                        04780000
+END_NOIUSER DS 0H                                                       04790000
+         LA    R14,TPC            CLEAR TPC                             04800000
+         LA    R15,TPCLEN                                               04810000
+         SR    R1,R1                                                    04820000
+         MVCL  R14,0                                                    04830000
+         LA    R15,0              INDICATE SUCCESSS                     04840000
+         B     RETURN             RETURN TO CALLER                      04850000
+                                                                        04860000
+         EJECT ,                                                        04870000
+*---------------------------------------------------------------------- 04880000
+* TERMinate subfunction (IMPORT/EXPORT function)                        04890000
+*---------------------------------------------------------------------- 04900000
+                                                                        04910000
+TRM_TRN  DS 0H                                                          04920000
+         L     R14,=A(ENDSPEXP)   ASSUME EXPORT                         04930000
+         CLC   TPCFUNC,=A(#TPRFIMP) IMPORT ?                            04940000
+         BNE   TRM_COMMON                                               04950000
+         L     R14,=A(ENDSPIMP)       NO, END IMPORT                    04960000
+                                                                        04970000
+TRM_COMMON DS 0H                                                        04980000
+         BASR  R14,R14            END SPACE IMPORT/EXPORT               04990000
+         BAS   R14,CLOSEPRJ       CLOSE PROJECT                         05000000
+*                                                                       05010000
+* Restore open project (if any)                                         05020000
+*                                                                       05030000
+         L     R2,TSKPCBC                                               05040000
+         USING IPCB,R2            R2 --> IPCB                           05050000
+         ICM   R2,B'1111',PCBUSER IUSER ?                               05060000
+         BZ    TRM_NOIUSER          NO, SKIP PROJECT RESTORE            05070000
+                                                                        05080000
+         USING IUSER,R2           R2 --> IUSER                          05090000
+         MVC   USRPROJ,TPCUPROJ   RESOTRE OPEN PROJECT                  05100000
+         DROP  R2                                                       05110000
+                                                                        05120000
+TRM_NOIUSER DS 0H                                                       05130000
+         LA    R14,TPC            CLEAR TPC                             05140000
+         LA    R15,TPCLEN                                               05150000
+         SR    R1,R1                                                    05160000
+         MVCL  R14,0                                                    05170000
+         LA    R15,0              INDICATE SUCCESSS                     05180000
+         B     RETURN             RETURN TO CALLER                      05190000
+                                                                        05200000
+         EJECT ,                                                        05210000
+*---------------------------------------------------------------------- 05220000
+* FREE ALU BUFFER                                                       05230000
+*---------------------------------------------------------------------- 05240000
+                                                                        05250000
+FREEBUFF DS 0H                                                          05260000
+         STM   R0,R15,WREGS       SAVE CALLER'S REGISTERS               05270000
+                                                                        05280000
+         ICM   R2,B'1111',TPCALU@ ALLOCATED ?                           05290000
+         BZ    FREB_END             NO, SKIP FREE                       05300000
+                                                                        05310000
+         $RETSTOR (R2)                                                  05320000
+                                                                        05330000
+         XC    TPCALU@,TPCALU@    BUFFER FREED                          05340000
+         LTR   R15,R15            SET CC                                05350000
+                                                                        05360000
+FREB_END DS 0H                                                          05370000
+         LM    R0,R15,WREGS       RESTORE CALLER'S REGISTERS            05380000
+         BR    R14                RETURN                                05390000
+                                                                        05400000
+         EJECT ,                                                        05410000
+*---------------------------------------------------------------------- 05420000
+* END SPACE EXPORT                                                      05430000
+*---------------------------------------------------------------------- 05440000
+                                                                        05450000
+ENDSPEXP DS 0H                                                          05460000
+         STM   R0,R15,WREGS       SAVE CALLER'S REGISTERS               05470000
+                                                                        05480000
+         SR    R15,R15            ASSUME NO ERROR                       05490000
+         TM    TPCFLAGS,#TPCFSPC  EXPORT STARTED ?                      05500000
+         BZ    SPEX_END             NO, DONE                            05510000
+                                                                        05520000
+         $SPACE EXPORT,END,       SIGNAL END-OF-SPACE-EXPORT           +05530000
+               CHKPT=TPCSPCHK,     /O - CHECKPOINT AREA                +05540000
+               TOKEN=*TPCPTKN@,   I/  - PROJECT SPACE TOKEN            +05550000
+               MF=(E,WRK256)                                            05560000
+                                                                        05570000
+         NI    TPCFLAGS,X'FF'-#TPCFSPC END EXPORT                       05580000
+                                                                        05590000
+SPEX_END DS 0H                                                          05600000
+         LM    R2,R14,WREGS+8     RESTORE CALLER'S REGISTERS            05610000
+         LTR   R15,R15            SET CC                                05620000
+         BR    R14                RETURN TO CALLER                      05630000
+                                                                        05640000
+         EJECT ,                                                        05650000
+*---------------------------------------------------------------------- 05660000
+* END SPACE IMPORT                                                      05670000
+*---------------------------------------------------------------------- 05680000
+                                                                        05690000
+ENDSPIMP DS 0H                                                          05700000
+         STM   R0,R15,WREGS       SAVE CALLER'S REGISTERS               05710000
+                                                                        05720000
+         SR    R15,R15            PRESUME NORMAL COMPLETION             05730000
+         TM    TPCFLAGS,#TPCFSPC  IMPORT STARTED ?                      05740000
+         BZ    SPIM_END             NO, DONE                            05750000
+                                                                        05760000
+         $SPACE IMPORT,END,       SIGNAL END-OF-SPACE-IMPORT           +05770000
+               TOKEN=*TPCPTKN@,   I/  - PROJECT SPACE TOKEN            +05780000
+               MF=(E,WRK256)                                            05790000
+                                                                        05800000
+         NI    TPCFLAGS,X'FF'-#TPCFSPC END IMPORT                       05810000
+                                                                        05820000
+SPIM_END DS 0H                                                          05830000
+         LM    R2,R14,WREGS+8     RESTORE CALLER'S REGISTERS            05840000
+         LTR   R15,R15            SET CC                                05850000
+         BR    R14                RETURN TO CALLER                      05860000
+                                                                        05870000
+         EJECT ,                                                        05880000
+*---------------------------------------------------------------------- 05890000
+* CLOSE PROJECT                                                         05900000
+*---------------------------------------------------------------------- 05910000
+                                                                        05920000
+CLOSEPRJ DS 0H                                                          05930000
+         STM   R0,R15,WREGS       SAVE CALLER'S REGISTERS               05940000
+                                                                        05950000
+         ICM   R1,B'1111',TPCPTKN@ PROJECT OPENED ?                     05960000
+         BZ    CLOSE_END            NO, DONE                            05970000
+                                                                        05980000
+         $PRJREQ CLOSE,           CLOSE PROJECT                        +05990000
+               NAME=TPCPROJ,       I/  - PROJECT TO CLOSE              +06000000
+               ACCESS=*(TPCPACC),  I/  - ACCESS TYPE                   +06010000
+               RETINFO=TPCPXRET,    /O - RETURN INFORMATION            +06020000
+               CONF=*(TPCCONF),    I/  - CONFIRM REPLACE               +06030000
+               MF=(E,WRK256)                                            06040000
+                                                                        06050000
+         XC    TPCPTKN@,TPCPTKN@  ASSUME CLOSED                         06060000
+                                                                        06070000
+CLOSE_END DS 0H                                                         06080000
+         LM    R0,R15,WREGS       RESTORE CALLER'S REGISTERS            06090000
+         BR    R14                RETURN TO CALLER                      06100000
+                                                                        06110000
+         EJECT ,                                                        06120000
+*---------------------------------------------------------------------- 06130000
+* Request errors (TPC not available for reporting)                      06140000
+*---------------------------------------------------------------------- 06150000
+                                                                        06160000
+ERR_NOTPC DS 0H                                                         06170000
+         L    R0,=F'4'                                                  06180000
+         B    ERR_REQUEST                                               06190000
+                                                                        06200000
+ERR_BADTAG DS 0H                                                        06210000
+         L    R0,=F'8'                                                  06220000
+         B    ERR_REQUEST                                               06230000
+                                                                        06240000
+ERR_BADSF DS 0H                                                         06250000
+         L    R0,=F'12'                                                 06260000
+         B    ERR_REQUEST                                               06270000
+                                                                        06280000
+ERR_ERR DS 0H                                                           06290000
+         L    R0,=F'16'                                                 06300000
+         B    ERR_REQUEST                                               06310000
+                                                                        06320000
+ERR_ALU@ DS 0H                                                          06330000
+         L    R0,=F'20'                                                 06340000
+         B    ERR_REQUEST                                               06350000
+                                                                        06360000
+ERR_ALU# DS 0H                                                          06370000
+         L    R0,=F'24'                                                 06380000
+         B    ERR_REQUEST                                               06390000
+                                                                        06400000
+ERR_NOMATCH DS 0H                                                       06410000
+         L    R0,=F'28'                                                 06420000
+         B    ERR_REQUEST                                               06430000
+                                                                        06440000
+ERR_NOPROJ DS 0H                                                        06450000
+         L    R0,=F'32'                                                 06460000
+         B    ERR_REQUEST                                               06470000
+                                                                        06480000
+ERR_BADFUNC DS 0H                                                       06490000
+         L    R0,=F'36'                                                 06500000
+         B    ERR_REQUEST                                               06510000
+                                                                        06520000
+ERR_ALUL DS 0H                                                          06530000
+         L    R0,=F'40'                                                 06540000
+         B    ERR_REQUEST                                               06550000
+                                                                        06560000
+ERR_REQUEST DS 0H                                                       06570000
+         LA    R15,RC16           INDICATE REQUEST ERROR                06580000
+         B     RETURN                                                   06590000
+                                                                        06600000
+         EJECT ,                                                        06610000
+*---------------------------------------------------------------------- 06620000
+*                                                                       06630000
+* ERROR ROUTINES                                                        06640000
+*                                                                       06650000
+* Note: r15,r0, and r1 contain error information                        06660000
+*                                                                       06670000
+*---------------------------------------------------------------------- 06680000
+                                                                        06690000
+TYP_ENDSPEXP DC C'Space export end'                                     06700000
+TYP_ENDSPIMP DC C'Space import end'                                     06710000
+TYP_IPROJ    DC C'Iproj locate'                                         06720000
+TYP_PRJC     DC C'Project close'                                        06730000
+TYP_PRJN     DC C'Project new'                                          06740000
+TYP_PRJO     DC C'Project open'                                         06750000
+TYP_PRJS     DC C'Project save all'                                     06760000
+TYP_RESMGR   DC C'Resource manager'                                     06770000
+TYP_SECURITY DC C'Security violation'                                   06780000
+TYP_SPEXP    DC C'Space export'                                         06790000
+TYP_SPIMP    DC C'Space import'                                         06800000
+TYP_STRSPEXP DC C'Space export start'                                   06810000
+TYP_STRSPIMP DC C'Space import start'                                   06820000
+*                                                                       06830000
+* Project errors (OPEN, NEW, CLOSE, SAVEALL)                            06840000
+*                                                                       06850000
+ERR_PRJC DS 0H                                                          06860000
+         LA    R2,TYP_PRJC                                              06870000
+         LA    R3,L'TYP_PRJC                                            06880000
+         B     ERR_PROJECT                                              06890000
+                                                                        06900000
+ERR_PRJN DS 0H                                                          06910000
+         LA    R2,TYP_PRJN                                              06920000
+         LA    R3,L'TYP_PRJN                                            06930000
+         B     ERR_PROJECT                                              06940000
+                                                                        06950000
+ERR_PRJO DS 0H                                                          06960000
+         LA    R2,TYP_PRJO                                              06970000
+         LA    R3,L'TYP_PRJO                                            06980000
+         B     ERR_PROJECT                                              06990000
+                                                                        07000000
+ERR_PRJS DS 0H                                                          07010000
+         LA    R2,TYP_PRJS                                              07020000
+         LA    R3,L'TYP_PRJS                                            07030000
+         B     ERR_PROJECT                                              07040000
+                                                                        07050000
+ERR_PROJECT DS 0H                                                       07060000
+         C     R15,=F'8'          PROJECT ERROR MESSAGE AVAILABLE ?     07070000
+         BNE   ERR_COMMON           NO, CREATE ONE                      07080000
+*                                                                       07090000
+* Use error message returned by project request                         07100000
+*                                                                       07110000
+X        USING IPRJXRET,TPCPXRET                                        07120000
+         LA    R2,X.IPJRMSG       PROJECT ERROR MESSAGE                 07130000
+         L     R3,X.IPJRMSGL      PROJECT ERROR MESSAGE LENGTH          07140000
+         L     R15,X.IPJRRET      PROJECT ERROR RETURN CODE             07150000
+         L     R0,X.IPJRRSN       PROJECT ERROR REASON CODE             07160000
+         L     R1,X.IPJRPROJ      PROJECT ERROR INFO                    07170000
+         DROP  X                                                        07180000
+         TM    TPCOPTS,#TPROPM    SUPPRESS PROJECT ERROR MESSAGE ID ?   07190000
+         BZ    ERR_COMMON           NO, USE MESSAGE IDS                 07200000
+                                                                        07210000
+         STM   R15,R1,TPCEREGS    SAVE RC, RSN, INFO IN TPC             07220000
+         L     R5,TPRMSGBL        ASSUME MESSAGE BUFFER PROVIDED        07230000
+         ICM   R4,B'1111',TPRMSGB@ PROVIDED ?                           07240000
+         BNZ   ERR_BUF0             YES, SKIP LOCAL BUFFER USAGE        07250000
+                                                                        07260000
+         LA    R4,WRKMSGB         USE LOCAL BUFFER                      07270000
+         LA    R5,L'WRKMSGB                                             07280000
+                                                                        07290000
+ERR_BUF0 DS 0H                                                          07300000
+         $MSG  277,               COPY MESSAGE                         +07310000
+               FIELDS=(((R2),(R3))),                                   +07320000
+               BUFR=(R4),                                              +07330000
+               BUFL=(R5),                                              +07340000
+               DEST=$BUFFER,                                           +07350000
+               MSGID=NO                                                 07360000
+                                                                        07370000
+         OI    TPCFLAGS,#TPCFERR REMEMBER ERROR                         07380000
+         L     R0,TPCRC          PROJECT REQUEST ERROR RETURN CODE      07390000
+         LA    R15,RC12          INDICATE PROJECT REQUEST ERROR         07400000
+         B     RETURN                                                   07410000
+*                                                                       07420000
+* Other errors                                                          07430000
+*                                                                       07440000
+ERR_ENDSPEXP DS 0H                                                      07450000
+         LA    R2,TYP_ENDSPEXP                                          07460000
+         LA    R3,L'TYP_ENDSPEXP                                        07470000
+         B     ERR_COMMON                                               07480000
+                                                                        07490000
+ERR_ENDSPIMP DS 0H                                                      07500000
+         LA    R2,TYP_ENDSPIMP                                          07510000
+         LA    R3,L'TYP_ENDSPIMP                                        07520000
+         B     ERR_COMMON                                               07530000
+                                                                        07540000
+ERR_IPROJ DS 0H                                                         07550000
+         LA    R2,TYP_IPROJ                                             07560000
+         LA    R3,L'TYP_IPROJ                                           07570000
+         B     ERR_COMMON                                               07580000
+                                                                        07590000
+ERR_RESMGR    DS 0H                                                     07600000
+         LA    R2,TYP_RESMGR                                            07610000
+         LA    R3,L'TYP_RESMGR                                          07620000
+         B     ERR_COMMON                                               07630000
+                                                                        07640000
+ERR_SPEXP DS 0H                                                         07650000
+         LA    R2,TYP_SPEXP                                             07660000
+         LA    R3,L'TYP_SPEXP                                           07670000
+         B     ERR_COMMON                                               07680000
+                                                                        07690000
+ERR_SPIMP DS 0H                                                         07700000
+         LA    R2,TYP_SPIMP                                             07710000
+         LA    R3,L'TYP_SPIMP                                           07720000
+         B     ERR_COMMON                                               07730000
+                                                                        07740000
+ERR_STRSPEXP DS 0H                                                      07750000
+         LA    R2,TYP_STRSPEXP                                          07760000
+         LA    R3,L'TYP_STRSPEXP                                        07770000
+         B     ERR_COMMON                                               07780000
+                                                                        07790000
+ERR_STRSPIMP DS 0H                                                      07800000
+         LA    R2,TYP_STRSPIMP                                          07810000
+         LA    R3,L'TYP_STRSPIMP                                        07820000
+         B     ERR_COMMON                                               07830000
+                                                                        07840000
+ERR_SECURITY DS 0H                (some msgs already in message buf)    07850000
+         LA    R2,TYP_SECURITY                                          07860000
+         LA    R3,L'TYP_SECURITY                                        07870000
+         B     ERR_COMMON                                               07880000
+*                                                                       07890000
+* Dump a message to the log and message buffer.                         07900000
+*                                                                       07910000
+                                                                        07920000
+ERR_COMMON DS 0H                                                        07930000
+                                                                        07940000
+         STM   R15,R1,TPCEREGS    SAVE RC, RSN, INFO IN TPC             07950000
+                                                                        07960000
+         L     R5,TPRMSGBL        ASSUME MESSAGE BUFFER PROVIDED        07970000
+         ICM   R4,B'1111',TPRMSGB@ PROVIDED ?                           07980000
+         BNZ   ERR_BUF              YES, SKIP LOCAL BUFFER USAGE        07990000
+                                                                        08000000
+         LA    R4,WRKMSGB         USE LOCAL BUFFER                      08010000
+         LA    R5,L'WRKMSGB                                             08020000
+                                                                        08030000
+ERR_BUF  DS 0H                                                          08040000
+         $MSG  290,              ISSUE TRANSFER ERROR MESSAGE          +08050000
+               FIELDS=(((R2),(R3)),                                    +08060000
+               TPCRC,TPCRSN,TPCINFO),                                  +08070000
+               BUFR=(R4),                                              +08080000
+               BUFL=(R5),                                              +08090000
+               MSGID=YES                                                08100000
+                                                                        08110000
+         OI    TPCFLAGS,#TPCFERR REMEMBER ERROR                         08120000
+         LA    R15,RC08          INDICATE SERVICE ERROR                 08130000
+         B     RETURN                                                   08140000
+                                                                        08150000
+         EJECT ,                                                        08160000
+*---------------------------------------------------------------------- 08170000
+* Return                                                                08180000
+*---------------------------------------------------------------------- 08190000
+                                                                        08200000
+RETURN   DS 0H                                                          08210000
+                                                                        08220000
+         #EXIT R1=YES             RETURN W/R15,R0,R1                    08230000
+                                                                        08240000
+         EJECT ,                                                        08250000
+*---------------------------------------------------------------------- 08260000
+*                                                                       08270000
+* ROUTINE:  ALU2DAT                                                     08280000
+*                                                                       08290000
+* FUNCTION:                                                             08300000
+*                                                                       08310000
+*   COPY ALU BUFFER INTO RECORD.  FIRST TRIM THE ALU TO                 08320000
+*   CHOP OFF THE TRAILING ZEROS.  THEN ATTEMPT TO SQUISH THE            08330000
+*   ALU INTO THE DATA BUFFER.  IF THE SQUISH FAILS (GETS BIGGER         08340000
+*   INSTEAD OF SMALLER) THEN JUST COPY THE TRIMMED ALU BUFFER.          08350000
+*                                                                       08360000
+* NOTES: SQUISHED IMPLIES TRIM BUT TRIMMED DOES NOT IMPLY SQUISHED      08370000
+*                                                                       08380000
+*---------------------------------------------------------------------- 08390000
+                                                                        08400000
+ALU2DAT  DS    0H                                                       08410000
+         STM   R0,R15,WREGS            SAVE CALLER'S REGISTERS          08420000
+                                                                        08430000
+         XC    WDFMT,WDFMT             INIT RETURNED FORMAT FLAGS       08440000
+                                                                        08450000
+         L     R4,TPCALU@              ALU BUFFER                       08460000
+         L     R3,TPCALUL              ALU LENGTH                       08470000
+         LR    R5,R3                   SAVE FOR POSSIBLE COPY WORK      08480000
+                                                                        08490000
+         ST    R3,WDLEN                INIT DATA LENGTH = ALU SIZE      08500000
+                                                                        08510000
+         TM    TPCOPTS,#TPROSQ         SQUISH DATA ?                    08520000
+         BZ    A2DCOPY                   NO, COPY AS IS                 08530000
+                                                                        08540000
+         @TRIM (R4),(R3),CHAR=0        TRIM ZEROES FROM END             08550000
+                                                                        08560000
+         ST    R1,WDLEN                DATA LENGTH = TRIMMED LENGTH     08570000
+         LR    R5,R1                   SAVE FOR SQUISH/COPY WORK        08580000
+         OI    WDFMT,#WDFTRIM          REMEMBER TRIMMED                 08590000
+                                                                        08600000
+         $CLINK FUNC=SQUISH,           SQUISH SOURCE INTO TARGET       +08610000
+               (CHAR*,(R4)),           I/  - SOURCE BUFFER             +08620000
+               (REGISTER_SHORT,(R5)),  I/  - SOURCE LENGTH (TRIMMED)   +08630000
+               (LONG,TPRDATA@),         /O - TARGET BUFFER             +08640000
+               (REGISTER_SHORT,(R3)),  I/  - TARGET LENGTH MAXIMUM     +08650000
+               (CHAR,ICTZERO)          NON-Extended format              08660000
+                                                                        08670000
+         LTR   R15,R15                 SQUISHED ?                       08680000
+         BM    A2DCOPY                   NO, COPY TRIMMED ALU           08690000
+                                                                        08700000
+         ST    R15,WDLEN               DATA LENGTH = SQUISHED LENGTH    08710000
+         OI    WDFMT,#WDFSQSH          REMEMBER SQUISHED                08720000
+         B     A2DRET                  RETURN                           08730000
+                                                                        08740000
+A2DCOPY  DS    0H                                                       08750000
+         L     R14,TPRDATA@            TARGET BUFFER                    08760000
+         LR    R15,R3                  TARGET BUFFER LENGTH             08770000
+         MVCL  R14,R4                  COPY TO TARGET                   08780000
+                                                                        08790000
+A2DRET   DS    0H                                                       08800000
+         ICM   R1,B'1111',TPRDFMT@     "DFMT" RETURN AREA SUPPLIED ?    08810000
+         BZ    A2D_NODFMT                NO, SKIP RETURN OF DFMT        08820000
+                                                                        08830000
+         MVC   0(L'WDFMT,R1),WDFMT     RETURN DATA FORMAT               08840000
+                                                                        08850000
+A2D_NODFMT DS 0H                                                        08860000
+         ICM   R1,B'1111',TPRDLEN@     "LENGTH" RETURN AREA SUPPLIED ?  08870000
+         BZ    A2D_NOLEN                 NO, SKIP RETURN OF LENGTH      08880000
+                                                                        08890000
+         MVC   0(L'WDLEN,R1),WDLEN     RETURN DATA FORMAT               08900000
+                                                                        08910000
+A2D_NOLEN DS 0H                                                         08920000
+         LM    R0,R15,WREGS            RESTORE CALLER'S REGISTERS       08930000
+         BR    R14                     RETURN                           08940000
+                                                                        08950000
+         EJECT ,                                                        08960000
+*---------------------------------------------------------------------- 08970000
+*                                                                       08980000
+* ROUTINE:  DAT2ALU                                                     08990000
+*                                                                       09000000
+* FUNCTION:                                                             09010000
+*                                                                       09020000
+*   THIS ROUTINE WILL EXPAND THE DATA PORTION OF THE PROJECT            09030000
+*   RECORD INTO ITS ALU DATA REPRESENTATION.  IF THE DATA IN            09040000
+*   RECORD IS TRIMMED AND/OR SQUISHED, IT WILL BE UNSQUISHED            09050000
+*   INTO ITS FULL LENGTH.                                               09060000
+*                                                                       09070000
+*---------------------------------------------------------------------- 09080000
+                                                                        09090000
+DAT2ALU  DS    0H                                                       09100000
+         STM   R0,R15,WREGS            SAVE CALLER'S REGISTERS          09110000
+                                                                        09120000
+         L     R0,TPCALU@              TARGET ALU BUFFER                09130000
+         L     R1,TPCALUL              TARGET MAX ALU LENGTH            09140000
+                                                                        09150000
+         ICM   R15,B'1111',TPRDFMT@    DATA FORMAT SUPPLIED ?           09160000
+         BZ    DATNOFMT                  NO, COPY AS IS                 09170000
+                                                                        09180000
+         TM    0(R15),#WDFSQSH         SQUISHED FORMAT ?                09190000
+         BZ    DATNOSQH                  NO, COPY (MAY BE TRIMMED)      09200000
+                                                                        09210000
+         SR    R15,R15                 CLEAR TARGET                     09220000
+         MVCL  R0,R14                                                   09230000
+                                                                        09240000
+         L     R3,TPCALUL              ASSUME SOURCE LENGTH = ALU SIZE  09250000
+         ICM   R1,B'1111',TPRDLEN@     SOURCE LENGTH SUPPLIED ?         09260000
+         BZ    D2A_USQUISH               NO, UNSQUISH ANYWAY            09270000
+                                                                        09280000
+         L     R3,0(0,R1)              SOURCE LENGTH                    09290000
+                                                                        09300000
+D2A_USQUISH DS 0H                                                       09310000
+         L     R4,TPCALU@              TARGET BUFFER                    09320000
+         L     R5,TPCALUL              LENGTH OF BUFFER                 09330000
+                                                                        09340000
+         $CLINK FUNC=USQUISH,          UNSQUISH ALU DATA               +09350000
+               (LONG,TPRDATA@),        SOURCE BUFFER                   +09360000
+               (REGISTER_SHORT,(R3)),  SOURCE LENGTH                   +09370000
+               (CHAR*,(R4)),           TARGET                          +09380000
+               (REGISTER_SHORT,(R5))   TARGET                           09390000
+                                                                        09400000
+         B     DATRET                  RETURN                           09410000
+                                                                        09420000
+DATNOFMT DS    0H                      NO FORMAT INDICATOR NOT SUPPLIED 09430000
+         LR    R15,R1                  SOURCE LENGTH = TARGET LENGTH    09440000
+         B     DATCOPY                                                  09450000
+                                                                        09460000
+DATNOSQH DS    0H                      FORMAT SUPPLIED - NOT SQUISHED   09470000
+         ICM   R15,B'1111',TPRDLEN@    SOURCE LENGTH SUPPLIED ?         09480000
+         BZ    DATNOFMT                  NO, ASSUME SOURCE = TARGET     09490000
+         ICM   R15,B'1111',0(R15)      NON-ZERO SOURCE LENGTH ?         09500000
+         BZ    DATNOFMT                  NO, ASSUME SOURCE = TARGET     09510000
+                                                                        09520000
+DATCOPY  DS    0H                                                       09530000
+         L     R14,TPRDATA@            SOURCE OF ALU DATA               09540000
+         MVCL  R0,R14                  COPY ALU BUFFER                  09550000
+                                                                        09560000
+DATRET   DS    0H                                                       09570000
+         LM    R0,R15,WREGS            RESTORE CALLER'S REGISTERS       09580000
+         BR    R14                     RETURN                           09590000
+                                                                        09600000
+         EJECT ,                                                        09610000
+*---------------------------------------------------------------------- 09620000
+* Constants                                                             09630000
+*---------------------------------------------------------------------- 09640000
+                                                                        09650000
+         LTORG                                                          09660000
+         EJECT ,                                                        09670000
+*---------------------------------------------------------------------- 09680000
+                                                                        09690000
+         PRINT NOGEN                                                    09700000
+         ICVT  ,                                                        09710000
+         IPCB  ,                                                        09720000
+         IPROJ ,                                                        09730000
+         ITASK ,                                                        09740000
+         IUSER ,                                                        09750000
+         $PRJREQ DSECT=YES        PROJECT REQUEST                       09760000
+*        ICHRUTKN ,               MVS UTOKEN                            09770000
+         END   ,                                                        09780000

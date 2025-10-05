@@ -1,0 +1,791 @@
+IPRJMOVE TITLE 'INTEGRATOR - PROJECT MOVE'                              00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE: IPRJMOVE - Move a project to/from the host.                  00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*   IPRJMOVE is used to import or export a project to or from           00070000
+*   the host.                                                           00080000
+*                                                                       00090000
+* METHOD:                                                               00100000
+*   IPRJMOVE executes as a conversational RU.  The requested            00110000
+*   project is initialized for import/export and ALUs are exchanged     00120000
+*   between a project-space and the RU via project transfer service     00130000
+*   calls ($PRJTRN).  When an RU's worth of ALUs have been processed    00140000
+*   the remote partner is notified.  Processing proceeds with the       00150000
+*   subsequent RU and ALUs.  After all ALUs have been processed         00160000
+*   the project-space transfer is ended.                                00170000
+*                                                                       00180000
+* NOTES:                                                                00190000
+*                                                                       00200000
+* ON ENTRY:                                                             00210000
+*   standard environment - requests are received via $TRECV             00220000
+*                                                                       00230000
+* ON EXIT:                                                              00240000
+*   none                                                                00250000
+*                                                                       00260000
+**<DOC-OFF>****************************************************         00270000
+                                                                        00280000
+***************************************************************         00290000
+*                                                                       00300000
+* MAINTENANCE:                                                          00310000
+*   08/22/94 Tim Weltzer                                                00320000
+*            corrected bug of not returning error data to partner       00330000
+*            when an IMPORT END fails (e.g out-of-space on database)    00340000
+*                                                                       00350000
+***************************************************************         00360000
+         EJECT ,                                                        00370000
+         EQUS  ,                  STANDARD REGISTER EQUATES             00380000
+RXYMV    EQU  8                   INBOUND XYMOVE BLOCK                  00390000
+R@XCV    EQU  7                   @XCV OF OUTBOUND XYMOVE               00400000
+RRU      EQU  6                   OUTBOUND XYMOVE                       00410000
+                                                                        00420000
+         EJECT ,                                                        00430000
+         @XECONV ,                CONVERSATIONAL CONTROL HEADER         00440000
+                                                                        00450000
+         EJECT ,                                                        00460000
+         TMSG  ,                  INTER-TASK SERVICES                   00470000
+                                                                        00480000
+         EJECT ,                                                        00490000
+         $TASK DSECT=YES          TASK SERVICES                         00500000
+                                                                        00510000
+         EJECT ,                                                        00520000
+         $PRJREQ DSECT=YES        PROJECT SERVICES                      00530000
+                                                                        00540000
+         EJECT ,                                                        00550000
+         $PRJTRN DSECT=YES        PROJECT TRANSFER SERVICES             00560000
+                                                                        00570000
+         EJECT ,                                                        00580000
+         XYMOVE DSECT=YES         REQUEST/RESPONSE BLOCK                00590000
+                                                                        00600000
+         EJECT ,                                                        00610000
+         ABCODES PRINT=NOGEN                                            00620000
+                                                                        00630000
+         EJECT ,                                                        00640000
+*---------------------------------------------------------------------- 00650000
+* ALU transport header (ATH)                                            00660000
+* ATH contains control information about the ALU data that follows      00670000
+*---------------------------------------------------------------------- 00680000
+                                                                        00690000
+ATH      DSECT                    ALU TRANSPORT HEADER                  00700000
+ATHLWALU DS    H                  = ATHLEN - L'ATHLWALU + ATHDLEN       00710000
+ATHDFMT  DS    X                  ALU DATA FORMAT FLAGS                 00720000
+         DS    X                  AVAILABLE                             00730000
+ATHSEQ   DS    F                  ALU IMPORT/EXPORT SEQUENCE NUMBER     00740000
+ATHALU#  DS    F                  ALU NUMBER                            00750000
+ATHALUL  DS    F                  ALU SIZE                              00760000
+ATHDLEN  DS    F                  FORMATTED ALU DATA LENGTH             00770000
+ATHALU   DS    0X                 ALU DATA ORIGIN                       00780000
+ATHLEN   EQU   *-ATH              DSECT LENGTH                          00790000
+                                                                        00800000
+         EJECT ,                                                        00810000
+*---------------------------------------------------------------------- 00820000
+* Local variables                                                       00830000
+*---------------------------------------------------------------------- 00840000
+                                                                        00850000
+WORKAREA #WORK                                                          00860000
+*                                                                       00870000
+* plist area                                                            00880000
+*                                                                       00890000
+         ORG   MFE_LIST                                                 00900000
+WTPRPL   $PRJTRN MF=L             $PRJTRN PLIST                         00910000
+         ORG   MFE_LIST                                                 00920000
+WTRCVPL  $TRECV MF=L              $TRECV PLIST                          00930000
+         ORG   MFE_LIST                                                 00940000
+WTSKPL   $TASK MF=L               $TASK PLIST                           00950000
+         ORG   MFE_LIST                                                 00960000
+WXPBPL   $XPBUFR INIT,MF=L        $XPBUFR PLIST                         00970000
+         ORG                                                            00980000
+                                                                        00990000
+WFLAGS   DS   X                   STATUS/CONTROL FLAGS                  01000000
+#WFINIT  EQU  X'01'                 INITIALIZED                         01010000
+#WFIMP   EQU  X'02'                 IMPORTING                           01020000
+#WFERR   EQU  X'04'                 ERROR DETECTED                      01030000
+#WFEND   EQU  X'08'                 NORMAL END                          01040000
+#WFFIN   EQU  X'10'                 FINISHED                            01050000
+#WFBED   EQU  X'20'                 BUFFERED EXPORTED DATA EXISTS       01060000
+#WFRCV   EQU  X'40'                 ABEND RECOVERY CALLED               01070000
+#WFORU   EQU  X'80'                 OUTBOUND RU AVAILABLE               01080000
+#WFEXIT  EQU  #WFFIN+#WFERR+#WFRCV  RETURN TO CALLER                    01090000
+                                                                        01100000
+WPROJ    DS   CL8                 PROJECT NAME                          01110000
+         DS   CL8                 ... EXPANSION                         01120000
+WATH@    DS   A                   ADDRESS OF ATH                        01130000
+WATHL    DS   F                   LENGTH OF ATH (INCLUDES ALU LENGTH)   01140000
+WALUL    DS   F                   ALU BUFFER LENGTH                     01150000
+WALUSEQ  DS   F                   ALU SEQUENCE COUNTER                  01160000
+WRRU     DS   F                   IMPORT/EXPORT ROUTINE ADDRESS         01170000
+WIMPEXP@ DS   A                   IMPORT/EXPORT ROUTINE ADDRESS         01180000
+WUTOKEN@ DS   A                   ADDRESS OF UTOKEN - BELOW OR ZERO     01190000
+WTKN256  DS   XL256               MAXIMUM SIZED UTOKEN                  01200000
+WRCVAREA DS   XL(TMSGSLN)         $TRECV MESSAGE AREA                   01210000
+WTPC     DS   XL(TPCLEN)          TRANSFER-PROJECT CONTROL AREA         01220000
+WMSGBUF  DS   XL512               MESSAGE BUFFER                        01230000
+         #ENDWORK                                                       01240000
+                                                                        01250000
+         EJECT ,                                                        01260000
+*---------------------------------------------------------------------- 01270000
+                                                                        01280000
+         $MSGDFT PREFIX=ICTPID,COMPID='PRJ',TABLE=*#MSGS,              +01290000
+               CONID=*ICTCONID,CONNAME=ICTCONNM,                       +01300000
+               PRINT=NOGEN,MF=(E,MFE_LIST)                              01310000
+                                                                        01320000
+         EJECT ,                                                        01330000
+*---------------------------------------------------------------------- 01340000
+* Main                                                                  01350000
+*---------------------------------------------------------------------- 01360000
+                                                                        01370000
+IPRJMOVE #ENTER PREG=R8                                                 01380000
+                                                                        01390000
+         USING ITASK,R10          RITSK --> ITASK                       01400000
+*        USING @XH,R8             R8 --> XYMV-XH                        01410000
+                                                                        01420000
+         L     R9,TSKPCBC                                               01430000
+         USING IPCB,R9            R9 --> PCB                            01440000
+                                                                        01450000
+         $RCVRY CREATE,RECOVRTN,PARM=(R13),MF=(E,MFE_LIST)              01460000
+         BNZ   ERR_STG                                                  01470000
+         B     RECEIVE            RECEIVE FIRST MESSAGE                 01480000
+                                                                        01490000
+MSG_WAIT DS 0H                                                          01500000
+         $TASK WAIT,              WAIT FOR MESSAGE                     +01510000
+               EPB=*PCB@MEPB,                                          +01520000
+               MESSAGE=RECEIVE,                                        +01530000
+               CANCEL=END_CONV,                                        +01540000
+               STOP=END_CONV,                                          +01550000
+               MF=(E,WTSKPL)                                            01560000
+                                                                        01570000
+RECEIVE  DS 0H                                                          01580000
+         $TASK SETEPB,            PREPARE EPB                          +01590000
+               EPB=*PCB@MEPB,                                          +01600000
+               ECODE=EC$MSG,                                           +01610000
+               SCOPE=LOCAL,                                            +01620000
+               MF=(E,WTSKPL)                                            01630000
+                                                                        01640000
+         $TRECV WRCVAREA,         RECEIVE MESSAGE                      +01650000
+               SCOPE=PCB,                                              +01660000
+               MF=(E,WTRCVPL)                                           01670000
+                                                                        01680000
+         B     JUMP(R15)                                                01690000
+                                                                        01700000
+JUMP     DS 0H                                                          01710000
+         B     RCV_OK             MESSAGE RECEIVED                      01720000
+         B     MSG_WAIT           MESSAGE NOT AVAILABLE                 01730000
+         B     TOO_SMALL          RECEIVE AREA TOO SMALL                01740000
+                                                                        01750000
+RCV_OK   DS 0H                                                          01760000
+                                                                        01770000
+R        USING TMSGSTD,WRCVAREA   WRCVAREA --> TMSGTD                   01780000
+                                                                        01790000
+         L     RXYMV,R.TMSGW1     INBOUND XYMOVE                        01800000
+I        USING XYMOVE,RXYMV       RXYMV --> INBOUND XYMOVE              01810000
+                                                                        01820000
+         L     R@XCV,R.TMSGW2     OUTBOUND @XCV                         01830000
+         USING @XCV,R@XCV         R@XCV --> @XCV                        01840000
+                                                                        01850000
+         TM    I.XYMVSTAT,XYMVSOK CLEAN END TO CONVERSATION ?           01860000
+*        BNZ   END_IMPORT           YES. MUST BE IMPORTING              01870000
+         BNZ   RCV_NOEND            IMPORT MAY END WITH AN ERROR        01880000
+                                                                        01890000
+         TM    I.XYMVSTAT,XYMVSFIN END CONVERSATION ?                   01900000
+         BNZ   END_CONV             YES, END CONVERSATION               01910000
+                                                                        01920000
+RCV_NOEND DS 0H                                                         01930000
+*                                                                       01940000
+* Reserve outbound RU header space and initialize it.                   01950000
+*                                                                       01960000
+         LH    R2,I.XYMVOBJL      OBJECT LENGTH ...                     01970000
+         LA    R2,XYMVRULN(0,R2) ... + FIXED HEADER LENGTH ...          01980000
+                                                                        01990000
+         $XPBUFR ISRT,            ... RESERVE AS RU HEADER SPACE       +02000000
+               DATA=0,            I/  - NO DATA                        +02010000
+               DATALEN=(R2),      I/O - SPACE TO RESERVE               +02020000
+               MF=(E,WXPBPL)                                            02030000
+                                                                        02040000
+         BNZ   ABE_TXP            RESERVED ? NO, ERROR                  02050000
+                                                                        02060000
+         LR    RRU,R1             SAVE OUTBOUND RU ORIGIN               02070000
+         ST    RRU,WRRU                                                 02080000
+O        USING XYMVRU,RRU         RRU --> XYMVRU (OUTBOUND)             02090000
+                                                                        02100000
+         LH    R1,I.XYMVOBJL                                            02110000
+         STH   R1,O.XYMVOBJL      SET OUTBOUND OBJECT LENGTH            02120000
+         LTR   R1,R1              OBJECT OF SUBSTANCE ?                 02130000
+         BZ    RCV_NOOBJ             NO, SKIP COPY                      02140000
+                                                                        02150000
+         BCTR  R1,0               COPY INBOUND OBJECT TO OUTBOUND       02160000
+         EX    R1,*+4                                                   02170000
+         MVC   O.XYMVOBJ(0),I.XYMVOBJ                                   02180000
+                                                                        02190000
+RCV_NOOBJ DS 0H                                                         02200000
+         MVC   O.XYMVSVER,ICTVER   VERSION ID                           02210000
+         MVC   O.XYMVSREL,ICTREL   RELEASE ID                           02220000
+         MVC   O.XYMVSMOD,ICTRELVL MODIFICATION ID                      02230000
+                                                                        02240000
+         OI    WFLAGS,#WFORU      OUTBOUND RU AVAILBLE                  02250000
+                                                                        02260000
+         TM    I.XYMVSTAT,XYMVSOK END OF IMPORT CONVERSATION ?          02270000
+         BNZ   END_IMPORT           YES, END IMPORT                     02280000
+                                                                        02290000
+         TM    WFLAGS,#WFINIT     PROJECT-MOVE INITIALIZED ?            02300000
+         BNO   INITIALIZE           NO, INITIALIZE                      02310000
+                                                                        02320000
+         L     R14,WIMPEXP@       IMPORT/EXPORT ALU DATA                02330000
+         BR    R14                                                      02340000
+                                                                        02350000
+         EJECT ,                                                        02360000
+*---------------------------------------------------------------------- 02370000
+* Export an ALU                                                         02380000
+*---------------------------------------------------------------------- 02390000
+                                                                        02400000
+EXPORT   DS 0H                                                          02410000
+         TM    WFLAGS,#WFEND      END-OF-SPACE ON PRIOR VISIT ?         02420000
+         BO    EOS_RET              YES, TA TA                          02430000
+                                                                        02440000
+         L     R2,WATH@                                                 02450000
+         USING ATH,R2             R2 --> ATH                            02460000
+                                                                        02470000
+         TM    WFLAGS,#WFBED      OLD DATA ASLEEP ?                     02480000
+         BO    EXP_ISRT             YES, INSERT INTO RESPONSE           02490000
+                                                                        02500000
+EXP_GET  DS 0H                                                          02510000
+*                                                                       02520000
+* Export ALU data                                                       02530000
+*                                                                       02540000
+         $PRJTRN TPC=WTPC,        I/O - TRANSFER-PROJECT CONTROL AREA  +02550000
+               ALU=ATHALU#,        /O - ALU NUMBER                     +02560000
+               DATA=ATHALU,        /O - ALU DATA BUFFER                +02570000
+               DLEN=ATHDLEN,       /O - ALU DATA LENGTH                +02580000
+               DFMT=ATHDFMT,       /O - ALU DATA FORMAT                +02590000
+               MSGBUFF=WMSGBUF,    /O - MESSAGE BUFFER                 +02600000
+               MSGBUFFL=L'WMSGBUF, I/ - MESSAGE BUFFER LENGTH          +02610000
+               MF=(E,WTPRPL)                                            02620000
+                                                                        02630000
+         C     R15,=F'4'          ERROR ? OR ...                        02640000
+         BH    ERR_PRJTRN           YES, ERROR. MESSAGES IN BUFFER      02650000
+         BE    EXP_EOS              ... END-OF-SPACE ? YES, END IT      02660000
+                                                                        02670000
+         L     R1,WALUSEQ         INCREMENT ALU SEQUENCE NUMBER ...     02680000
+         LA    R1,1(0,R1)                                               02690000
+         ST    R1,WALUSEQ                                               02700000
+         ST    R1,ATHSEQ          ... AND SAVE IN ALU HEADER            02710000
+                                                                        02720000
+         MVC   ATHALUL,WALUL      ALU SIZE                              02730000
+                                                                        02740000
+         L     R3,ATHDLEN         ALU DATA LENGTH ...                   02750000
+         LA    R3,ATHLEN-L'ATHLWALU(0,R3) ... + HEADER OVERHEAD ...     02760000
+         STH   R3,ATHLWALU        ... = ATH-WITH-ALU SIZE               02770000
+         LA    R3,L'ATHLWALU(0,R3) $XPBUFR INSERT LENGTH                02780000
+                                                                        02790000
+EXP_ISRT DS 0H                                                          02800000
+         NI    WFLAGS,X'FF'-#WFBED DATA IS NOT IN BED                   02810000
+*                                                                       02820000
+* Insert ALU data into response.                                        02830000
+*                                                                       02840000
+         $XPBUFR ISRT,            INSERT ATH WITH ALU DATA             +02850000
+               DATA=*WATH@,       I/  - DATA                           +02860000
+               DATALEN=(R3),      I/  - DATA LENGTH                    +02870000
+               MF=(E,WXPBPL)                                            02880000
+*                                                                       02890000
+* R15 = 4  ==> data overflow                                            02900000
+* R15 = 8  ==> function overflow                                        02910000
+* R15 = 12 ==> buffer not allocated                                     02920000
+*                                                                       02930000
+         C     R15,=F'4'          OVERFLOW ? ... OR ...                 02940000
+         BE    EXP_RET              YES, TIME TO SEND                   02950000
+         BH    ABE_TXP              ... TROUBLE ? YES, TROUBLE          02960000
+                                                                        02970000
+         OC    O.XYMVBLKO,O.XYMVBLKO OFFSET SET ?                       02980000
+         BNZ   EXP_OFFSET              YES, SKIP SET OF OFFSET          02990000
+*                                                                       03000000
+* Update RU header data                                                 03010000
+*                                                                       03020000
+         MVI   O.XYMVFMT,XYMVFVAR FORMAT IS VARIABLE                    03030000
+         SR    R1,RRU             RU'S ALU DATA ADDR - RU'S ORIGIN ...  03040000
+         LA    R1,@XCVXELN(0,R1)  ... + XECONV OVERHEAD                 03050000
+         STH   R1,O.XYMVBLKO      ... GIVES OFFSET OF ALU DATA          03060000
+                                                                        03070000
+EXP_OFFSET DS 0H                                                        03080000
+         LH    R1,O.XYMVBLKL      UPDATE DATA BLOCK LENGTH              03090000
+         AH    R1,ATHLWALU                                              03100000
+         STH   R1,O.XYMVBLKL                                            03110000
+                                                                        03120000
+         LH    R1,O.XYMVENTC      INCREMENT ENTRY COUNT                 03130000
+         LA    R1,1(0,R1)                                               03140000
+         STH   R1,O.XYMVENTC                                            03150000
+         B     EXP_GET            GET MORE TO INSERT                    03160000
+                                                                        03170000
+EXP_RET  DS 0H                                                          03180000
+         LH    R1,O.XYMVENTC      UPDATE DATA BLOCK LENGTH WITH ...     03190000
+         SLL   R1,1               ... LENGTH OF ALL LENGTHS             03200000
+         AH    R1,O.XYMVBLKL                                            03210000
+         STH   R1,O.XYMVBLKL                                            03220000
+                                                                        03230000
+         OC    O.XYMVBLKO,O.XYMVBLKO RETURNING DATA ?                   03240000
+         BZ    ABE_TXP              NO, UH OH ! AVOID DANCE W/PARTNER   03250000
+                                                                        03260000
+         OI    WFLAGS,#WFBED      BUFFERED-EXPORTED-DATA (ASLEEP)       03270000
+         MVI   @XCVOPTS,@XCVOCNF  CONFIRM RECEIPT                       03280000
+         B     POST               SHIP IT                               03290000
+                                                                        03300000
+         DROP  R2                                                       03310000
+                                                                        03320000
+*---------------------------------------------------------------------- 03330000
+* End of space - EXPORT END                                             03340000
+*---------------------------------------------------------------------- 03350000
+                                                                        03360000
+EXP_EOS  DS 0H                                                          03370000
+                                                                        03380000
+         $PRJTRN EXPORT,END,      END PROJECT EXPORT                   +03390000
+               TPC=WTPC,          I/O - TRANSFER-PROJECT CONTROL AREA  +03400000
+               MSGBUFF=WMSGBUF,    /O - MESSAGE BUFFER                 +03410000
+               MSGBUFFL=L'WMSGBUF, I/ - MESSAGE BUFFER LENGTH          +03420000
+               MF=(E,WTPRPL)                                            03430000
+                                                                        03440000
+         BNZ   ERR_PRJTRN         ENDED ? NO, ERROR                     03450000
+                                                                        03460000
+         $RETSTOR *WATH@          FREE ALU BUFFER                       03470000
+                                                                        03480000
+         XC    WATH@,WATH@        ALU BUFFER FREED                      03490000
+         OI    WFLAGS,#WFEND      REMEMBER, ENDED                       03500000
+                                                                        03510000
+         LH    R1,O.XYMVENTC      UPDATE DATA BLOCK LENGTH WITH ...     03520000
+         SLL   R1,1               ... LENGTH OF ALL LENGTHS             03530000
+         AH    R1,O.XYMVBLKL                                            03540000
+         STH   R1,O.XYMVBLKL                                            03550000
+                                                                        03560000
+         OC    O.XYMVBLKO,O.XYMVBLKO RETURNING DATA ?                   03570000
+         BNZ   POST                    YES, "ENDED" BUT NOT FINISHED    03580000
+                                                                        03590000
+EOS_RET  DS 0H                                                          03600000
+         OI    WFLAGS,#WFFIN      INDICATE FINISHED                     03610000
+         MVI   @XCVSTAT,@XCVSOK   TELL PARTNER "FINISHED"               03620000
+                                                                        03630000
+         B     POST                                                     03640000
+                                                                        03650000
+         EJECT ,                                                        03660000
+*---------------------------------------------------------------------- 03670000
+* Import an ALU                                                         03680000
+*---------------------------------------------------------------------- 03690000
+                                                                        03700000
+IMPORT   DS 0H                                                          03710000
+         LH    R2,I.XYMVBLKO      GET DATA OFFSET                       03720000
+         LTR   R2,R2              ANY ?                                 03730000
+         BZ    END_IMPORT           NO, END IMPORT                      03740000
+                                                                        03750000
+         LA    R2,@XCVXELN(R2,RXYMV) ALU DATA ADDRESS                   03760000
+         USING ATH,R2             R2 --> ATH                            03770000
+                                                                        03780000
+         LH    R3,I.XYMVENTC      ENTITY COUNT                          03790000
+         LTR   R3,R3              ANY ?                                 03800000
+         BZ    END_IMPORT           NO, END IMPORT                      03810000
+                                                                        03820000
+IMP_NEXTALU DS 0H                                                       03830000
+         $PRJTRN TPC=WTPC,        I/O - TRANSFER-PROJECT CONTROL AREA  +03840000
+               ALU=ATHALU#,       I/  - ALU NUMBER                     +03850000
+               DATA=ATHALU,       I/  - ALU BUFFER                     +03860000
+               DLEN=ATHDLEN,      I/  - ALU DATA LENGTH                +03870000
+               DFMT=ATHDFMT,      I/  - ALU DATA FORMAT                +03880000
+               MSGBUFF=WMSGBUF,    /O - MESSAGE BUFFER                 +03890000
+               MSGBUFFL=L'WMSGBUF, I/ - MESSAGE BUFFER LENGTH          +03900000
+               MF=(E,WTPRPL)                                            03910000
+                                                                        03920000
+         LH    R1,ATHLWALU                                              03930000
+         LA    R2,L'ATHLWALU(R1,R2)                                     03940000
+         BCT   R3,IMP_NEXTALU     NEXT ALU DATA                         03950000
+                                                                        03960000
+         DROP  R2                                                       03970000
+                                                                        03980000
+         BNZ   ERR_PRJTRN         IMPORTED ? NO, ERROR                  03990000
+                                                                        04000000
+         B     POST               TELL PARTNER "READY FOR MORE"         04010000
+                                                                        04020000
+         EJECT ,                                                        04030000
+*---------------------------------------------------------------------- 04040000
+* Post requestor                                                        04050000
+*---------------------------------------------------------------------- 04060000
+                                                                        04070000
+POST     DS 0H                                                          04080000
+         NI    WFLAGS,X'FF'-#WFORU OUTBOUND RU NOT AVAILBLE             04090000
+         $TASK POST,              NOTIFY PARTNER                       +04100000
+               EPB=*R.TMSGEPB,                                         +04110000
+               MF=(E,WTSKPL)                                            04120000
+                                                                        04130000
+         BNZ   ERR_POST           POSTED ? NO, ERROR                    04140000
+                                                                        04150000
+         TM    WFLAGS,#WFEXIT     EXIT ?                                04160000
+         BNZ   END_CONV             YES, END CONVERSATION               04170000
+                                                                        04180000
+         B     RECEIVE            GET NEXT MESSAGE                      04190000
+                                                                        04200000
+         EJECT ,                                                        04210000
+*---------------------------------------------------------------------- 04220000
+* Initialize                                                            04230000
+*---------------------------------------------------------------------- 04240000
+                                                                        04250000
+INITIALIZE DS 0H                                                        04260000
+*                                                                       04270000
+* Localize utoken, if available.                                        04280000
+*                                                                       04290000
+         LA    R1,0               ASSUME UTOKEN NOT AVAILABLE           04300000
+         TM    ICTSTAT2,ICT2$APF  APF AUTHORIZED ?                      04310000
+         BNO   INIT_NOTK            NO, SKIP UTOKEN LOCALIZATION        04320000
+                                                                        04330000
+         ICM   R1,B'1111',PCBUSER IUSER ?                               04340000
+         BZ    INIT_NOTK            NO, UTOKEN NOT AVAILABLE            04350000
+         USING IUSER,R1                                                 04360000
+         ICM   R1,B'1111',USRACEE ACEE ?                                04370000
+         BZ    INIT_NOTK            NO, UTOKEN NOT AVAILABLE            04380000
+         USING ACEE,R1                                                  04390000
+         ICM   R1,B'1111',ACEETOKP UTOKEN ?                             04400000
+         BZ    INIT_NOTK             NO, UTOKEN NOT AVAILABLE           04410000
+         DROP  R1                                                       04420000
+                                                                        04430000
+         LR    R3,R1              R3 --> UTOKEN                         04440000
+         USING TOKEN,R3                                                 04450000
+                                                                        04460000
+         MODESET EXTKEY=ZERO,SAVEKEY=(2) SWITCH TO KEY ZERO             04470000
+                                                                        04480000
+         SR    R1,R1              PREPARE FOR IC OF ...                 04490000
+         IC    R1,TOKLEN          ... UTOKEN LENGTH                     04500000
+         BCTR  R1,0               LOCALIZE UTOKEN                       04510000
+         EX    R1,*+4                                                   04520000
+         MVC   WTKN256(0),TOKEN                                         04530000
+         DROP  R3                                                       04540000
+                                                                        04550000
+         MODESET KEYADDR=(2)      RESTORE KEY                           04560000
+                                                                        04570000
+         LA    R1,WTKN256         SET ADDRESS OF UTOKEN                 04580000
+                                                                        04590000
+INIT_NOTK DS 0H                                                         04600000
+         ST    R1,WUTOKEN@        UTOKEN ADDRESS                        04610000
+                                                                        04620000
+         MVI   WPROJ,C' '         INITIALIZE PROJECT NAME               04630000
+         MVC   WPROJ+1(L'WPROJ-1),WPROJ                                 04640000
+                                                                        04650000
+         LH    R1,I.XYMVOBJL      INBOUND OBJECT IS ...                 04660000
+         BCTR  R1,0                                                     04670000
+         EX    R1,*+4                                                   04680000
+         MVC   WPROJ(0),I.XYMVOBJ ... THE PROJECT NAME                  04690000
+                                                                        04700000
+         L     R1,I.XYMVSFNC      FUNCTION DEPENDENT INITIALIZATION     04710000
+         SLL   R1,2                                                     04720000
+         B     *(R1)                                                    04730000
+         B     INIT_IMPORT       IMPORT                                 04740000
+         B     INIT_EXPORT       EXPORT                                 04750000
+                                                                        04760000
+*---------------------------------------------------------------------- 04770000
+* Initialize project import                                             04780000
+*---------------------------------------------------------------------- 04790000
+                                                                        04800000
+INIT_IMPORT DS 0H                                                       04810000
+         LA    R3,0               ASSUME NO PROJECT REPLACE             04820000
+         TM    I.XYMVFLGS,XYMVFRQC PROJECT REPLACE CONFIRMED ?          04830000
+         BZ    INI_NOCCONF           NO, DO NOT REPLACE                 04840000
+         LA    R3,IPJX$CON           YES, REPLACE                       04850000
+                                                                        04860000
+INI_NOCCONF DS 0H                                                       04870000
+         LH    R2,I.XYMVBLKO      GET ALU DATA OFFSET                   04880000
+         LA    R2,@XCVXELN(R2,RXYMV) MOVE-ALU HEADER ADDRESS            04890000
+                                                                        04900000
+         USING ATH,R2             R2 --> ATH                            04910000
+                                                                        04920000
+         $PRJTRN IMPORT,INIT,     INITIALIZE PROJECT IMPORT            +04930000
+               NAME=WPROJ,        I/  - PROJECT NAME                   +04940000
+               OPTIONS=#TPROPM,   I/  - SQUISH RETURNED ALU DATA       +04950000
+               UTOKEN=*WUTOKEN@,  I/  - UTOKEN                         +04960000
+               TPC=WTPC,          I/O - TRANSFER-PROJECT CONTROL AREA  +04970000
+               ALU=ATHALU#,       I/  - ALU NUMBER                     +04980000
+               ALUSIZE=*ATHALUL,  I/  - ALU SIZE                       +04990000
+               DATA=ATHALU,       I/  - ALU BUFFER                     +05000000
+               DLEN=ATHDLEN,      I/  - ALU DATA LENGTH                +05010000
+               DFMT=ATHDFMT,      I/  - ALU DATA FORMAT                +05020000
+               PRJCONF=(R3),      I/  - CONFIRM PROJECT REPLACE        +05030000
+               MSGBUFF=WMSGBUF,    /O - MESSAGE BUFFER                 +05040000
+               MSGBUFFL=L'WMSGBUF, I/ - MESSAGE BUFFER LENGTH          +05050000
+               MF=(E,WTPRPL)                                            05060000
+                                                                        05070000
+         DROP  R2                                                       05080000
+                                                                        05090000
+         BNZ   ERR_PRJIMP         INITIALIZED ? NO, ERORR               05100000
+*        BNZ   ERR_PRJTRN         INITIALIZED ? NO, ERORR               05110000
+                                                                        05120000
+         OI    WFLAGS,#WFINIT     REMEMBER, INITIALIZED                 05130000
+         LA    R14,IMPORT         IMPORT ROUTINE ADDRESS                05140000
+         ST    R14,WIMPEXP@       IMPORT/EXPORT ADDRESS                 05150000
+         BR    R14                IMPORT ALU                            05160000
+                                                                        05170000
+*---------------------------------------------------------------------- 05180000
+* Initialize project export                                             05190000
+*---------------------------------------------------------------------- 05200000
+                                                                        05210000
+INIT_EXPORT DS 0H                                                       05220000
+         $PRJTRN EXPORT,INIT,     INITIALIZE PROJECT EXPORT            +05230000
+               OPTIONS=#TPROSQ+#TPROPM, I/  - SQUISH RETURNED ALU DATA +05240000
+               TPC=WTPC,          I/O - TRANSFER-PROJECT CONTROL AREA  +05250000
+               NAME=WPROJ,        I/  - PROJECT NAME                   +05260000
+               UTOKEN=*WUTOKEN@,  I/  - UTOKEN                         +05270000
+               MSGBUFF=WMSGBUF,    /O - MESSAGE BUFFER                 +05280000
+               MSGBUFFL=L'WMSGBUF, I/ - MESSAGE BUFFER LENGTH          +05290000
+               MF=(E,WTPRPL)                                            05300000
+                                                                        05310000
+         BNZ   ERR_PRJTRN         INITIALIZED ? NO, ERORR               05320000
+                                                                        05330000
+         ST    R1,WALUL           SIZE OF ALU DATA                      05340000
+         LA    R1,ATHLEN(0,R1)    ALU TRANSPORT HEADER OVERHEAD         05350000
+         ST    R1,WATHL           SIZE OF ATH W/ALU DATA                05360000
+                                                                        05370000
+         $GETSTOR (R1),LOC=RES    ALLOCATE BUFFER                       05380000
+                                                                        05390000
+         ST    R1,WATH@           SAVE BUFFER ADDRESS                   05400000
+         OI    WFLAGS,#WFINIT     REMEMBER, INITIALIZED                 05410000
+         LA    R14,EXPORT         EXPORT ROUTINE ADDRESS                05420000
+         ST    R14,WIMPEXP@       IMPORT/EXPORT ROUTINE ADDRESS         05430000
+         BR    R14                EXPORT ALU                            05440000
+                                                                        05450000
+*---------------------------------------------------------------------- 05460000
+* End import                                                            05470000
+*---------------------------------------------------------------------- 05480000
+                                                                        05490000
+END_IMPORT DS 0H                                                        05500000
+         $PRJTRN IMPORT,END,      END PROJECT IMPORT                   +05510000
+               TPC=WTPC,          I/O - TRANSFER-PROJECT CONTROL AREA  +05520000
+               MSGBUFF=WMSGBUF,    /O - MESSAGE BUFFER                 +05530000
+               MSGBUFFL=L'WMSGBUF, I/ - MESSAGE BUFFER LENGTH          +05540000
+               MF=(E,WTPRPL)                                            05550000
+                                                                        05560000
+         BNZ   ERR_PRJTRN         ENDED ? NO, ERROR                     05570000
+                                                                        05580000
+         OI    WFLAGS,#WFFIN+#WFEND REMEMBER, FINISHED                  05590000
+         B     POST                                                     05600000
+                                                                        05610000
+         EJECT ,                                                        05620000
+*---------------------------------------------------------------------- 05630000
+* Errors                                                                05640000
+* Send error messages to partner                                        05650000
+*---------------------------------------------------------------------- 05660000
+*                                                                       05670000
+* Indicate request confirmation for project replace error               05680000
+*                                                                       05690000
+ERR_PRJIMP DS 0H                                                        05700000
+         C     R15,=F'12'         PROJECT REQUEST ERROR ($PRJREQ) ?     05710000
+         BNE   ERR_PRJTRN           NO, SOME OTHER FLAVOR               05720000
+                                                                        05730000
+         C     R0,=F'4'           PROJECT REPLACE CONFIRMATION ?        05740000
+         BNE   ERR_PRJTRN           NO, SOME OTHER FLAVOR               05750000
+                                                                        05760000
+         OI    O.XYMVFLGS,XYMVFCNF CONFIRM REQUEST                      05770000
+                                                                        05780000
+ERR_PRJTRN DS 0H                                                        05790000
+*                                                                       05800000
+* Format the response block with completion status and messages         05810000
+*                                                                       05820000
+X        USING TPC,WTPC                                                 05830000
+         MVC   O.XYMVRETC,X.TPCRC   RETURN CODE                         05840000
+         MVC   O.XYMVRSNC,X.TPCRSN  REASON CODE                         05850000
+         MVC   O.XYMVINFO,X.TPCINFO INFO CODE                           05860000
+         DROP  X                                                        05870000
+                                                                        05880000
+MSG_RESP DS 0H                                                          05890000
+         LA    R5,WMSGBUF         LOCAL MESSAGE BUFFER                  05900000
+         USING $MSGBUF,R5                                               05910000
+         ICM   R4,15,$MSGQF       LOCATE FIRST MESSAGE                  05920000
+         BZ    MSG_FIN            END OF MESSAGES                       05930000
+         USING $MSBHDR,R4         ADDRESS MSG INSTANCES                 05940000
+                                                                        05950000
+MSGFNXT  DS    0H                                                       05960000
+         LH    R2,$MSBLEN         MESSAGE TEXT LENGTH                   05970000
+         STH   R2,$MSBRSVD        PREPEND TO MESSAGE TEXT               05980000
+                                                                        05990000
+         $XPBUFR ISRT,DATALEN=2(R2),DATA=$MSBRSVD                       06000000
+         BNZ   MSG_FIN            ASSUME FAILURES ARE CAPACITY RELATED  06010000
+                                                                        06020000
+         OC    O.XYMVMSGO,O.XYMVMSGO  OFFSET SET ?                      06030000
+         BNZ   MSG_SET              YES, SKIP SET OF OFFSET             06040000
+                                                                        06050000
+         SR    R1,RRU             RU'S MSG ORIGIN - RU'S ORIGIN ...     06060000
+         LA    R1,@XCVXELN(R1)    ... + XECONV OVERHEAD                 06070000
+         STH   R1,O.XYMVMSGO      ...  GIVES OFFSET OF MESSAGES         06080000
+                                                                        06090000
+MSG_SET  DS 0H                                                          06100000
+         LH    R15,O.XYMVMSGC     MESSAGE COUNT                         06110000
+         LA    R15,1(,R15)        ACCOUNT FOR THIS MESSAGE              06120000
+         STH   R15,O.XYMVMSGC     SAVE UPDATED COUNT                    06130000
+                                                                        06140000
+         ICM   R4,15,$MSBLINK     MESSAGES REMAIN?                      06150000
+         BNZ   MSGFNXT            AGAIN IF SO                           06160000
+         DROP  R4,R5              $MSBHDR, $MSGBUF                      06170000
+                                                                        06180000
+MSG_FIN  DS    0H                                                       06190000
+                                                                        06200000
+         OI    WFLAGS,#WFERR      REMEMBER ERROR                        06210000
+         MVI   @XCVSTAT,@XCVSERR  TELL PARTNER "ERROR"                  06220000
+                                                                        06230000
+         B     POST                                                     06240000
+                                                                        06250000
+*---------------------------------------------------------------------- 06260000
+* Recovery's retry routine                                              06270000
+*---------------------------------------------------------------------- 06280000
+                                                                        06290000
+RETRY    DS    0H                                                       06300000
+         TM    WFLAGS,#WFORU      PARTNER NOTIFY-ABLE ?                 06310000
+         BZ    END_CONV             NO, SLIP AWAY - CLEAN UP FIRST      06320000
+                                                                        06330000
+         MVC   O.XYMVRETC,=F'-1'  CHOKED                                06340000
+         MVC   O.XYMVRSNC,=F'0'                                         06350000
+         MVC   O.XYMVINFO,=F'0'                                         06360000
+                                                                        06370000
+         LA    R14,WMSGBUF        CLEAR MESSAGE BUFFER                  06380000
+         LA    R15,L'WMSGBUF                                            06390000
+         SR    R1,R1                                                    06400000
+         MVCL  R14,R0                                                   06410000
+                                                                        06420000
+         $MSG  294,               ABEND MESSAGE                        +06430000
+               BUFR=WMSGBUF,                                           +06440000
+               BUFL=L'WMSGBUF,                                         +06450000
+               DEST=$BUFFER                                             06460000
+                                                                        06470000
+         B     MSG_RESP           SHIP IT TO PARTNER - CLEAN UP         06480000
+                                                                        06490000
+         EJECT                                                          06500000
+*---------------------------------------------------------------------- 06510000
+* Catastropic errors                                                    06520000
+*---------------------------------------------------------------------- 06530000
+                                                                        06540000
+ERR_POST  DS 0H                                                         06550000
+TOO_SMALL DS 0H                                                         06560000
+ABE_TXP   DS 0H                                                         06570000
+                                                                        06580000
+         $ABEND ABE_TXPSERV,DUMP=YES,                                  X06590000
+               TITLE='TXP BUFFER SERVICE FAILURE'                       06600000
+                                                                        06610000
+ERR_STG  DS 0H                                                          06620000
+         LR    R2,R15                                                   06630000
+         $ABEND ABE_STORAGE,(R2),DUMP=YES,                             X06640000
+               TITLE='STORAGE MANAGEMENT FAILURE'                       06650000
+                                                                        06660000
+         EJECT ,                                                        06670000
+*---------------------------------------------------------------------- 06680000
+* End conversation                                                      06690000
+*---------------------------------------------------------------------- 06700000
+                                                                        06710000
+END_CONV DS 0H                                                          06720000
+         TM    WFLAGS,#WFEND      NORMAL ?                              06730000
+         BO    RETURN               YES, EXIT. NO MESSES TO CLEAN UP    06740000
+                                                                        06750000
+         TM    WFLAGS,#WFIMP      IMPORTING ?                           06760000
+         BO    TRM_IMPORT           YES, TERMINATE IMPORT               06770000
+                                                                        06780000
+         ICM   R2,B'1111',WATH@   BUFFER ALLOCATED ?                    06790000
+         BZ    TRM_NOBUF            NO, SKIP BUFFER FREE                06800000
+                                                                        06810000
+         $RETSTOR (R2)            FREE BUFFER                           06820000
+                                                                        06830000
+         XC    WATH@,WATH@        BUFFER NOT ALLOCATED                  06840000
+                                                                        06850000
+TRM_NOBUF DS 0H                                                         06860000
+         $PRJTRN EXPORT,TERM,     TERMINATE PROJECT EXPORT             +06870000
+               TPC=WTPC,          I/O - TRANSFER-PROJECT CONTROL AREA  +06880000
+               MF=(E,WTPRPL)                                            06890000
+                                                                        06900000
+         B     RETURN             EXIT                                  06910000
+                                                                        06920000
+TRM_IMPORT DS 0H                                                        06930000
+         $PRJTRN IMPORT,TERM,     TERMINATE PROJECT IMPORT             +06940000
+               TPC=WTPC,          I/O - TRANSFER-PROJECT CONTROL AREA  +06950000
+               MF=(E,WTPRPL)                                            06960000
+                                                                        06970000
+         B     RETURN             EXIT                                  06980000
+                                                                        06990000
+         EJECT ,                                                        07000000
+*---------------------------------------------------------------------- 07010000
+* Recovery routine                                                      07020000
+*---------------------------------------------------------------------- 07030000
+         EJECT ,                                                        07040000
+*---------------------------------------------------------------------- 07050000
+*                                                                       07060000
+*  ROUTINE: RECOVRTN - RECOVERY ROUTINE EXIT                            07070000
+*                                                                       07080000
+*  DESCRIPTION:                                                         07090000
+*                                                                       07100000
+*    THIS ROUTINE IS AN ABEND RECOVERY EXIT.  IF AN ABEND               07110000
+*    OCCURS WHILE THE RECOVERY ENVIRONMENT IS ACTIVE,  THIS             07120000
+*    ROUTINE WILL RECEIVE CONTROL AND ATTEMPT TO RESTORE                07130000
+*    THE ENVINRONMENT AND SET THE RETRY ADDRESS TO THE                  07140000
+*    CURRENT RESUME POINT SPECIFIED IN THE WORKAREA.                    07150000
+*                                                                       07160000
+*  ENTRY:  R13 - ADDRESS OF SAVE AREA                                   07170000
+*          R1  - PARAMETER LIST ADDRESS SPECIFIED IN $RCVRY             07180000
+*                (ADDRESS OF WORKAREA)                                  07190000
+*          R14 - RETURN ADDRESS                                         07200000
+*                                                                       07210000
+*  EXIT:   R15 CONTAINS THE ADDRESS OF THE RETRYRTN OR                  07220000
+*          TO PERCOLATE THE ABEND.                                      07230000
+*                                                                       07240000
+*---------------------------------------------------------------------- 07250000
+                                                                        07260000
+RECOVRTN DS    0H                                                       07270000
+         PUSH  USING              PRESERVE USING ENVIRONMENT            07280000
+         STM   R14,R12,12(R13)    SAVE RECOVRTN REGISTERS               07290000
+         CR    R0,R10             RUNNING UNDER PROPER ITASK?           07300000
+         BNE   RECPERC            NO, PERCOLATE ABEND                   07310000
+                                                                        07320000
+         LR    R3,R1              RESTORE ORIGINAL WORKAREA ADDR        07330000
+W        USING WORKAREA,R3                                              07340000
+R        USING TMSGSTD,W.WRCVAREA                                       07350000
+                                                                        07360000
+         OI    W.WFLAGS,#WFRCV    REMEMBER RECOVERY ENTERED             07370000
+                                                                        07380000
+         L     R1,W.WRRU          OUTBOUND XYMOVE                       07390000
+         ST    R1,TSKERCVR+(RRU*4)                                      07400000
+         L     R1,R.TMSGW1        INBOUND XYMOVE                        07410000
+         ST    R1,TSKERCVR+(RXYMV*4)                                    07420000
+         L     R1,R.TMSGW2        OUTBOUND @XCV                         07430000
+         ST    R1,TSKERCVR+(R@XCV*4)                                    07440000
+         L     R9,TSKPCBC         ADDR OF CURRENT PROCESS               07450000
+         ST    R9,TSKERCVR+(R9*4)    REQUIRED                           07460000
+         ST    R12,TSKERCVR+(R12*4)  ENVIRONMENT                        07470000
+         ST    R3,TSKERCVR+(R13*4)   REGISTERS                          07480000
+                                                                        07490000
+         L     R15,=A(RETRY)      ADDRESS OF RECOVERY RESUME            07500000
+         B     REC_RET            RETURN                                07510000
+                                                                        07520000
+RECPERC  DS    0H                                                       07530000
+         SR    R15,R15            NO RETRY,  PERCOLATE                  07540000
+                                                                        07550000
+REC_RET  DS    0H                                                       07560000
+         L     R14,12(,R13)       RESTORE RETURN ADDRESS                07570000
+         LM    R0,R12,20(R13)     RESTORE REGISTERS                     07580000
+         BR    R14                RETURN                                07590000
+         POP   USING              RESTORE USING ENVIRONMENT             07600000
+                                                                        07610000
+         EJECT ,                                                        07620000
+*---------------------------------------------------------------------- 07630000
+* Return                                                                07640000
+*---------------------------------------------------------------------- 07650000
+                                                                        07660000
+RETURN   DS 0H                                                          07670000
+                                                                        07680000
+         $RCVRY DELETE,RECOVRTN,MF=(E,MFE_LIST)                         07690000
+                                                                        07700000
+         #EXIT                                                          07710000
+                                                                        07720000
+         EJECT ,                                                        07730000
+*---------------------------------------------------------------------- 07740000
+* Constants                                                             07750000
+*---------------------------------------------------------------------- 07760000
+         LTORG ,                                                        07770000
+                                                                        07780000
+         EJECT ,                                                        07790000
+*---------------------------------------------------------------------- 07800000
+                                                                        07810000
+         PRINT NOGEN                                                    07820000
+         ICVT  ,                                                        07830000
+         IPCB  ,                                                        07840000
+         IPROJ ,                                                        07850000
+         ITASK ,                                                        07860000
+         IUSER ,                  INTEGRATOR IUSER BLOCK                07870000
+         EVCODES ,                INTEGRATOR EVENT CODES                07880000
+         ICHRUTKN ,               MVS UTOKEN                            07890000
+         IHAACEE  ,               MVS ACEE                              07900000
+         END   ,                                                        07910000

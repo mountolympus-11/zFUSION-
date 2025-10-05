@@ -1,0 +1,1054 @@
+IRECCMPX TITLE '- COMPARE RECORDED SCREEN IMAGES'                       00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE: IRECCMPX - Compare Recorded Screen Images                    00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This transaction (RU) is used to compare two screen images         00080000
+*    or locate duplicate screens withing the specified                  00090000
+*    recording.  The purpose of identifying duplicate screens           00100000
+*    is to enable circuits to be constructed with the                   00110000
+*    navigational model or State-Transition-Network (STN).              00120000
+*    Circuits in the STN enable the navigation component to             00130000
+*    reexecute a transaction without requiring the application          00140000
+*    session to be terminated and reestablished.  In addition           00150000
+*    to defining circuits in the network,  the identification           00160000
+*    of duplicate screens enables a many-to-many relationship           00170000
+*    to be established with states in the network.  Each state          00180000
+*    may have multiple predecessor and successor states.  The           00190000
+*    duplicate screen workbench tool enables an adminstrator            00200000
+*    to identify these conditions in the recorded screens.              00210000
+*                                                                       00220000
+*    The Screen compare RU has two primary functions:                   00230000
+*                                                                       00240000
+*      1) Compare two screens from the selected recordings              00250000
+*         in a project to determine if they match under                 00260000
+*         the rules defined in the IMGCMP function.  This               00270000
+*         facility enables circuits to be made or recordings            00280000
+*         to be spliced together.                                       00290000
+*                                                                       00300000
+*      2) Scan the specified recording to locate other                  00310000
+*         screens that match under the rules defined                    00320000
+*         in the IMGCMP function.  Return the first match               00330000
+*         screen name and its SYSIMAGE rowid.                           00340000
+*                                                                       00350000
+*    The image compare function required that the IMAGE                 00360000
+*    structures be constructed and prepared for compare                 00370000
+*    processing.  This include obtaining the sysimage row               00380000
+*    for each image and issuing an imgbld request. The                  00390000
+*    region network associated with the screen(set) is                  00400000
+*    located and placed image structure.                                00410000
+*                                                                       00420000
+*    Prior to compare,  the imgprep function is called to               00430000
+*    construct the recentry tree using the rgntree from                 00440000
+*    either image being compared, provided that both images             00450000
+*    do not contain rgntree that are different.                         00460000
+*                                                                       00470000
+*                                                                       00480000
+* ON ENTRY:                                                             00490000
+*                                                                       00500000
+*    R1 Contains the address of a transaction format parameter          00510000
+*       list mapped by XSMSCMP.                                         00520000
+*                                                                       00530000
+* ON EXIT:                                                              00540000
+*                                                                       00550000
+*    A response buffer described by YSMSCMP is constructed,             00560000
+*    transmitted, and release.  The following return codes              00570000
+*    are placed in the response buffer prior to transmission.           00580000
+*                                                                       00590000
+*       RC00 - Screen images match or duplicate screen image            00600000
+*              returned.                                                00610000
+*                                                                       00620000
+*       RC04 - No duplicate screen images available in recording        00630000
+*                                                                       00640000
+*       RC08 - Image compare of specified screens returned              00650000
+*              NOMATCH condition.   Reason/info codes are               00660000
+*              IMGCMP ret/rsn.  The reason codes are defined            00670000
+*              in the image.h header file and converted to              00680000
+*              message ids.                                             00690000
+*                                                                       00700000
+*       RC12 - Screen images may not be compared.                       00710000
+*              RSN04 - Screens are from different applications          00720000
+*              RSN08 - Recordings performed using different             00730000
+*                      logmodes                                         00740000
+*                                                                       00750000
+*       RC16 - Service failure                                          00760000
+*              RSN04 - Region network construction failed               00770000
+*              RSN08 - Unable to retrieve sysimage row                  00780000
+*              RSN12 - Error constructing image structure               00790000
+*              RSN16 - Unable to retrieve sysnavigation row             00800000
+*              RSN20 - Unable to retrieve sysrecordings row             00810000
+*              RSN24 - Rename would result in S0 = S1                   00820000
+*                                                                       00830000
+**<DOC-OFF>****************************************************         00840000
+                                                                        00850000
+         EJECT ,                                                        00860000
+***************************************************************         00870000
+*                                                                       00880000
+* MAINTENANCE:                                                          00890000
+*                                                                       00900000
+*    10/04/93 Ron Colmone                                               00910000
+*             Initial Version                                           00920000
+*                                                                       00930000
+*    10/10/94 Su-Fen Wu   PAR# 147635                            147635 00940000
+*             S0->S0 checking is removed. The checking is done   147635 00950000
+*             in mainframe now.                                  147635 00960000
+*                                                                       00970000
+***************************************************************         00980000
+                                                                        00990000
+         EJECT ,                                                        01000000
+         #WORK ,                  READ/WRITE WORKAREA                   01010000
+WRK256   DS    XL256              GENERAL PURPOSE WORKAREA              01020000
+REGSAVE  DS    16F                REGISTER SAVE AREA                    01030000
+REGSAVE2 DS    16F                REGISTER SAVE AREA                    01040000
+                                                                        01050000
+I1APPL   DS    CL16               INT  APPLICATION OF FIRST  IMAGE      01060000
+I2APPL   DS    CL16               INT  APPLICATION OF SECOND IMAGE      01070000
+I1LOGMD  DS    CL8                SESSION LOGMODE  OF FIRST  IMAGE      01080000
+I2LOGMD  DS    CL8                SESSION LOGMODE  OF SECOND IMAGE      01090000
+ADJSCRN1 DS    CL16               BASE SYSNAV ADJ SCREEN NAME           01100000
+ADJSCRN2 DS    CL16               TEST SYSNAV ADJ SCREEN NAME           01110000
+ADJSAVE  DS    CL16               SAVE ADJCENT SCREEN NAME              01120000
+                                                                        01130000
+FLAGS    DS    X                  FLAGS                                 01140000
+$MATCHL  EQU   X'80'                 SCREEN NAME MATCHED ON LAST SNAV   01150000
+                                                                        01160000
+IMAGE1   DS    A                  ADDRESS OF BASE IMAGE STRUCTURE       01170000
+IMAGE2   DS    A                  ADDRESS OF TEST IMAGE STRUCTURE       01180000
+                                                                        01190000
+IMAGE1BF DS    A,F                ADDR/LENGTH OF IMAGE 1 BUFFER         01200000
+IMAGE2BF DS    A,F                ADDR/LENGTH OF IMAGE 2 BUFFER         01210000
+RECBF    DS    A,F                ADDR/LENGTH OF RECORDING BUFFER       01220000
+NAVBF    DS    A,F                ADDR/LENGTH OF SYSNAV  BUFFER         01230000
+                                                                        01240000
+SARGAREA DS    XL256              AREA TO CONSTRUCT SEARCH ARG          01250000
+MSGBUF   DS    XL512              MESSAGE BUFFER AREA                   01260000
+                                                                        01270000
+CMPINFO  CMPINFO DSECT=NO         IMAGE COMPARE STATUS RETURN AREA      01280000
+         YSMSCMP TYPE=BLOCK       DIRECTLY ADDRESSABLE RESPONSE BLOCK   01290000
+                                                                        01300000
+         #ENDWORK ,               END OF WORKAREA                       01310000
+                                                                        01320000
+         EJECT                                                          01330000
+         XSMSCMP ,                REQUEST FORMAT                        01340000
+                                                                        01350000
+         EJECT                                                          01360000
+         NAV     ,                NAVIGATION DATA AREAS                 01370000
+                                                                        01380000
+         EJECT                                                          01390000
+         REGION  ,                REGION DEFINITION                     01400000
+                                                                        01410000
+         EJECT                                                          01420000
+         EXRGNET ,                EXECUTION REGION NETWORK              01430000
+                                                                        01440000
+         EJECT                                                          01450000
+         ICATALOG IMAGE,RECORDING,NAVIGATION                            01460000
+                                                                        01470000
+         EJECT                                                          01480000
+         TBSERVIS SET,GET,PRINT=NOGEN                                   01490000
+                                                                        01500000
+         EJECT                                                          01510000
+         ABCODES ,                                                      01520000
+                                                                        01530000
+         EQUS  ,                                                        01540000
+                                                                        01550000
+         $MSGDFT PREFIX=ICTPID,COMPID='REC',TABLE=*#MSGS,              +01560000
+               CONID=*ICTCONID,CONNAME=ICTCONNM,                       +01570000
+               PRINT=NOGEN,MF=(E,WRK256)                                01580000
+                                                                        01590000
+         EJECT ,                                                        01600000
+IRECCMPX #ENTER PREG=R8                                                 01610000
+                                                                        01620000
+         USING ITASK,R10          ITASK ADDRESSABILITY                  01630000
+         L     R9,TSKPCBC         ADDRESS OF CURRENT PCB                01640000
+         USING IPCB,R9            IPCB  ADDRESSABILITY                  01650000
+         L     R7,PCBUSER         ADDRESS OF CURRENT USER               01660000
+         USING IUSER,R7           TEMP ADDRESSABILITY                   01670000
+         L     R7,USRPROJ         LOCATE CURRENT PROJECT                01680000
+         USING IPROJ,R7           LIFE OF FUNCTION                      01690000
+                                                                        01700000
+         USING XSMSCMP,R8         SCREEN COMPARE / LOC DUPL             01710000
+                                                                        01720000
+         EJECT ,                                                        01730000
+***************************************************************         01740000
+*                                                                       01750000
+*  Call the navigation data structure build routine to                  01760000
+*  ensure that the region network is constructed with the               01770000
+*  current region definitions.  This routine will reconstruct           01780000
+*  the required components if maintenance has occurred to               01790000
+*  the supporting catalog tables.                                       01800000
+*                                                                       01810000
+*  Obtain the sysimage rows and construct the image structures          01820000
+*  for the specified screens.  If both images are supplied,             01830000
+*  continue with the image compare of the specified images,             01840000
+*  otherwise continue with sysnav scan of the specified                 01850000
+*  recording.                                                           01860000
+*                                                                       01870000
+***************************************************************         01880000
+                                                                        01890000
+         $NAVBLD RGN,MF=(E,MFE_LIST)                                    01900000
+         BNZ   ERR_RGNB           ERROR CONSTRUCTION RGNNET             01910000
+                                                                        01920000
+*--------------------------------------------------------------         01930000
+*  READ BASE SYSIMAGE ROW AND CONSTRUCT IMAGE STRUCTURE                 01940000
+*--------------------------------------------------------------         01950000
+         L     R0,XSCIMG1         BASE SCREEN IMAGE                     01960000
+         LA    R1,IMAGE1BF        SYSIMAGE BUFFINFO (ADDR/LEN)          01970000
+         BAS   R14,GETIMAGE       RETRIEVE BASE IMAGE                   01980000
+         BNZ   ERR_IMG            IMAGE NOT FOUND                       01990000
+                                                                        02000000
+         L     R1,XSCIMG1         GET ASSOCIATED S0 SYSNAV ROW          02010000
+         BAS   R14,BNAVSARG       FORMAT SARG FOR SCREEN KEY            02020000
+                                                                        02030000
+         LA    R1,NAVBF           ADDRESS OF BUFFER                     02040000
+         BAS   R14,GETNAV         RETRIEVE ASSOCIATED SYSNAV ROW        02050000
+         BNZ   ERR_NAV            ERROR RETRIEVING SYSNAV ROW           02060000
+                                                                        02070000
+         LR    R0,R1              ADDRESS OF SYSNAVIGATION ROW          02080000
+         L     R1,IMAGE1BF        ADDRESS OF SYSIMAGE ROW               02090000
+         BAS   R14,BLDIMAGE       CONSTRUCT IMAGE STRUCTURE             02100000
+         BNZ   ERR_IMGB           IMGBLD FAILED                         02110000
+         ST    R1,IMAGE1          SAVE ADDRESS OF IMAGE STRUCTURE       02120000
+                                                                        02130000
+         EJECT ,                                                        02140000
+*--------------------------------------------------------------         02150000
+*  IF CANDIDATE SYSIMAGE ENTRY KEY PROVIDED, THEN RETRIEVE              02160000
+*  AND CONSTRUCT ASSOCIATED IMAGE STRUCTURE.                            02170000
+*--------------------------------------------------------------         02180000
+         ICM   R0,15,XSCIMG2      CANDIDATE SCREEN IMAGE SPECIFIED      02190000
+         BZ    NAV_SCAN           NO, SCAN SYSNAV FOR IMAGE MATCH       02200000
+         LA    R1,IMAGE2BF        SYSIMAGE BUFFINFO (ADDR/LEN)          02210000
+         BAS   R14,GETIMAGE       RETRIEVE BASE IMAGE                   02220000
+         BNZ   ERR_IMG            IMAGE NOT FOUND                       02230000
+                                                                        02240000
+         L     R1,XSCIMG2         GET ASSOCIATED S0 SYSNAV ROW          02250000
+         BAS   R14,BNAVSARG       FORMAT SARG FOR SCREEN KEY            02260000
+                                                                        02270000
+         LA    R1,NAVBF           ADDRESS OF BUFFER                     02280000
+         BAS   R14,GETNAV         RETRIEVE ASSOCIATED SYSNAV ROW        02290000
+         BNZ   ERR_NAV            ERROR RETRIEVING SYSNAV ROW           02300000
+                                                                        02310000
+         LR    R0,R1              ADDRESS OF SYSNAVIGATION ROW          02320000
+         L     R1,IMAGE2BF        ADDRESS OF SYSIMAGE ROW               02330000
+         BAS   R14,BLDIMAGE       CONSTRUCT IMAGE STRUCTURE             02340000
+         BNZ   ERR_IMGB           IMGBLD FAILED                         02350000
+         ST    R1,IMAGE2          SAVE ADDRESS OF IMAGE STRUCTURE       02360000
+                                                                        02370000
+         EJECT ,                                                        02380000
+*--------------------------------------------------------------         02390000
+*  IF THE TWO IMAGES ARE FROM SEPARATE RECORDINGS, THEN                 02400000
+*  VERIFY THAT THE APPLICATION AND LOGMODE ARE CONSISTANT.              02410000
+*--------------------------------------------------------------         02420000
+         L     R2,IMAGE1BF        ADDRESS OF SYSIMAGE RECORD            02430000
+I1       USING SYSIMAGE,R2        TEMP ADDRESSABILITY IMAGE1            02440000
+                                                                        02450000
+         L     R3,IMAGE2BF        ADDRESS OF SYSIMAGE RECORD            02460000
+I2       USING SYSIMAGE,R3        TEMP ADDRESSABILITY IMAGE1            02470000
+                                                                        02480000
+         CLC   I1.SIMGREC,I2.SIMGREC   FROM SAME RECORDING              02490000
+         BE    DOCOMPR            YES,  CONTINUE WITH SCREEN COMPARE    02500000
+                                                                        02510000
+*--------------------------------------------------------------         02520000
+*  RETRIEVE SYSRECORDINGS ROW FOR IMAGE1                                02530000
+*--------------------------------------------------------------         02540000
+         L     R0,I1.SIMGREC      ROWID (KEY) OF SYSRECORDINGS ENTRY    02550000
+         LA    R1,RECBF           ADDRESS OF BUFFINFO (ADDR/LEN)        02560000
+         BAS   R14,GETREC         RETRIEVE SYSRECORDINGS ROW            02570000
+         BNZ   ERR_REC            ERROR, RECORDING NOT AVAILABLE        02580000
+                                                                        02590000
+         USING SRECSECT,R1        TEMP ADDRESSABILITY                   02600000
+         MVC   I1APPL,SRECAPPL    COPY APPLICATION NAME                 02610000
+         MVC   I1LOGMD,SRECMODE   COPY DEFAULT LOGMODE                  02620000
+         DROP  R1,I1              SRECSECT, SYSIMAGE (I1)               02630000
+                                                                        02640000
+*--------------------------------------------------------------         02650000
+*  RETRIEVE SYSRECORDINGS ROW FOR IMAGE2                                02660000
+*--------------------------------------------------------------         02670000
+         L     R0,I2.SIMGREC      ROWID (KEY) OF SYSRECORDINGS ENTRY    02680000
+         LA    R1,RECBF           ADDRESS OF BUFFINFO (ADDR/LEN)        02690000
+         BAS   R14,GETREC         RETRIEVE SYSRECORDINGS ROW            02700000
+         BNZ   ERR_REC            ERROR, RECORDING NOT AVAILABLE        02710000
+                                                                        02720000
+         USING SRECSECT,R1        TEMP ADDRESSABILITY                   02730000
+         MVC   I2APPL,SRECAPPL    COPY APPLICATION NAME                 02740000
+         MVC   I2LOGMD,SRECMODE   COPY DEFAULT LOGMODE                  02750000
+         DROP  R1,I2              SRECSECT, SYSIMAGE (I2)               02760000
+                                                                        02770000
+*--------------------------------------------------------------         02780000
+*  VERIFY RECORDINGS FROM SAME APPLICATION AND LOGMODE                  02790000
+*--------------------------------------------------------------         02800000
+         CLC   I1APPL,I2APPL      RECORDINGS FROM SAME APPL             02810000
+         BNE   ERR_APPL           NO,  FAIL SCREEN COMPARE              02820000
+****     CLC   I1LOGMD,I2LOGMD    RECORDINGS HAVE SAME LOGMODE          02830000
+****     BNE   ERR_LGMD           NO,  FAIL SCREEN COMPARE              02840000
+                                                                        02850000
+*--------------------------------------------------------------         02860000
+*  PERFORM SCREEN COMPARE FOR SPECIFIED SCREEN IMAGES                   02870000
+*--------------------------------------------------------------         02880000
+DOCOMPR  DS    0H                                                       02890000
+         BAS   R14,CMPIMAGE       COMPARE IMAGES                        02900000
+         BNZ   CMP_DIAG           NOMATCH, GENERATE DIAGNOSTIC          02910000
+                                                                        02920000
+         MVC   YSCSNAME,XSCSNAM2  REQUESTED SCREEN NAME                 02930000
+         MVC   YSCIMG,XSCIMG2     REQUESTED IMAGE KEY                   02940000
+         B     RESPOND            RETURN SUCCESS                        02950000
+                                                                        02960000
+         EJECT ,                                                        02970000
+***************************************************************         02980000
+*                                                                       02990000
+*  Only a single image is specified in the RU, therefore                03000000
+*  we will attempt to locate a duplicate (matching) image               03010000
+*  in the specified recording.  Position the sysnavigation              03020000
+*  table at top and construct a search argument using the               03030000
+*  specified recording name.  Retrieve each row from the                03040000
+*  sysnavigation table and associated sysimage row for the              03050000
+*  S0 state of the nav row.  Construct an image structure               03060000
+*  and perform an image compare until a match occurs or                 03070000
+*  until all rows are exhausted.  Skip all rows that have               03080000
+*  an identical name.                                                   03090000
+*                                                                       03100000
+***************************************************************         03110000
+NAV_SCAN DS    0H                                                       03120000
+*--------------------------------------------------------------         03130000
+*  IF IMAGE 1 IS FROM A SRCEEN SET, THEN DON'T ATTEMPT MATCH            03140000
+*--------------------------------------------------------------         03150000
+         L     R1,NAVBF           ADDRESS OF SYSNAV ROW                 03160000
+         USING SNAVSECT,R1        TEMP ADDRESSABILITY                   03170000
+         TM    SNAVSSET,BF        IS SCREEN A MEMBER OF SCREENSET       03180000
+         BNZ   NAV_NFND           CAN HAVE MATCH WITH SCREENSET         03190000
+         DROP  R1                 SNAVSECT                              03200000
+                                                                        03210000
+*--------------------------------------------------------------         03220000
+*  CONSTRUCT SYSNAV SEARCH ARG FOR RECORDING NAME                       03230000
+*--------------------------------------------------------------         03240000
+         TBSET TTOKEN=PRJTKNAV,   POSITION SYSNAVIGATION TO TOP        +03250000
+               POS=TOP,                                                +03260000
+               INDEX='PRIMARY',                                        +03270000
+               MF=(E,MFE_LIST)                                          03280000
+                                                                        03290000
+*--------------------------------------------------------------         03300000
+*  CONSTRUCT SYSNAV SEARCH ARG FOR RECORDING NAME                       03310000
+*--------------------------------------------------------------         03320000
+         XC    SARGAREA,SARGAREA  CLEAR WORKAREA                        03330000
+         LA    R3,SARGAREA        WORKAREA TO CONSTRUCT SARG            03340000
+         USING TBSARGS,R3         ADDRESSABILITY                        03350000
+                                                                        03360000
+         MVI   TBSAVER,TBSAV0     VERSION 0 SARG                        03370000
+         MVI   TBSABOOL,TBSABAND  AND BOOL CONNECTOR                    03380000
+         MVC   TBSAENTS,=AL2(1)   SINGLE TERM                           03390000
+         MVC   TBSALEN,=AL2(TBSAFIXL+TBSANFXL+L'XSCRECNM)               03400000
+         MVI   TBSAOPR,TBSAO$EQ   EQUAL TO                              03410000
+         MVC   TBSAACOL,=CL16'SNAVSREC'       RECORDING COLUMN NAME     03420000
+         MVC   TBSAAVAL(L'XSCRECNM),XSCRECNM  RECORDING NAME            03430000
+         DROP  R3                 TBSARGS                               03440000
+                                                                        03450000
+*--------------------------------------------------------------         03460000
+*  RETRIEVE NEXT SYSNAV TABLE ROW WITHIN RECORDING AND                  03470000
+*  DETERMINE IF IT IS CAN BE SELECTED AS A CANDIDATE SCREEN.            03480000
+*--------------------------------------------------------------         03490000
+NAV_NEXT DS    0H                                                       03500000
+         LA    R1,NAVBF           ADDRESS OF NAV BUFFINFO               03510000
+         BAS   R14,GETNAV         RETRIEVE NEXT SYSNAV                  03520000
+         BNZ   NAV_NFND           END OF RECORDING                      03530000
+         LR    R5,R1              ADDRESS OF NAV                        03540000
+         USING SNAVSECT,R5        SYSNAVIGATION ADDRESSABILITY          03550000
+                                                                        03560000
+         TM    FLAGS,$MATCHL      SCREEN NAME MATCHED ON LAST SNAV      03570000
+         BZ    NAV_COMP           NO CONTINUE WITH COMPARE              03580000
+         NI    FLAGS,FF-$MATCHL   RESET MATCHED LAST FLAG               03590000
+         MVC   ADJSAVE,SNAVLSCR   DON'T ALLOW THIS NAME TO MATCH        03600000
+         B     NAV_NEXT           ADVANCE TO NEXT SCREEN                03610000
+                                                                        03620000
+NAV_COMP DS    0H                                                       03630000
+         OI    FLAGS,$MATCHL      PRESUME SCREEN NAME MATCHES           03640000
+         CLC   SNAVLSCR,XSCSNAM1  SAME SCREEN OR DUPLICATE?             03650000
+         BE    NAV_NEXT           YES, TRY NEXT SCREEN                  03660000
+         NI    FLAGS,FF-$MATCHL   RESET MATCHED LAST FLAG               03670000
+                                                                        03680000
+         CLC   SNAVLSCR,ADJSAVE   WOULD S0 = S1 RESULT?                 03690000
+         BE    NAV_NEXT           YES, TRY NEXT SCREEN                  03700000
+         CLC   SNAVRSCR,XSCSNAM1  WOULD S0 = S1 RESULT?                 03710000
+         BE    NAV_NEXT           YES, TRY NEXT SCREEN                  03720000
+                                                                        03730000
+         TM    SNAVSSET,BF        IS SCREEN A MEMBER OF SCREENSET       03740000
+         BNZ   NAV_NEXT           CAN HAVE MATCH WITH SCREENSET         03750000
+                                                                        03760000
+         EJECT ,                                                        03770000
+*--------------------------------------------------------------         03780000
+*  RETRIEVE SYSIMAGE ROW FOR IMAGE COMPARE                              03790000
+*--------------------------------------------------------------         03800000
+         LA    R1,IMAGE2          ADDRESS OF IMAGE2 STRUCT ANCHOR       03810000
+         BAS   R14,FREEIMG        FREE IMAGE STRUCTURE                  03820000
+                                                                        03830000
+         ICM   R0,15,SNAVLKEY     CANDIDATE SCREEN SYSIMAGE KEY         03840000
+         BZ    NAV_NEXT           NO IMAGE, SKIP COMPARE                03850000
+         LA    R1,IMAGE1BF        SYSIMAGE BUFFINFO (ADDR/LEN)          03860000
+         BAS   R14,GETIMAGE       RETRIEVE BASE IMAGE                   03870000
+         BNZ   ERR_IMG            IMAGE NOT FOUND                       03880000
+                                                                        03890000
+         LR    R0,R5              SYSNAVIGATION ROW                     03900000
+         BAS   R14,BLDIMAGE       CONSTRUCT IMAGE STRUCTURE             03910000
+         BNZ   ERR_IMGB           IMGBLD FAILED                         03920000
+         ST    R1,IMAGE2          SAVE ADDRESS OF IMAGE STRUCTURE       03930000
+                                                                        03940000
+         EJECT ,                                                        03950000
+*--------------------------------------------------------------         03960000
+*  PERFORM SCREEN COMPARE USING CANDIDATE SCREEN FROM RECORDING         03970000
+*--------------------------------------------------------------         03980000
+         BAS   R14,CMPIMAGE       COMPARE SCREEN IMAGES                 03990000
+         BNZ   NAV_NEXT           NO, RETRIVE NEXT NAV ROW              04000000
+                                                                        04010000
+*--------------------------------------------------------------         04020000
+*  SCREEN IMAGES MATCH, RETURN SCREEN NAME AND ENTRY KEY OF DUP         04030000
+*--------------------------------------------------------------         04040000
+         MVC   YSCSNAME,SNAVLSCR  MATCHING SCREEN NAME                  04050000
+         MVC   YSCIMG,SNAVLKEY    SYSIMAGE ROWID                        04060000
+         B     RESPOND            SCREEN MATCH                          04070000
+                                                                        04080000
+*--------------------------------------------------------------         04090000
+*  NO MATCHING SCREEN IMAGES FOUND IN RECORDING                         04100000
+*--------------------------------------------------------------         04110000
+NAV_NFND DS    0H                                                       04120000
+         LA    R15,RC04           NO MATCHING IMAGES                    04130000
+         ST    R15,YSCRETC        SET RETURN CODE IN RU RESP            04140000
+         B     RESPOND            NOTIFY REQUESTOR                      04150000
+         DROP  R5                 SNAVSECT                              04160000
+                                                                        04170000
+         EJECT                                                          04180000
+***************************************************************         04190000
+*                                                                       04200000
+*   GENERATE DIAGNOSTIC MESSAGE FROM CMPINFO                            04210000
+*                                                                       04220000
+***************************************************************         04230000
+CMP_DIAG DS    0H                                                       04240000
+         LA    R15,RC08           RETURN CODE                           04250000
+         L     R0,CIRETCD         REASON CODE IS COMPARE RC             04260000
+         L     R1,CIRSNCD         INFO   CODE IS COMPARE RSN            04270000
+         LA    R1,100(,R1)        MESSAGE ID IS RSNCODE+100             04280000
+         B     FMTRESP            FORMAT RESPONSE MESSAGE               04290000
+                                                                        04300000
+***************************************************************         04310000
+*                                                                       04320000
+*   ERROR CONDITIONS, CONSTRUCT RETURN AREA AND MESSAGES                04330000
+*                                                                       04340000
+***************************************************************         04350000
+ERR_APPL DS    0H                                                       04360000
+         LA    R15,RC12           SCREEN COMPARE FAILURE                04370000
+         LA    R0,RSN04           APPLICATION NOT SAME                  04380000
+         LA    R1,201             MESSAGE ID                            04390000
+         B     FMTRESP            FORMAT RESPONSE MESSAGE               04400000
+                                                                        04410000
+ERR_LGMD DS    0H                                                       04420000
+         LA    R15,RC12           SCREEN COMPARE FAILURE                04430000
+         LA    R0,RSN08           LOGMODE NOT SAME                      04440000
+         LA    R1,202             MESSAGE ID                            04450000
+         B     FMTRESP            FORMAT RESPONSE MESSAGE               04460000
+                                                                        04470000
+ERR_RGNB DS    0H                                                       04480000
+         LA    R15,RC16           SCREEN COMPARE SERVICE ERROR          04490000
+         LA    R0,RSN04           REGION BUILD FAILED                   04500000
+         LA    R1,203             MESSAGE ID                            04510000
+         B     FMTRESP            FORMAT RESPONSE MESSAGE               04520000
+                                                                        04530000
+ERR_IMG  DS    0H                                                       04540000
+         LA    R15,RC16           SCREEN COMPARE SERVICE ERROR          04550000
+         LA    R0,RSN08           ERROR RETRIVING SYSIMAGE              04560000
+         LA    R1,204             MESSAGE ID                            04570000
+         B     FMTRESP            FORMAT RESPONSE MESSAGE               04580000
+                                                                        04590000
+ERR_IMGB DS    0H                                                       04600000
+         LA    R15,RC16           SCREEN COMPARE SERVICE ERROR          04610000
+         LA    R0,RSN12           ERROR CONSTRUCTING IMAGE STUCT        04620000
+         LA    R1,205             MESSAGE ID                            04630000
+         B     FMTRESP            FORMAT RESPONSE MESSAGE               04640000
+                                                                        04650000
+ERR_NAV  DS    0H                                                       04660000
+         LA    R15,RC16           SCREEN COMPARE SERVICE ERROR          04670000
+         LA    R0,RSN16           ERROR RETRIEVING NAV ROW              04680000
+         LA    R1,206             MESSAGE ID                            04690000
+         B     FMTRESP            FORMAT RESPONSE MESSAGE               04700000
+                                                                        04710000
+ERR_REC  DS    0H                                                       04720000
+         LA    R15,RC16           SCREEN COMPARE SERVICE ERROR          04730000
+         LA    R0,RSN20           ERROR RETIEVING SYSRECORDING          04740000
+         LA    R1,207             MESSAGE ID                            04750000
+         B     FMTRESP            FORMAT RESPONSE MESSAGE               04760000
+                                                                        04770000
+ERR_SAME DS    0H                                                       04780000
+         LA    R15,RC16           SCREEN COMPARE SERVICE ERROR          04790000
+         LA    R0,RSN24           RENAME WOULD RESULT IN S0=S1          04800000
+         LA    R1,208             MESSAGE ID                            04810000
+         B     FMTRESP            FORMAT RESPONSE MESSAGE               04820000
+                                                                        04830000
+*--------------------------------------------------------------         04840000
+*  SET RETURN INFORMATION IN RESPONSE HEADER AND FORMAT MESSAGE         04850000
+*--------------------------------------------------------------         04860000
+FMTRESP  DS    0H                                                       04870000
+         ST    R15,YSCRETC        SET RETURN CODE IN RESPONSE           04880000
+         ST    R0,YSCRSNC         SET REASON CODE IN RESPONSE           04890000
+         ST    R1,YSCINFO         SET INFO   CODE IN RESPONSE           04900000
+                                                                        04910000
+         LR    R2,R1                                                    04920000
+         $MSG  (R2),MSGID=NO,                                          +04930000
+               DEST=$BUFFER,BUFR=MSGBUF,BUFL=L'MSGBUF                   04940000
+                                                                        04950000
+         B     RESPOND            BUILD RESPONSE MESSAGE                04960000
+                                                                        04970000
+         EJECT                                                          04980000
+***************************************************************         04990000
+*                                                                       05000000
+*   CONSTRUCT RESPONSE BLOCK FROM ACQUIRED DATA                         05010000
+*                                                                       05020000
+***************************************************************         05030000
+RESPOND  DS    0H                                                       05040000
+         $XPBUFR INIT,SIZE=1024,XH=XSMSCMP                              05050000
+         BNZ   ABE_TXP                                                  05060000
+                                                                        05070000
+         $XPBUFR ISRT,DATALEN=YSMSCMPL                                  05080000
+         BNZ   ABE_TXP                                                  05090000
+         LR    R5,R1              SAVE RESPONSE ORIGIN                  05100000
+                                                                        05110000
+*--------------------------------------------------------------         05120000
+*   INSERT MESSAGES INTO RESPONSE RU                                    05130000
+*--------------------------------------------------------------         05140000
+         LA    R6,MSGBUF          LOCAL MESSAGE BUFFER                  05150000
+         USING $MSGBUF,R6                                               05160000
+         ICM   R4,15,$MSGQF       LOCATE FIRST MESSAGE                  05170000
+         BZ    MSG_FIN            END OF MESSAGES                       05180000
+         USING $MSBHDR,R4         ADDRESS MSG INSTANCES                 05190000
+                                                                        05200000
+MSGFNXT  DS    0H                                                       05210000
+         LH    R2,$MSBLEN         MESSAGE TEXT LENGTH                   05220000
+         STH   R2,$MSBRSVD        PREPEND TO MESSAGE TEXT               05230000
+                                                                        05240000
+         $XPBUFR ISRT,DATALEN=2(R2),DATA=$MSBRSVD                       05250000
+         BNZ   MSG_FIN            ASSUME FAILURES ARE CAPACITY RELATED  05260000
+                                                                        05270000
+         LH    R15,YSCMSGC        MESSAGE COUNT                         05280000
+         LA    R15,1(,R15)        ACCOUNT FOR THIS MESSAGE              05290000
+         STH   R15,YSCMSGC        SAVE UPDATED COUNT                    05300000
+                                                                        05310000
+         ICM   R4,15,$MSBLINK     MESSAGES REMAIN?                      05320000
+         BNZ   MSGFNXT            AGAIN IF SO                           05330000
+         DROP  R4,R6              $MSBHDR, $MSGBUF                      05340000
+                                                                        05350000
+MSG_FIN  DS    0H                                                       05360000
+         MVC   0(YSMSCMPL,R5),YSMSCMP COPY RESPONSE HEADER              05370000
+                                                                        05380000
+*--------------------------------------------------------------         05390000
+*   TRANSMIT RESPONSE                                                   05400000
+*--------------------------------------------------------------         05410000
+         $XPBUFR XMIT             TRANSMIT AND FREE                     05420000
+         BNZ   ABE_TXP                                                  05430000
+                                                                        05440000
+         EJECT                                                          05450000
+***************************************************************         05460000
+*                                                                       05470000
+*   RETURN TO REQUEST SCHEDULER                                         05480000
+*                                                                       05490000
+***************************************************************         05500000
+         BAS   R14,CLEANUP        RELEASE ACQUIRED STG                  05510000
+         LA    R15,RC00           NORMAL COMPLETION                     05520000
+         #EXIT ,                  RETURN                                05530000
+                                                                        05540000
+         EJECT                                                          05550000
+***************************************************************         05560000
+*                                                                       05570000
+* ROUTINE: BLDIMAGE - Build image structure                             05580000
+*                                                                       05590000
+* DESCRIPTION:                                                          05600000
+*                                                                       05610000
+*    This routine will call the imgbld function to construct            05620000
+*    an image structure for the specified sysimage row.  The            05630000
+*    structure is completed by copying the associated S0 flags          05640000
+*    from the sysnavigation row and by locating the associated          05650000
+*    region network for the screen(set).                                05660000
+*                                                                       05670000
+* ENTRY: R1 - Address of sysiamge row                                   05680000
+*        R0 - Address of sysnavigation row                              05690000
+*                                                                       05700000
+* EXIT:  R15 contains one of the following return codes:                05710000
+*                                                                       05720000
+*            RC00 - Image build successful                              05730000
+*            RC08 - Image build failed                                  05740000
+*                                                                       05750000
+***************************************************************         05760000
+BLDIMAGE DS    0H                                                       05770000
+         STM   R0,R15,REGSAVE     SAVE CALLERS REGISTERS                05780000
+         LR    R3,R1              ADDRESS OF IMAGE ROW                  05790000
+         LR    R4,R0              ADDRESS OF IMAGE NAME                 05800000
+         USING SNAVSECT,R4        ADDRESSABILITY                        05810000
+                                                                        05820000
+         $CLINK FUNC=IMGBLD,      CONSTRUCT IMAGE STRUCTURE            +05830000
+               (STRUCT*,PRJEXSTG),                                     +05840000
+               (STRUCT*,(R3)),                                         +05850000
+               (CHAR*,SNAVLSCR)                                         05860000
+                                                                        05870000
+         LTR   R5,R15             ADDRESS OF IMAGE STRUCTURE            05880000
+         BZ    BIMG_ERR           ERROR CONSTRUCTING SYSIMAGE           05890000
+         USING NVIMAGE,R5         ADDRESSABILITY                        05900000
+                                                                        05910000
+         MVC   NVIATTR,SNAVFLG0   COPY IMAGE ATTRIBUTES                 05920000
+                                                                        05930000
+*--------------------------------------------------------------         05940000
+*  ATTEMPT TO LOCATE REGION NET FOR SCREEN / SCREEN SET                 05950000
+*--------------------------------------------------------------         05960000
+         LA    R1,SNAVLSCR        ASSUME SCREEN NAME                    05970000
+         TM    SNAVSSET,BF        SCREEN SET SPECIFIED?                 05980000
+         BZ    *+8                NO, USE SCREEN NAME                   05990000
+         LA    R1,SNAVSSET        USE SCREEN SET NAME                   06000000
+                                                                        06010000
+         @CALL ILOCSSET,CTYPE=CVT LOCATE EXRGNET                        06020000
+         LTR   R15,R15            NO RGN FOR SCREEN                     06030000
+         BNZ   BIMG_OK            RETURN                                06040000
+                                                                        06050000
+         USING EXRGNET,R1         TEMP ADDRESSABILITY                   06060000
+         LA    R1,EXRNROOT        REGION TREE ROOT ADDRESS              06070000
+         DROP  R1                 EXRGNET                               06080000
+         ST    R1,NVIRGNTR        SAVE RGNTREE ROOT ADDRESS             06090000
+                                                                        06100000
+BIMG_OK  DS    0H                                                       06110000
+         LA    R15,RC00           NORMAL COMPLETION                     06120000
+         LR    R1,R5              ADDRESS OF IMAGE ROW                  06130000
+         B     BIMG_RET           RETURN                                06140000
+                                                                        06150000
+BIMG_ERR DS    0H                                                       06160000
+         LA    R15,RC08           ERROR CONSTRUCTING IMAGE              06170000
+                                                                        06180000
+BIMG_RET DS    0H                                                       06190000
+         LM    R2,R14,REGSAVE+8   RESTORE CALLERS REGISTERS             06200000
+         LTR   R15,R15            SET COMPLETION STATUS                 06210000
+         BR    R14                RETURN                                06220000
+                                                                        06230000
+         EJECT                                                          06240000
+***************************************************************         06250000
+*                                                                       06260000
+* ROUTINE: CMPIMAGE - Prepare and compare screen images                 06270000
+*                                                                       06280000
+* DESCRIPTION:                                                          06290000
+*                                                                       06300000
+*   This routine will call the function to prepare the                  06310000
+*   two images for the compare process by drawing the                   06320000
+*   regions for the screens using the region tree from                  06330000
+*   either image structure providing that there is only                 06340000
+*   one rgntree.  The request to compare the images is                  06350000
+*   performed and the cmpinfo structure contains the                    06360000
+*   error information.                                                  06370000
+*                                                                       06380000
+* ENTRY: N/A                                                            06390000
+*                                                                       06400000
+* EXIT:  R15 Contains on of the following return codes:                 06410000
+*                                                                       06420000
+*            RC00 - Images Match                                        06430000
+*           \RC00 - Images do not Match (see CMPINFO)                   06440000
+*                                                                       06450000
+***************************************************************         06460000
+CMPIMAGE DS    0H                                                       06470000
+         STM   R0,R15,REGSAVE     SAVE CALLERS REGISTERS                06480000
+                                                                        06490000
+         L     R2,IMAGE1          BASE IMAGE ADDRESS                    06500000
+         L     R3,IMAGE2          CANDIDATE IMAGE ADDRESS               06510000
+                                                                        06520000
+         $CLINK FUNC=IMGPREP,     PREPARE IMAGES FOR COMPARE           +06530000
+               (STRUCT*,PRJEXSTG), STORATE QUEUE HEADER                +06540000
+               (STRUCT*,(R2)),    BASE IMAGE                           +06550000
+               (STRUCT*,(R3)),    CANDIDATE IMAGE                      +06560000
+               (STRUCT*,CMPINFO)  CMPINFO STATUS AREA                   06570000
+                                                                        06580000
+         LTR   R15,R15            PREPARE SUCCESSFUL                    06590000
+         BNZ   CMP_RET            NO,  RETURN                           06600000
+                                                                        06610000
+         $CLINK FUNC=IMGCMP,      COMPARE I1 AND I2 IMAGES             +06620000
+               (STRUCT*,PCBSTG),                                       +06630000
+               (STRUCT*,(R2)),    BASE IMAGE                           +06640000
+               (STRUCT*,(R3)),    CANDIDATE IMAGE                      +06650000
+               (STRUCT*,CMPINFO)  CMPINFO STATUS AREA                   06660000
+                                                                        06670000
+CMP_RET  DS    0H                                                       06680000
+         LM    R0,R14,REGSAVE     RESTORE CALLERS REGISTERS             06690000
+         LTR   R15,R15            SET COMPLETION STATUS                 06700000
+         BR    R14                RETURN                                06710000
+                                                                        06720000
+         EJECT                                                          06730000
+***************************************************************         06740000
+*                                                                       06750000
+* ROUTINE: FREEIMG - Free image storage                                 06760000
+*                                                                       06770000
+* DESCRIPTION:                                                          06780000
+*                                                                       06790000
+*   This routine will call the function to release all resource         06800000
+*   associated with the image structure.                                06810000
+*                                                                       06820000
+* ENTRY: R1 - Address of image pointer                                  06830000
+*                                                                       06840000
+* EXIT:  N/A                                                            06850000
+*                                                                       06860000
+***************************************************************         06870000
+FREEIMG  DS    0H                                                       06880000
+         STM   R0,R15,REGSAVE2    SAVE CALLERS REGISTERS                06890000
+         LR    R2,R1              ADDR OF IMAGE STRUCT POINTER          06900000
+                                                                        06910000
+         $CLINK FUNC=IMGFREE,     FREE IMAGE STRUCTURES                +06920000
+               (STRUCT*,PRJEXSTG),                                     +06930000
+               (STRUCT**,(R2))                                          06940000
+                                                                        06950000
+         LM    R0,R15,REGSAVE2    RESTORE CALLERS REGISTERS             06960000
+         BR    R14                RETURN                                06970000
+                                                                        06980000
+         EJECT                                                          06990000
+***************************************************************         07000000
+*                                                                       07010000
+* ROUTINE: BNAVSARG - Build SARG for SYSNAVIGATION retrieval            07020000
+*                                                                       07030000
+* DESCRIPTION:                                                          07040000
+*                                                                       07050000
+*    This routine will constuct a search argument (SARG) to             07060000
+*    be used to retieve the requested sysnavigation table               07070000
+*    row.  The sarg constructed will use the navigation row             07080000
+*    of the sysimage entry key for the S0 state.                        07090000
+*                                                                       07100000
+*    SYSNAVIGATION table positioning is reset to top to prepare         07110000
+*    sysnav retrieval.                                                  07120000
+*                                                                       07130000
+*                                                                       07140000
+* ENTRY: R1 - SARG Value (SNAVLKEY)                                     07150000
+*                                                                       07160000
+* EXIT:  N/A                                                            07170000
+*                                                                       07180000
+***************************************************************         07190000
+BNAVSARG DS    0H                                                       07200000
+         STM   R0,R15,REGSAVE     SAVE CALLERS REGISTERS                07210000
+         LR    R2,R1              SAVE SARG VALUE (SNAVLKEY)            07220000
+                                                                        07230000
+*--------------------------------------------------------------         07240000
+*  RESET SNAV TO TOP OF TABLE                                           07250000
+*--------------------------------------------------------------         07260000
+         TBSET TTOKEN=PRJTKNAV,   POSITION SYSNAVIGATION TO TOP        +07270000
+               POS=TOP,                                                +07280000
+               INDEX='PRIMARY',                                        +07290000
+               MF=(E,MFE_LIST)                                          07300000
+                                                                        07310000
+*--------------------------------------------------------------         07320000
+*  CONSTRUCT SYSNAVIGATION TABLE SARG USING LEFT SYSIMAGE KEY           07330000
+*--------------------------------------------------------------         07340000
+         XC    SARGAREA,SARGAREA  CLEAR WORKAREA                        07350000
+         LA    R3,SARGAREA        WORKAREA TO CONSTRUCT SARG            07360000
+         USING TBSARGS,R3         ADDRESSABILITY                        07370000
+                                                                        07380000
+         MVI   TBSAVER,TBSAV0     VERSION 0 SARG                        07390000
+         MVI   TBSABOOL,TBSABAND  AND BOOL CONNECTOR                    07400000
+         MVC   TBSAENTS,=AL2(1)   SINGLE TERM                           07410000
+         MVC   TBSALEN,=AL2(TBSAFIXL+TBSANFXL+L'SNAVLKEY)               07420000
+         MVI   TBSAOPR,TBSAO$EQ   EQUAL TO                              07430000
+         MVC   TBSAACOL,=CL16'SNAVLKEY' SYSIMAGE KEY                    07440000
+         STCM  R2,15,TBSAAVAL     SAVE IN SARG                          07450000
+         DROP  R3                 TBSARGS                               07460000
+                                                                        07470000
+         LM    R0,R15,REGSAVE     RESTORE CALLERS REGISTERS             07480000
+         BR    R14                RETURN                                07490000
+                                                                        07500000
+         EJECT                                                          07510000
+***************************************************************         07520000
+*                                                                       07530000
+* ROUTINE: GETIMAGE - Retrieve row from sysimage table                  07540000
+*                                                                       07550000
+* DESCRIPTION:                                                          07560000
+*                                                                       07570000
+*   This routine will retrieve the requested sysimage row               07580000
+*   by rowid.  If the current buffer size for sysimage                  07590000
+*   is insufficient (as identified by BUFFINFO address), then           07600000
+*   the buffer (re)allocated.                                           07610000
+*                                                                       07620000
+* ENTRY: R0 - SYSIMAGE entry key                                        07630000
+*        R1 - Address IMAGE BUFFINFO (Address/Len)                      07640000
+*                                                                       07650000
+* EXIT:  R15 Contains the return code from TBGET                        07660000
+*                                                                       07670000
+*            RC00 - sysimage successfully retrieved                     07680000
+*                   R1 = Address of requested sysimage row              07690000
+*                   R0 = Length  of requested sysimage row              07700000
+*                                                                       07710000
+***************************************************************         07720000
+GETIMAGE DS    0H                                                       07730000
+         STM   R0,R15,REGSAVE     SAVE CALLERS REGISTERS                07740000
+                                                                        07750000
+         LR    R8,R1              SAVE ADDRESS OF BUFFINFO              07760000
+         LR    R5,R0              ROWID OF REQUESTED ROW                07770000
+                                                                        07780000
+         ICM   R0,15,0(R1)        SYSIMAGE ROW ALLOCATED?               07790000
+         BNZ   GIMG_GET           YES, CONTINUE                         07800000
+         LA    R0,256             DEFAULT SIZE                          07810000
+         BAS   R14,GETBUFF        ALLOC SYSIMAGE BUFFER                 07820000
+                                                                        07830000
+GIMG_GET DS    0H                                                       07840000
+         LM    R3,R4,0(R8)        RETIEVE IMAGE BUFFER INFO             07850000
+                                                                        07860000
+         TBGET (R3),              ACQUIRE DESIGNATED SYSIMAGE          +07870000
+               LENGTH=(R4),                                            +07880000
+               POS=(R5),                                               +07890000
+               TTOKEN=PRJTKIMG,                                        +07900000
+               MF=(E,MFE_LIST)                                          07910000
+                                                                        07920000
+         C     R15,=A(RC04)       SYSIMAGE RETRUEVED ?                  07930000
+         BH    GIMG_RET           ERROR, NOTIFY REQUESTOR               07940000
+         BL    GIMG_FND           OK,  RETURN ADDRESS                   07950000
+         LTR   R0,R0              INSUFFICIENT BUFFER SIZE?             07960000
+         BZ    GIMG_RET           NO, ROW NOT FOUND                     07970000
+                                                                        07980000
+         LR    R2,R0              SAVE STORAGE REQUIREMENT              07990000
+         LR    R1,R8              ADDRESS OF BUFF INFO                  08000000
+         BAS   R14,FREEBUFF       RETURN CURRENT BUFFER STORAGE         08010000
+                                                                        08020000
+         LR    R1,R8              ADDRESS OF BUFF INFO                  08030000
+         LR    R0,R2              LENGTH  OF BUFF REQUIRED              08040000
+         BAS   R14,GETBUFF        ALLOC NEW BUFFER                      08050000
+         B     GIMG_GET           RETRY ROW RETRIEVAL                   08060000
+                                                                        08070000
+GIMG_FND DS    0H                                                       08080000
+         LR    R0,R1              RETURN LENGTH  OF SYSIMAGE            08090000
+         LR    R1,R3              RETURN ADDRESS OF SYSIMAGE            08100000
+                                                                        08110000
+GIMG_RET DS    0H                                                       08120000
+         LM    R2,R14,REGSAVE+8   RESTORE CALLERS REGISTERS             08130000
+         LTR   R15,R15            SET COMPLETION STATUS                 08140000
+         BR    R14                RETURN                                08150000
+                                                                        08160000
+         EJECT ,                                                        08170000
+***************************************************************         08180000
+*                                                                       08190000
+* ROUTINE: GETNAV - Retrieve row from sysnavigation table               08200000
+*                                                                       08210000
+* DESCRIPTION:                                                          08220000
+*                                                                       08230000
+*   This routine will retrieve the next row from the                    08240000
+*   sysnavigation using the search argument (SARG) constructed          08250000
+*   in the SARGAREA.  If a sysnav buffer is not already                 08260000
+*   allocated, a buffer will be allocated prior to table                08270000
+*   processing.                                                         08280000
+*                                                                       08290000
+* ENTRY: R1 - Address nav BUFFINFO (Address/Len)                        08300000
+*                                                                       08310000
+* EXIT:  R15 Contains the return code from TBGET                        08320000
+*                                                                       08330000
+*            RC00 - sysimage successfully retrieved                     08340000
+*                   R1 = Address of sysnavigation row                   08350000
+*                   R0 = Length  of sysnavigation row                   08360000
+*                                                                       08370000
+***************************************************************         08380000
+GETNAV   DS    0H                                                       08390000
+         STM   R0,R15,REGSAVE     SAVE CALLERS REGISTERS                08400000
+         LR    R8,R1              SAVE ADDRESS OF BUFFINFO              08410000
+                                                                        08420000
+         ICM   R0,15,0(R1)        ADDRESS OF NAV BUFFER                 08430000
+         BNZ   GNAV_GET           AVAILABLE?, CONTINUE                  08440000
+         LA    R0,SNAVLN          LENGTH REQUIRED                       08450000
+         BAS   R14,GETBUFF        ALLOC SYSNAV STORAGE                  08460000
+                                                                        08470000
+GNAV_GET DS    0H                                                       08480000
+         LM    R3,R4,0(R8)        RETIEVE NAV BUFF INFO                 08490000
+                                                                        08500000
+         TBGET (R3),              ACQUIRE NEXT SYSNAV ROW              +08510000
+               LENGTH=(R4),                                            +08520000
+               POS=NEXT,                                               +08530000
+               TTOKEN=PRJTKNAV,                                        +08540000
+               INDEX='PRIMARY',                                        +08550000
+               SARGS=SARGAREA,                                         +08560000
+               MF=(E,MFE_LIST)                                          08570000
+                                                                        08580000
+         LTR   R15,R15            ROW AVAILABLE?                        08590000
+         BNZ   GNAV_RET           NO, RETURN                            08600000
+                                                                        08610000
+         LR    R1,R3              ADDRESS OF SYSNAV ROW                 08620000
+         LR    R0,R4              LENGTH  OF SYSNAV ROW                 08630000
+                                                                        08640000
+GNAV_RET DS    0H                                                       08650000
+         LM    R2,R14,REGSAVE+8   RESTORE CALLERS REGISTERS             08660000
+         LTR   R15,R15            SET COMPLETION STATUS                 08670000
+         BR    R14                RETURN                                08680000
+                                                                        08690000
+         EJECT ,                                                        08700000
+***************************************************************         08710000
+*                                                                       08720000
+* ROUTINE: GETREC - Retrieve row from sysrecordings table               08730000
+*                                                                       08740000
+* DESCRIPTION:                                                          08750000
+*                                                                       08760000
+*   This routine will retrieve the specified row from the               08770000
+*   sysrecordings table by rowid.  If a sysrecordings buffer            08780000
+*   has not yet been allocated, then one will be allocated.             08790000
+*                                                                       08800000
+* ENTRY: R0 - SYSRECORDINGS entry key                                   08810000
+*        R1 - Address recording BUFFINFO (Address/Len)                  08820000
+*                                                                       08830000
+* EXIT:  R15 Contains the return code from TBGET                        08840000
+*                                                                       08850000
+*            RC00 - sysrecording  successfully retrieved                08860000
+*                   R1 = Address of requested sysrecording row          08870000
+*                   R0 = Length  of requested sysrecording row          08880000
+*                                                                       08890000
+***************************************************************         08900000
+GETREC   DS    0H                                                       08910000
+         STM   R0,R15,REGSAVE     SAVE CALLERS REGISTERS                08920000
+         LR    R8,R1              SAVE ADDRESS OF BUFFINFO              08930000
+         LR    R2,R0              SAVE SYSRECORDINGS ROWID              08940000
+                                                                        08950000
+         ICM   R0,15,0(R1)        ADDRESS OF REC BUFFER                 08960000
+         BNZ   GREC_GET           AVAILABLE?, CONTINUE                  08970000
+         LA    R0,SNAVLN          LENGTH REQUIRED                       08980000
+         BAS   R14,GETBUFF        ALLOC SYSREC STORAGE                  08990000
+                                                                        09000000
+GREC_GET DS    0H                                                       09010000
+         LM    R3,R4,0(R8)        RETIEVE REC BUFF INFO                 09020000
+                                                                        09030000
+         TBGET (R3),              ACQUIRE NEXT SYSREC ROW              +09040000
+               LENGTH=(R4),                                            +09050000
+               POS=(R2),                                               +09060000
+               TTOKEN=PRJTKREC,                                        +09070000
+               MF=(E,MFE_LIST)                                          09080000
+                                                                        09090000
+         LTR   R15,R15            ROW AVAILABLE?                        09100000
+         BNZ   GREC_RET           NO, RETURN                            09110000
+                                                                        09120000
+         LR    R1,R3              ADDRESS OF SYSREC ROW                 09130000
+         LR    R0,R4              LENGTH  OF SYSREC ROW                 09140000
+                                                                        09150000
+GREC_RET DS    0H                                                       09160000
+         LM    R2,R14,REGSAVE+8   RESTORE CALLERS REGISTERS             09170000
+         LTR   R15,R15            SET COMPLETION STATUS                 09180000
+         BR    R14                RETURN                                09190000
+                                                                        09200000
+         EJECT                                                          09210000
+***************************************************************         09220000
+*                                                                       09230000
+* ROUTINE: GETBUFF - Allocate Buffer                                    09240000
+*                                                                       09250000
+* DESCRIPTION:                                                          09260000
+*                                                                       09270000
+*   This routine allocate a buffer from the project storage             09280000
+*   storage pool and anchor its address/length in the                   09290000
+*   BUFFINFO area provided.                                             09300000
+*                                                                       09310000
+* ENTRY: R0 - Length  of buffer required                                09320000
+*        R1 - Address of BUFFINFO (Address/Len)                         09330000
+*                                                                       09340000
+* EXIT:  R15 Contains the return code from STGGET                       09350000
+*                                                                       09360000
+***************************************************************         09370000
+GETBUFF  DS    0H                                                       09380000
+         STM   R0,R15,REGSAVE2    SAVE CALLERS REGISTERS                09390000
+                                                                        09400000
+         LR    R2,R0              GET REQUIRED LENGTH                   09410000
+         LR    R8,R1              ADDRESS OF BUFFINFO AREA              09420000
+                                                                        09430000
+         STGGET (R2),QH=PRJEXSTG  ALLOC REQUIRED BUFFER                 09440000
+         BNZ   GBUF_RET           RETURN                                09450000
+                                                                        09460000
+         ST    R1,0(,R8)          SAVE ADDRESS OF BUFFER                09470000
+         ST    R2,4(,R8)          SAVE LENGTH  OF BUFFER                09480000
+                                                                        09490000
+GBUF_RET DS    0H                                                       09500000
+         LM    R0,R14,REGSAVE2    RESTORE CALLERS REGISTERS             09510000
+         LTR   R15,R15            SET COMPLETION STATUS                 09520000
+         BR    R14                RETURN                                09530000
+                                                                        09540000
+         EJECT                                                          09550000
+***************************************************************         09560000
+*                                                                       09570000
+* ROUTINE: FREEBUFF - Return buffer storage                             09580000
+*                                                                       09590000
+* DESCRIPTION:                                                          09600000
+*                                                                       09610000
+*   This routine will return the storage buffer define                  09620000
+*   by the BUFFINFO area provide.                                       09630000
+*                                                                       09640000
+* ENTRY: R1 - Address of BUFFINFO (Address/len)                         09650000
+*                                                                       09660000
+* EXIT:  R15 Contains the return code from STGRETN                      09670000
+*                                                                       09680000
+***************************************************************         09690000
+FREEBUFF DS    0H                                                       09700000
+         STM   R0,R15,REGSAVE2    SAVE CALLERS REGISTERS                09710000
+         LR    R8,R1              ADDRESS OF BUFFINFO AREA              09720000
+                                                                        09730000
+         LA    R15,RC00           ASSUME SUCCESS                        09740000
+         LM    R3,R4,0(R8)        ADDR/LEN OF BUFFER                    09750000
+         LTR   R3,R3              BUFFER AVAILABLE?                     09760000
+         BZ    FBUF_RET           NO, RETURN                            09770000
+                                                                        09780000
+         STGRETN ADDR=(R3),LEN=(R4),QH=PRJEXSTG                         09790000
+                                                                        09800000
+         XC    0(8,R8),0(R8)      RESET BUFFER ADDR/LEN                 09810000
+                                                                        09820000
+FBUF_RET DS    0H                                                       09830000
+         LM    R0,R14,REGSAVE2    RESTORE CALLERS REGISTERS             09840000
+         LTR   R15,R15            SET COMPLETION STATUS                 09850000
+         BR    R14                RETURN                                09860000
+                                                                        09870000
+         EJECT                                                          09880000
+***************************************************************         09890000
+*                                                                       09900000
+* ROUTINE: CLEANUP - Release all acquired resources                     09910000
+*                                                                       09920000
+* DESCRIPTION:                                                          09930000
+*                                                                       09940000
+*   This routine will release all storage buffers acquired              09950000
+*   during screen compare processing.                                   09960000
+*                                                                       09970000
+* ENTRY: N/A                                                            09980000
+*                                                                       09990000
+* EXIT:  N/A                                                            10000000
+*                                                                       10010000
+***************************************************************         10020000
+CLEANUP  DS    0H                                                       10030000
+         STM   R0,R15,REGSAVE     SAVE CALLERS REGISTERS                10040000
+                                                                        10050000
+         LA    R1,IMAGE1          ADDRESS OF IMAGE PTR                  10060000
+         BAS   R14,FREEIMG        RELEASE IMAGE STRUCTURE               10070000
+         LA    R1,IMAGE2          ADDRESS OF IMAGE PTR                  10080000
+         BAS   R14,FREEIMG        RELEASE IMAGE STRUCTURE               10090000
+                                                                        10100000
+         LA    R1,IMAGE1BF        ADDRESS OF IMAGE BUFFINFO             10110000
+         BAS   R14,FREEBUFF       RELEASE IMAGE BUFFER                  10120000
+         LA    R1,IMAGE2BF        ADDRESS OF IMAGE BUFFINFO             10130000
+         BAS   R14,FREEBUFF       RELEASE IMAGE BUFFER                  10140000
+                                                                        10150000
+         LA    R1,NAVBF           ADDRESS OF SYSNAV BUFFINFO            10160000
+         BAS   R14,FREEBUFF       RELEASE SYSNAV BUFFER                 10170000
+                                                                        10180000
+         LA    R1,RECBF           ADDRESS OF SYSREC BUFFINFO            10190000
+         BAS   R14,FREEBUFF       RELEASE SYSREC BUFFER                 10200000
+                                                                        10210000
+         LM    R0,R15,REGSAVE     RESTORE CALLERS REGISTERS             10220000
+         BR    R14                RETURN                                10230000
+                                                                        10240000
+         EJECT                                                          10250000
+***************************************************************         10260000
+*                                                                       10270000
+* CATASTROPIC ERRORS                                                    10280000
+*                                                                       10290000
+***************************************************************         10300000
+ABE_TBSV DS    0H                                                       10310000
+         $ABEND ABE_TBSERV,DUMP=YES,                                   +10320000
+               TITLE='TABLE SERVICE FAILURE'                            10330000
+                                                                        10340000
+ABE_TXP  DS    0H                                                       10350000
+         $ABEND ABE_TXPSERV,DUMP=YES,                                  +10360000
+               TITLE='TXP BUFFER SERVICE FAILURE'                       10370000
+                                                                        10380000
+         EJECT ,                                                        10390000
+***************************************************************         10400000
+*                                                                       10410000
+*   LOCAL READ ONLY DATA AREAS, ETC.                                    10420000
+*                                                                       10430000
+***************************************************************         10440000
+         LTORG ,                                                        10450000
+                                                                        10460000
+         EJECT                                                          10470000
+         PRINT NOGEN                                                    10480000
+         ICVT  ,                                                        10490000
+         ITASK ,                                                        10500000
+         IPCB  ,                                                        10510000
+         IUSER ,                                                        10520000
+         IPROJ ,                                                        10530000
+         END   ,                                                        10540000

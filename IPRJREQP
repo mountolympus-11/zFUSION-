@@ -1,0 +1,493 @@
+IPRJREQP TITLE 'PROJECT REQUEST PROCESSOR'                              00010000
+**<DOC-ON>******************************************************        00020000
+*                                                                       00030000
+* ROUTINE: IPRJREQP - Project request processor                         00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This routine provides an interface to the Project server           00080000
+*    task.  In most cases the project request processor                 00090000
+*    will route the request to the project task.  Although,             00100000
+*    to open/close a project for runtime access, the request            00110000
+*    may be satisfied locally without necessity to queue a              00120000
+*    message to the project server task.  This condition                00130000
+*    occurs when a project open request for runtime access              00140000
+*    which is already open, or to close a runtime project               00150000
+*    currently accessed by more than 1 user.                            00160000
+*                                                                       00170000
+*    When the project request is sent to the project server             00180000
+*    task,  a $TASK wait is issued for the completion of the            00190000
+*    of the project request.  Cancel and Stop events are                00200000
+*    defered until completion of the request.  Notification             00210000
+*    of these events is signaled via the return code.                   00220000
+*                                                                       00230000
+* ON ENTRY:                                                             00240000
+*                                                                       00250000
+*    R1 contains the address of the parameter list mapped               00260000
+*    by the IPRJXMSG dsect ($PRJREQ DSECT=YES).                         00270000
+*                                                                       00280000
+* ON EXIT:                                                              00290000
+*                                                                       00300000
+*    Upon completion of this routine, R15 contain one of the            00310000
+*    following return codes.  For all return codes less than or         00320000
+*    equal to RC08, the info return area contains a return              00330000
+*    code, reason code, and optional message that are intended          00340000
+*    for delivery to the requesting workbench / runtime user.           00350000
+*    RC12 indicates an environmental or programming error that          00360000
+*    preclude project services from running.                            00370000
+*                                                                       00380000
+*       R15 =  RC00 - Project request completed successfully            00390000
+*                     R1 = addr of IPROJ on OPEN/NEW request.           00400000
+*                                                                       00410000
+*              RC08 - The project request was attempted but did         00420000
+*                     not complete. The info return area                00430000
+*                     describes the error which occured.                00440000
+*                     Refer to the IPRJTASK prolog for an               00450000
+*                     explanation of the return and reason              00460000
+*                     codes.                                            00470000
+*                                                                       00480000
+*              RC12 - The project request failed.                       00490000
+*                                                                       00500000
+*                          RSN04 - Project task terminated prior        00510000
+*                                  to completion of current req.        00520000
+*                                                                       00530000
+*                          RSN08 - Task send request failed             00540000
+*                                                                       00550000
+*                          RSN12 - Invalid Access for request           00560000
+*                                  type.                                00570000
+*                                                                       00580000
+*                          RSN16 - Error obtain PROJ lock               00590000
+*                                                                       00600000
+**<DOC-OFF>*****************************************************        00610000
+                                                                        00620000
+         EJECT ,                                                        00630000
+****************************************************************        00640000
+*                                                                       00650000
+* MAINTENANCE:                                                          00660000
+*                                                                       00670000
+*    06/28/93  Ron Colmone                                              00680000
+*              Initial version.                                         00690000
+*                                                                       00700000
+*    04/05/94  Tim Weltzer                                              00710000
+*              Added SAVEALL function                                   00720000
+*                                                                       00730000
+*    09/27/94  Tim Weltzer                                              00740000
+*              Changed to pass user name instead of IUSER address       00750000
+*                                                                       00760000
+****************************************************************        00770000
+                                                                        00780000
+         EJECT ,                                                        00790000
+         $PRJREQ DSECT=YES        PROJECT REQUEST MAPPING               00800000
+         EJECT ,                                                        00810000
+         $TASK DSECT=YES          TASK MANAGER SERVICE PLIST            00820000
+         EJECT ,                                                        00830000
+         $ENTITY DSECT=YES        ENTITY MANAGER PLIST                  00840000
+         EJECT ,                                                        00850000
+         $TSEND DSECT=YES         INTER TASK MESSAGE PLIST              00860000
+         EJECT ,                                                        00870000
+         TMSG  ,                  INTER TASK MESSAGE MAPPINGS           00880000
+         EJECT ,                                                        00890000
+         MSGCODES ,               INTER TASK MESSAGE CODES              00900000
+         EJECT ,                                                        00910000
+         EVCODES  ,               EVENT CODES                           00920000
+         EJECT ,                                                        00930000
+         EQUS  ,                  GENERAL EQUATES                       00940000
+                                                                        00950000
+         EJECT ,                                                        00960000
+         #WORK ,                  READ/WRITE WORKAREA                   00970000
+LOCKED   DS    X                  PROJ LOCK FLAG                        00980000
+FLAGS    DS    X                  CONTROL FLAGS                         00990000
+                                                                        01000000
+PRJREQ   DS    XL(IPJXLENG)       PROJECT REQUEST (COPY)                01010000
+PRJRET   DS    XL(IPJRLENG)       PROJECT RETURN AREA                   01020000
+                                                                        01030000
+ENTUDATA DS    0A,XL16            ENTITY USER DATA                      01040000
+                                                                        01050000
+$ENTPL   $ENTITY MF=L             ENTITY MANAGER PLIST                  01060000
+$TSENDPL $TSEND  MF=L             INTER TASK COMMUNICATION PLIST        01070000
+$TASKPL  $TASK   MF=L             TASK MANGER PLIST                     01080000
+         #ENDWORK ,               END OF WORKAREA                       01090000
+                                                                        01100000
+         EJECT ,                                                        01110000
+IPRJREQP #ENTER BASE=R12,         ENTRY LINKAGE                        +01120000
+               PREG=R8                                                  01130000
+                                                                        01140000
+         USING ITASK,R10          ITASK ADDRESSABILITY                  01150000
+         USING IPRJXMSG,R8        PROJECT REQUEST PLIST                 01160000
+                                                                        01170000
+         EJECT ,                                                        01180000
+****************************************************************        01190000
+*                                                                       01200000
+*  LOCATE REQUESTOR AND UPDATE LOCAL PROJECT REQUEST                    01210000
+*  INFORMATION IN MESSAGE INFO AREA.                                    01220000
+*                                                                       01230000
+****************************************************************        01240000
+                                                                        01250000
+         L     R7,TSKPCBC         ADDRESS OF CURRENT PROCESS            01260000
+         USING IPCB,R7            PCB ADDRESSABILITY                    01270000
+         ICM   R6,15,PCBUSER      ADDRESS OF ASSOCIATED IUSER           01280000
+         BZ    NOUSER             NO ACTIVE USER SPECIFIED              01290000
+         USING IUSER,R6           IUSER ADDRESSABILITY                  01300000
+         L     R7,USROPCB         ADDRESS OF USER OWNING PROCESS        01310000
+NOUSER   DS    0H                                                       01320000
+                                                                        01330000
+         MVC   PRJREQ,IPRJXMSG    MAKE LOCAL COPY OF PLIST              01340000
+         LA    R9,PRJREQ          ADDRESS OF LOCAL PROJ REQ             01350000
+L        USING IPRJXMSG,R9        ADDRESSABILITY                        01360000
+                                                                        01370000
+         ST    R10,L.IPJXTASK     SET REQUESTING TASK ADDRESS           01380000
+*        ST    R6,L.IPJXUSER      SET REQUESTING USER ADDRESS           01390000
+         MVC   L.IPJXUSRN,BLANKS  ASSUME NO IUSER                       01400000
+         LTR   R6,R6              IUSER AVAILABLE ?                     01410000
+         BZ    NOUSER2            NO, SKIP                              01420000
+         MVC   L.IPJXUSRN,USRNAME SET REQUESTING USER NAME              01430000
+NOUSER2  DS    0H                                                       01440000
+         ST    R7,L.IPJXPCB       SET OWNING USER/PROJ ADDRESS          01450000
+                                                                        01460000
+         LA    R1,PRJRET          ADDRESS OF RETURN AREA                01470000
+         ST    R1,L.IPJXRET@      SET ADDRESS IN REQUEST BLOCK          01480000
+                                                                        01490000
+         EJECT ,                                                        01500000
+****************************************************************        01510000
+*                                                                       01520000
+*  PROCESS PROJECT REQUEST FUNCTION.  OPEN AND CLOSE SUPPORT            01530000
+*  FOR RUNTIME ACCESS CAN BE ACCOMPLISHED IN LOCALLY IF THE             01540000
+*  PROJECT IS ALREADY OPEN.                                             01550000
+*                                                                       01560000
+****************************************************************        01570000
+         SR    R2,R2              PREPARE FOR INSERT                    01580000
+         IC    R2,IPJXFUNC        GET REQUESTED FUNCTION                01590000
+         BCTR  R2,0               DECREMENT FUNC NUMBER                 01600000
+         SLL   R2,2               CONVERT FUNCTION TO INDEX             01610000
+                                                                        01620000
+         B     *+4(R2)            BRANCH ON FUNCTION CODE               01630000
+         B     OPEN               OPEN    - TEST RUNTIME AVAILABILITY   01640000
+         B     TEST_WB            NEW     - VERIFY WORKBENCH REQUEST    01650000
+         B     TEST_WB            SAVE    - VERIFY WORKBENCH REQUEST    01660000
+         B     TEST_WB            SAVEAS  - VERIFY WORKBENCH REQUEST    01670000
+         B     CLOSE              CLOSE   - TEST RUNTIME AVAILABILITY   01680000
+         B     TEST_WB            DELETE  - VERIFY WORKBENCH REQUEST    01690000
+         B     TEST_WB            SAVEALL - VERIFY WORKBENCH REQUEST    01700000
+         EX    0,*-*              UNSUPPORTED FUNCTION CODE             01710000
+         EX    0,*-*              UNSUPPORTED FUNCTION CODE             01720000
+         EX    0,*-*              UNSUPPORTED FUNCTION CODE             01730000
+         EX    0,*-*              UNSUPPORTED FUNCTION CODE             01740000
+                                                                        01750000
+         EJECT ,                                                        01760000
+****************************************************************        01770000
+*                                                                       01780000
+*  OPEN PROJECT REQUESTED.  IF PROJECT ACCESS IS RUNTIME,               01790000
+*  ATTEMPT TO LOCATE PROJECT ENTITY ENTRY.  IF ENTITY IS                01800000
+*  AVAILABLE, INCREMENT USE COUNT AND SKIP SENDING REQUEST              01810000
+*  TO THE PROJECT TASK FOR PROCESSING.  ACCESS TO THE PROJECT           01820000
+*  ENTITY STRUCTURE MUST SERIALIZED HOLDING THE PROJECT LOCK.           01830000
+*                                                                       01840000
+****************************************************************        01850000
+OPEN     DS    0H                                                       01860000
+         CLI   IPJXACCS,IPJXA_RT  RUNTIME PROJECT OPEN REQUEST          01870000
+         BNE   PROJ_MSG           NO, ISSUE MESSAGE TO PROJ TASK        01880000
+                                                                        01890000
+         $SER  OBTAIN,PROJ        OBTAIN PROJECT SERIALIZATION          01900000
+         B     *+4(R15)           BRANCH IN LOCK RC                     01910000
+         B     OPEN_LOK           INDICATE LOCK ACQUIRED                01920000
+         B     OPEN_HAV           LOCK ALREADY OWNED BY PROCESS         01930000
+         B     ERR_LOCK           LOCK OBTAIN FAILED                    01940000
+                                                                        01950000
+OPEN_LOK DS    0H                                                       01960000
+         MVI   LOCKED,TRUE        INDICATED LOCK ACQUIRED               01970000
+                                                                        01980000
+OPEN_HAV DS    0H                                                       01990000
+         $ENTITY EXTR,            LOCATE PROJECT ENTITY ENTRY          +02000000
+               ENTITY=IPJXNAME,                                        +02010000
+               QNAME=RTQNAME,                                          +02020000
+               USERDATA=ENTUDATA,                                      +02030000
+               ANCHOR=ICTIPRJ,                                         +02040000
+               MF=(E,$ENTPL)                                            02050000
+                                                                        02060000
+         LTR   R3,R15             EXTRACT SUCCESSFUL                    02070000
+         BNZ   OPEN_UNL           NO, GO RELEASE PROJECT LOCK           02080000
+                                                                        02090000
+*---------------------------------------------------------------        02100000
+*  PROJECT ALREADY OPENED BY OTHER RUNTIME USERS.  INCREMENT            02110000
+*  PROJECT USE COUNT AND AVOID SENDING REQUEST TO PROJECT TASK.         02120000
+*---------------------------------------------------------------        02130000
+         L     R5,ENTUDATA        ADDRESS OF IPROJ                      02140000
+         USING IPROJ,R5           ADDRESSABILITY                        02150000
+                                                                        02160000
+         L     R1,PRJUSE          RETRIEVE CURRENT USE COUNT            02170000
+         LA    R1,1(,R1)          INCREMENT USE COUNT                   02180000
+         ST    R1,PRJUSE          RESTORE NEW USE COUNT                 02190000
+                                                                        02200000
+*---------------------------------------------------------------        02210000
+*  RELEASE PROJECT LOCK,  IF ENTITY NOT FOUND SEND REQUEST TO           02220000
+*  PROJECT TASK.                                                        02230000
+*---------------------------------------------------------------        02240000
+OPEN_UNL DS    0H                                                       02250000
+         CLI   LOCKED,TRUE        LOCK PREVIOUSLY ACQUIRED              02260000
+         BNE   OPEN_TST           NO, TEST TO SEE IF ENTITY FOUND       02270000
+         $SER  RELEASE,PROJ       RELEASE PROJECT LOCK                  02280000
+                                                                        02290000
+OPEN_TST DS    0H                                                       02300000
+         LTR   R3,R3              PROJECT ENTITY LOCATED                02310000
+         BNZ   PROJ_MSG           NO, SEND MESSAGE TO PROJ TASK         02320000
+                                                                        02330000
+*---------------------------------------------------------------        02340000
+*  LOCAL RUNTIME PROJECT OPEN SUCCESSFUL.  SET RETURN INFO.             02350000
+*---------------------------------------------------------------        02360000
+         LA    R3,PRJRET          ADDRESS OF LOCAL PROJ RET             02370000
+         USING IPRJXRET,R3        ADDRESSABILITY                        02380000
+         ST    R5,IPJRPROJ        SET IPROJ ADDRESS IN RETAREA          02390000
+         B     PRJ_EXIT           STANDARD EXIT                         02400000
+         DROP  R3                 IPRJXRET                              02410000
+                                                                        02420000
+         EJECT ,                                                        02430000
+****************************************************************        02440000
+*                                                                       02450000
+*  CLOSE PROJECT REQUESTED.  IF PROJECT ACCESS IS RUNTIME,              02460000
+*  ATTEMPT TO LOCATE PROJECT ENTITY ENTRY.  IF ENTITY IS                02470000
+*  AVAILABLE AND OPEN FOR MORE THAN ONE USER, THEN DECREMENT            02480000
+*  USE COUNT AND BYPASS SENDING MESSAGE TO PROJECT TASK.                02490000
+*  ENTITY STRUCTURE MUST SERIALIZED HOLDING THE PROJECT LOCK.           02500000
+*                                                                       02510000
+****************************************************************        02520000
+CLOSE    DS    0H                                                       02530000
+         CLI   IPJXACCS,IPJXA_RT  RUNTIME PROJECT CLOSE REQUEST         02540000
+         BNE   PROJ_MSG           NO, ISSUE MESSAGE TO PROJ TASK        02550000
+                                                                        02560000
+         $SER  OBTAIN,PROJ        OBTAIN PROJECT SERIALIZATION          02570000
+         B     *+4(R15)           BRANCH IN LOCK RC                     02580000
+         B     CLS_LOCK           INDICATE LOCK ACQUIRED                02590000
+         B     CLS_HAVE           LOCK ALREADY OWNED BY PROCESS         02600000
+         B     ERR_LOCK           LOCK OBTAIN FAILED                    02610000
+                                                                        02620000
+CLS_LOCK DS    0H                                                       02630000
+         MVI   LOCKED,TRUE        INDICATED LOCK ACQUIRED               02640000
+                                                                        02650000
+CLS_HAVE DS    0H                                                       02660000
+         $ENTITY EXTR,            LOCATE PROJECT ENTITY ENTRY          +02670000
+               ENTITY=IPJXNAME,                                        +02680000
+               QNAME=RTQNAME,                                          +02690000
+               USERDATA=ENTUDATA,                                      +02700000
+               ANCHOR=ICTIPRJ,                                         +02710000
+               MF=(E,$ENTPL)                                            02720000
+                                                                        02730000
+         LTR   R3,R15             EXTRACT SUCCESSFUL?                   02740000
+         BNZ   CLS_UNLK           NO, GO RELEASE PROJECT LOCK           02750000
+                                                                        02760000
+*---------------------------------------------------------------        02770000
+*  CHECK IF PROJECT OPEN BY MORE THAN ONE (CURRENT) USER.  IF           02780000
+*  SO, DECREMENT USE COUNT AND AVOID SENDING REQUEST TO PROJECT         02790000
+*  TASK.                                                                02800000
+*---------------------------------------------------------------        02810000
+         L     R5,ENTUDATA        ADDRESS OF IPROJ                      02820000
+         USING IPROJ,R5           ADDRESSABILITY                        02830000
+                                                                        02840000
+         L     R1,PRJUSE          RETRIEVE CURRENT USE COUNT            02850000
+         C     R1,=A(1)           MULTIPLE USERS ACTIVE                 02860000
+         BNH   CLS_MSG            NO,  SEND CLOSE MESSAGE               02870000
+         BCTR  R1,0               DECREMENT USE COUNT                   02880000
+         ST    R1,PRJUSE          RESTORE NEW USE COUNT                 02890000
+         B     CLS_UNLK           RELEASE PROJECT LOCK                  02900000
+                                                                        02910000
+*---------------------------------------------------------------        02920000
+*  LAST USE OF PROJECT,  FORCE REQUEST TO PROJECT TASK                  02930000
+*---------------------------------------------------------------        02940000
+CLS_MSG  DS    0H                                                       02950000
+         LA    R3,RC04            SEND REQUEST TO PROJECT TASK          02960000
+                                                                        02970000
+*---------------------------------------------------------------        02980000
+*  RELEASE PROJECT LOCK.  SEND REQUEST TO PROJECT TASK IF               02990000
+*  REQUIRED.                                                            03000000
+*---------------------------------------------------------------        03010000
+CLS_UNLK DS    0H                                                       03020000
+         CLI   LOCKED,TRUE        LOCK PREVIOUSLY ACQUIRED              03030000
+         BNE   CLS_TEST           NO, TEST TO SEE IF SEND REQUIRED      03040000
+         $SER  RELEASE,PROJ       RELEASE PROJECT LOCK                  03050000
+                                                                        03060000
+CLS_TEST DS    0H                                                       03070000
+         LTR   R3,R3              PROJECT ENTITY LOCATED                03080000
+         BNZ   PROJ_MSG           NO, SEND MESSAGE TO PROJ TASK         03090000
+         B     PRJ_EXIT           STANDARD EXIT                         03100000
+                                                                        03110000
+         EJECT ,                                                        03120000
+****************************************************************        03130000
+*                                                                       03140000
+*  DETERMINE IF REQUEST IS FOR WORKBENCH ACCESS, ELSE FAIL              03150000
+*  PROJECT REQUEST.                                                     03160000
+*                                                                       03170000
+****************************************************************        03180000
+TEST_WB  DS    0H                                                       03190000
+         CLI   IPJXACCS,IPJXA_WB  WORKBENCH ACCESS                      03200000
+         BNE   ERR_ACCS           NO, INVALID ACCESS ATTEMPT            03210000
+                                                                        03220000
+****************************************************************        03230000
+*                                                                       03240000
+*  REQUESTED SERVICE CANNOT BE PROCESSED LOCALLY.  SEND                 03250000
+*  REQUEST TO PROJECT TASK AND WAIT FOR REQUEST TO COMPLETE.            03260000
+*                                                                       03270000
+****************************************************************        03280000
+PROJ_MSG DS    0H                                                       03290000
+         $TSEND '$PRJTASK',       SEND PROJECT REQUEST TO PRJTASK      +03300000
+               TYPE=ITM_PRJ_REQ,                                       +03310000
+               INFO=(L.IPRJXMSG,IPJXLENG),                             +03320000
+               REPLY=YES,                                              +03330000
+               MF=(E,$TSENDPL)                                          03340000
+                                                                        03350000
+         BNZ   ERR_SEND           TASK SEND FAILURE                     03360000
+         LR    R3,R1              REPLY EPB TOKEN                       03370000
+                                                                        03380000
+PRJ_WAIT DS    0H                                                       03390000
+         $TASK WAIT,              WAIT FOR COMPLETION OF REPLY EVENT   +03400000
+               EPB=(R3),                                               +03410000
+               MF=(E,$TASKPL)                                           03420000
+                                                                        03430000
+         C     R0,=A($$TERM)      CONVERSATION FAILED                   03440000
+         BE    ERR_TERM           EVENT TERMINATED                      03450000
+         B     PRJ_EXIT           STANDARD RETURN                       03460000
+                                                                        03470000
+         EJECT ,                                                        03480000
+****************************************************************        03490000
+*                                                                       03500000
+*  PROCESSING COMPLETED FOR PROJECT REQUEST.  COPY REPLY                03510000
+*  AREA BACK TO USER SUPPLIED RETINFO AREA.  SET ADDRESS OF             03520000
+*  IPROJ FOR OPEN AND NEW REQUEST IN THE OWNING PCB AND IUSER           03530000
+*  BLOCK ASSOCIATED WITH THIS PROJECT.  CLEAR IPROJ POINTERS            03540000
+*  ON SUCCESSFUL COMPLETION OF CLOSE EVENT.                             03550000
+*                                                                       03560000
+****************************************************************        03570000
+PRJ_EXIT DS    0H                                                       03580000
+         LA    R3,PRJRET          ADDRESS OF LOCAL PRJRET               03590000
+         USING IPRJXRET,R3        ADDRESSABILITY                        03600000
+                                                                        03610000
+         ICM   R0,15,IPJXRET@     ADDRESS OF RETURN AREA                03620000
+         BZ    NO_RET             NO RETURN AREA AVAILABLE              03630000
+         LR    R14,R3             ADDRESS OF SOURCE AREA                03640000
+         LA    R1,IPJRLENG        LENGTH  OF AREA TO COPY               03650000
+         LR    R15,R1             COPY LENGTH                           03660000
+         MVCL  R0,R14             COPY RETURN INFO TO USERAREA          03670000
+NO_RET   DS    0H                                                       03680000
+                                                                        03690000
+         ICM   R15,15,IPJRRET     GET RETURN CODE                       03700000
+         BNZ   ERR_PROJ           PROJECT REQUEST ERROR                 03710000
+         L     R5,IPJRPROJ        ADDR OF IPROJ RETURNED                03720000
+         DROP  R3                                                       03730000
+                                                                        03740000
+         CLI   IPJXFUNC,IPJX$OPN  OPEN  PROJECT REQUEST                 03750000
+         BE    SET_IPRJ           YES, SET ADDRESS OF IPROJ             03760000
+         CLI   IPJXFUNC,IPJX$NEW  NEW   PROJECT REQUEST                 03770000
+         BE    SET_IPRJ           YES, SET ADDRESS OF IPROJ             03780000
+         CLI   IPJXFUNC,IPJX$CLS  CLOSE PROJECT REQUEST                 03790000
+         BNE   PRJ_CMPL           PROJECT REQUEST COMPLETE              03800000
+                                                                        03810000
+*---------------------------------------------------------------        03820000
+*  CLOSE REQUEST COMPLETE.  RESET IPROJ ADDRESS                         03830000
+*---------------------------------------------------------------        03840000
+         LTR   R6,R6              IUSER AVAILABLE                       03850000
+         BZ    *+10               NO, SKIP CLEAR                        03860000
+         XC    USRPROJ,USRPROJ    CLEAR IPROJ ADDR FROM ASSOC USER      03870000
+         B     PRJ_CMPL           PROJECT REQUEST COMPLETE              03880000
+                                                                        03890000
+*---------------------------------------------------------------        03900000
+*  NEW/OPEN PROJECT REQUEST COMPLETE.   SET ADDR OF NEW IPROJ           03910000
+*---------------------------------------------------------------        03920000
+SET_IPRJ DS    0H                                                       03930000
+         LTR   R6,R6              IUSER AVAILABLE                       03940000
+         BZ    *+8                NO, CAN'T SAVE IT THERE               03950000
+         ST    R5,USRPROJ         SAVE ADDR OF IPROJ WITH USER          03960000
+         LR    R1,R5              RETURN ADDR OF IPROJ                  03970000
+                                                                        03980000
+         EJECT ,                                                        03990000
+****************************************************************        04000000
+*                                                                       04010000
+*  PROJECT REQUEST PROCESS COMPLETE                                     04020000
+*                                                                       04030000
+****************************************************************        04040000
+PRJ_CMPL DS    0H                                                       04050000
+         LA    R15,RC00           RETURN NORMAL                         04060000
+         LA    R0,RSN00                                                 04070000
+         B     RET                RETURN                                04080000
+                                                                        04090000
+         EJECT ,                                                        04100000
+****************************************************************        04110000
+*                                                                       04120000
+*  ERRORS                                                               04130000
+*                                                                       04140000
+****************************************************************        04150000
+                                                                        04160000
+*------------------------                                               04170000
+*  TERMINATION REQUEST                                                  04180000
+*------------------------                                               04190000
+TERM_ERR DS    0H                                                       04200000
+         LA    R15,RC04           PROCESS TERMINATED                    04210000
+         B     RET                RETURN                                04220000
+                                                                        04230000
+*------------------------                                               04240000
+*  PROJECT REQ FAILURE                                                  04250000
+*------------------------                                               04260000
+ERR_PROJ DS    0H                                                       04270000
+         LA    R15,RC08           PROJECT REQUEST FAILED                04280000
+         B     RET                RETURN                                04290000
+                                                                        04300000
+*------------------------                                               04310000
+*  TERMINATION REQUEST                                                  04320000
+*------------------------                                               04330000
+ERR_TERM DS    0H                                                       04340000
+         LA    R0,RSN04           PROJECT TASK TERMINATED               04350000
+         B     ENV_ERR            RETURN CODE / MESSAGE                 04360000
+                                                                        04370000
+ERR_SEND DS    0H                                                       04380000
+         LA    R0,RSN08           TASK SEND FAILED                      04390000
+         B     ENV_ERR            RETURN CODE / MESSAGE                 04400000
+                                                                        04410000
+ERR_ACCS DS    0H                                                       04420000
+         LA    R0,RSN12           INVALID ACCESS REQUEST                04430000
+         B     ENV_ERR            RETURN CODE / MESSAGE                 04440000
+                                                                        04450000
+ERR_LOCK DS    0H                                                       04460000
+         LA    R0,RSN16           LOCK REQUEST FAILED                   04470000
+         B     ENV_ERR            RETURN CODE / MESSAGE                 04480000
+                                                                        04490000
+ENV_ERR  DS    0H                                                       04500000
+         LA    R15,RC12           ENVIRONMENTAL ERROR                   04510000
+         ICM   R3,15,IPJXRET@     RETURN AREA PROVIDED                  04520000
+         BZ    RET                NO, RETURN                            04530000
+         USING IPRJXRET,R3        RETURN AREA ADDRESSABILITY            04540000
+                                                                        04550000
+         ST    R15,IPJRRET        ENVIRONMENT ERROR RETURN CODE         04560000
+         ST    R0,IPJRRSN         ENVIRONMENT ERROR REASON CODE         04570000
+         MVC   IPJRMSGL,=A(L'ENVMSG)  ERROR MESSAGE LENGTH              04580000
+         MVC   IPJRMSG(L'ENVMSG),ENVMSG                                 04590000
+         B     RET                RETURN                                04600000
+         DROP  R3                 IPRJXRET                              04610000
+                                                                        04620000
+****************************************************************        04630000
+*                                                                       04640000
+*  RETURN                                                               04650000
+*                                                                       04660000
+****************************************************************        04670000
+                                                                        04680000
+RET      DS    0H                                                       04690000
+         #EXIT ,                  RETURN                                04700000
+                                                                        04710000
+         EJECT ,                                                        04720000
+****************************************************************        04730000
+*                                                                       04740000
+*  LITERALS AND CONSTANTS                                               04750000
+*                                                                       04760000
+****************************************************************        04770000
+BLANKS   DC    CL8' '                                                   04780000
+RTQNAME  DC    CL8'PRJ_RTQ'       RUNTIME ENTITY QUEUE NAME             04790000
+ENVMSG   DC    C'Environment Error'                                     04800000
+                                                                        04810000
+         LTORG ,                                                        04820000
+                                                                        04830000
+         PRINT NOGEN                                                    04840000
+         ICVT  ,                                                        04850000
+         ITASK ,                                                        04860000
+         IPCB  ,                                                        04870000
+         IUSER ,                                                        04880000
+         IPROJ ,                                                        04890000
+         $TOKEN ,                                                       04900000
+         PRINT GEN                                                      04910000
+                                                                        04920000
+         END   ,                                                        04930000

@@ -1,0 +1,582 @@
+IPRJINIT TITLE '- PROJECT/DATABASE TASK INITIALIZATION'                 00010000
+**<DOC-ON>******************************************************        00020000
+*                                                                       00030000
+*  ROUTINE:  IPRJINIT - PROJECT/DATABASE TASK INITIALIZATION            00040000
+*                                                                       00050000
+*  DESCRIPTION:                                                         00060000
+*                                                                       00070000
+*    This routine is responsible for the initialization of the          00080000
+*    project task.  During task initialization,  the VSAM KSDS          00090000
+*    Project Dataset is opened.  If the dataset is currently            00100000
+*    empty, an initialization request is made and the dataset           00110000
+*    is closed and reopened for direct access processing.               00120000
+*                                                                       00130000
+*    Additionally, ICAT$INI is invoked to define the standard           00140000
+*    Integrator object space catalogs.  Then, the SYSCATLG              00150000
+*    project and project directory table are opened and                 00160000
+*    initialized.                                                       00170000
+*                                                                       00180000
+*  ENTRY:   N/A                                                         00190000
+*                                                                       00200000
+*  EXIT:                                                                00210000
+*                                                                       00220000
+*    Upon completion of this routine R15 will contain one               00230000
+*    of the following return codes.                                     00240000
+*                                                                       00250000
+*        RC00 - Initialization complete                                 00260000
+*        RC04 - Database initialization failed                          00270000
+*        RC08 - Database open failed                                    00280000
+*        RC12 - SYSCATLG project open/init failed                       00290000
+*        RC16 - Project tables failed to open                           00300000
+*        RC20 - Project entity structure init failure                   00310000
+*        RC24 - Execution space create failed                           00320000
+*                                                                       00330000
+**<DOC-OFF>*****************************************************        00340000
+                                                                        00350000
+         EJECT ,                                                        00360000
+****************************************************************        00370000
+*                                                                       00380000
+*  MAINTENANCE:                                                         00390000
+*                                                                       00400000
+*    06/26/93 RON COLMONE                                               00410000
+*             INTIAL VERSION. SPLIT CODE OUT OF TASK MAINLINE.          00420000
+*                                                                       00430000
+*    12/06/94 R. Turgeon                                                00440000
+*             Removed PAGE= / SHRPAGE= for $SPACE, $OBJECT,             00450000
+*             and TB* service requests                                  00460000
+*                                                                       00470000
+*    01/31/95 R. Turgeon - virtual catalog support                      00480000
+*             Externalized catalog component table definitions          00490000
+*                                                                       00500000
+****************************************************************        00510000
+                                                                        00520000
+         EJECT ,                                                        00530000
+         EQUS  ,                  GENERAL EQUATES                       00540000
+#ALUSIZE EQU   4096               DEFAULT ALUSIZE                       00550000
+                                                                        00560000
+         EJECT ,                                                        00570000
+         TBSERVIS ,               TABLE SERVICES EQUATES                00580000
+                                                                        00590000
+         EJECT ,                                                        00600000
+         PERAREA ,                PRJSRV ERROR RETURN AREA              00610000
+                                                                        00620000
+         EJECT ,                                                        00630000
+         $ENTITY DSECT=YES        ENTITY MANAGER PLIST                  00640000
+                                                                        00650000
+         $MSGDFT PREFIX=ICTPID,COMPID='PRJ',TABLE=*#MSGS,              +00660000
+               PRINT=NOGEN,MF=(E,WRK256)                                00670000
+                                                                        00680000
+         EJECT ,                                                        00690000
+         #WORK ,                                                        00700000
+REGSAVE1 DS    16F                REGISTER SAVE AREA                    00710000
+REGSAVE2 DS    16F                REGISTER SAVE AREA                    00720000
+WRK2K    DS    XL2048             GENERAL WORKAREA                      00730000
+WRK256   DS    XL256              GERERAL WORKAREA                      00740000
+                                                                        00750000
+SPRCODES DS    3F                 $SPACE RETURN CODE SAVE AREA          00760000
+         ORG   SPRCODES                                                 00770000
+SPRC     DS    F                  $SPACE RETURN CODE                    00780000
+SPSYSRC  DS    F                  $SPACE SYSTEM SERVICE RETURN CODE     00790000
+SPSYSRSN DS    F                  $SPACE SYSTEM SERVICE REASON CODE     00800000
+         ORG                                                            00810000
+                                                                        00820000
+RCODES   DS    0F,0F              RETURN/REASON CODE                    00830000
+RETCD    DS    F                  RETURN CODE FROM SERVICE              00840000
+RSNCD    DS    F                  REASON CODE FROM SERVICE              00850000
+TBLNAME  DS    CL12               PROJ TABLE NAME                       00860000
+                                                                        00870000
+PROJERR  DS    XL(PERLEN)         PRJSRV ERROR RETURN AREA              00880000
+                                                                        00890000
+$DBPL    $DB      MF=L            PLIST AREA FOR DBOC                   00900000
+$PRJPL   $PROJECT MF=L            PLIST AREA FOR PRJSRV                 00910000
+$PJTBPL  $PRJTBLS MF=L            PLIST AREA FOR PRJTBLS                00920000
+$ENTPL   $ENTITY  MF=L            PLIST AREA FOR ENTITY MGR             00930000
+                                                                        00940000
+         #ENDWORK ,               END OF WORKAREA                       00950000
+                                                                        00960000
+         EJECT ,                                                        00970000
+****************************************************************        00980000
+*                                                                       00990000
+*   PERFORM PROJECT TASK INITIALIZATION ENTRY LINKAGE                   01000000
+*                                                                       01010000
+****************************************************************        01020000
+                                                                        01030000
+IPRJINIT #ENTER BASE=R12          ENTRY LINKAGE                         01040000
+         USING ITASK,R10          ESTABLISH ADDRESSABILITY              01050000
+                                                                        01060000
+         EJECT ,                                                        01070000
+****************************************************************        01080000
+*                                                                       01090000
+*  PERFORM DATABASE TASK INITIALIZATION.  OPEN PROJECT DATABASE.        01100000
+*  IF THE DATABASE IS BEING OPEN FOR LOAD PROCESSING, THEN CALL         01110000
+*  THE DATABASE INITIALIZATION ROUTINE TO INITIALIZE/CLOSE THE          01120000
+*  DATABASE.                                                            01130000
+*                                                                       01140000
+****************************************************************        01150000
+         $MSG  001                DATABASE TASK INITIALIZING            01160000
+                                                                        01170000
+OPEN_DB  DS    0H                                                       01180000
+         $DB   OPEN,              OPEN PROJECT DATABASE                +01190000
+               WORKA=WRK2K,                                            +01200000
+               MF=(E,$DBPL)                                             01210000
+                                                                        01220000
+         B     *+4(R15)           BRANCH ON OPEN RC                     01230000
+         B     OPEN_CHK           DATABASE OPEN (CHK LOAD MODE)         01240000
+         B     OPEN_ERR           DATABASE OPEN FAILED                  01250000
+         B     OPEN_ERR           DATABASE OPEN FAILED                  01260000
+         B     OPEN_ERR           DATABASE OPEN FAILED                  01270000
+                                                                        01280000
+OPEN_CHK DS    0H                                                       01290000
+         LTR   R0,R0              OPEN SUCCESSFULL                      01300000
+         BZ    OPEN_OK            YES, CONTINUE                         01310000
+                                                                        01320000
+         BAS   R14,DBINIT         PERFORM DATABASE INIT                 01330000
+         BZ    OPEN_DB            RETRY OPEN PROCESSING                 01340000
+         B     ERR_DBIN           ERROR, DATABASE INIT                  01350000
+                                                                        01360000
+OPEN_ERR DS    0H                                                       01370000
+         STM   R15,R0,RCODES      SAVE RETURN/REASON CODES              01380000
+         $MSG  011,FIELDS=(RETCD,RSNCD)                                 01390000
+         B     ERR_DBOP           ERROR, DATABASE OPEN                  01400000
+                                                                        01410000
+OPEN_OK  DS    0H                                                       01420000
+         $MSG  002                PROJECT DATABASE NOW AVAILABLE        01430000
+                                                                        01440000
+         EJECT ,                                                        01450000
+****************************************************************        01460000
+*                                                                       01470000
+*  DEFINE INTEGRATOR OBJECT SPACE TYPES                                 01480000
+*                                                                       01490000
+****************************************************************        01500000
+         @CALL ICAT$INI,CTYPE=CVT DECLARE CATALOG COMPONENT TABLES      01510000
+                                                                        01520000
+         EJECT ,                                                        01530000
+****************************************************************        01540000
+*                                                                       01550000
+*  OPEN THE SYSTEM CATALOG. IF THE SYSTEM PROJECT IS NOT                01560000
+*  AVAILABLE THEN CALL THE ROUTINE TO CREATE THE CATALOG.               01570000
+*                                                                       01580000
+****************************************************************        01590000
+         ICM   R1,15,ICTSYSP@     SYSTEM PROJ TOKEN AVAIL               01600000
+         BNZ   SYSPOPEN           YES, OPEN SYSTEM PROJECT              01610000
+                                                                        01620000
+         STGGET $TOKLN,QH=ICTSTG  ALLOC SYSTEM PROJ TOKEN               01630000
+         ST    R1,ICTSYSP@        SAVE TOKEN ADDRESS                    01640000
+                                                                        01650000
+SYSPOPEN DS    0H                                                       01660000
+         $PROJECT OPEN,           OPEN SYSTEM PROJECT                  +01670000
+               NAME='SYSCATLG',                                        +01680000
+               TOKEN=*ICTSYSP@,                                        +01690000
+               USER='INTEGRAT',                                        +01700000
+               SOURCE=TSKNAME,                                         +01710000
+               OIECOUNT=*ICTCOIES,                                     +01720000
+               SPCLOCK=*ICTLKCTL,                                      +01730000
+               SPCSIZE=*ICTCSIZE,                                      +01740000
+               TBSVCFG=*ICTTBCAT,                                      +01750000
+               TTOKEN=ICTJSTKN,   ASSOCIATE WITH $INTMAIN              +01760000
+               WORKA=WRK2K,                                            +01770000
+               ERRAREA=PROJERR,                                        +01780000
+               MF=(E,$PRJPL)                                            01790000
+                                                                        01800000
+         B     *+4(R15)           BRANCH ON PROJ OPEN RC                01810000
+         B     PDIROPEN           OK, GO OPEN PROJECT TABLES            01820000
+         B     SYSP_ERR           SYSTEM PROJECT OPEN ERR               01830000
+         B     SYSP_CHK           CHECK IF SYS PROJ FOUND               01840000
+         B     SYSP_ERR           SYSTEM PROJECT OPEN ERR               01850000
+                                                                        01860000
+SYSP_CHK DS    0H                                                       01870000
+         C     R0,=A(RSN04)       PROJECT NOT FOUND?                    01880000
+         BNE   SYSP_ERR           NO,  ASSUME ERROR                     01890000
+         BAS   R14,SYSPINIT       YES, INITIALIZE SYSTEM PROJ           01900000
+         BZ    PDIROPEN           OK, GO OPEN PROJECT TABLES            01910000
+                                                                        01920000
+SYSP_ERR DS    0H                                                       01930000
+         STM   R15,R0,RCODES      SAVE RETURN/REASON CODES              01940000
+                                                                        01950000
+         LA    R2,PROJERR         ADDRESS OF PRJSRV ERROR AREA          01960000
+         USING PERAREA,R2         ADDRESSABILITY                        01970000
+         ICM   R1,B'1111',PERRC   ERROR THERE ?                         01980000
+         BZ    SYSC_MSG           NO, SYSTEM CATALOG ERROR              01990000
+                                                                        02000000
+         $MSG  279,               DUMP ERROR DETAILS                   +02010000
+               FIELDS=(PERSRVC,PERRC,PERSYSRC,PERSYSRS)                 02020000
+         XC    PERRC,PERRC        RESET PRJSRV ERROR                    02030000
+         DROP  R2                 PERAREA                               02040000
+                                                                        02050000
+SYSC_MSG DS    0H                                                       02060000
+         $MSG  014,FIELDS=(RETCD,RSNCD)                                 02070000
+         B     ERR_SYSC           ERROR, SYSTEM CATALOG                 02080000
+                                                                        02090000
+         EJECT ,                                                        02100000
+****************************************************************        02110000
+*                                                                       02120000
+*   OPEN SYSCATLG TABLES                                                02130000
+*                                                                       02140000
+****************************************************************        02150000
+PDIROPEN DS    0H                                                       02160000
+         ICM   R0,15,ICTPDIRT     PROJECT DIRECTORY OPEN?               02170000
+         BNZ   XSP_INIT           YES, INITIALIZE ENTITY STRUCTURE      02180000
+                                                                        02190000
+         MVC   TBLNAME,=CL12'SYSPROJ_DIR'                               02200000
+                                                                        02210000
+         $PRJTBLS OPEN,           OPEN SYSPROJ_DIR TABLE               +02220000
+               TABLE='PROJDIR',                                        +02230000
+               WORKA=WRK2K,                                            +02240000
+               MF=(E,$PJTBPL)                                           02250000
+                                                                        02260000
+         STM   R15,R0,RCODES      SAVE RETURN/REASON CODES              02270000
+         LTR   R15,R15            DIRECTORY FAILED TO OPEN              02280000
+         BNZ   ERR_PRJT                                                 02290000
+                                                                        02300000
+         MVC   TBLNAME,=CL12'SYSAPPLS'                                  02310000
+                                                                        02320000
+*---------------------------------------------------------------        02330000
+                                                                        02340000
+         $PRJTBLS OPEN,           OPEN SYSAPPLS                        +02350000
+               TABLE='SYSAPPLS',                                       +02360000
+               WORKA=WRK2K,                                            +02370000
+               MF=(E,$PJTBPL)                                           02380000
+                                                                        02390000
+         STM   R15,R0,RCODES      SAVE RETURN/REASON CODES              02400000
+         LTR   R15,R15            DIRECTORY FAILED TO OPEN              02410000
+         BNZ   ERR_PRJT                                                 02420000
+                                                                        02430000
+*---------------------------------------------------------------        02440000
+                                                                        02450000
+         MVC   TBLNAME,=CL12'SYSPOOLS'                                  02460000
+                                                                        02470000
+         $PRJTBLS OPEN,           OPEN SYSPOOLS                        +02480000
+               TABLE='SYSPOOLS',                                       +02490000
+               WORKA=WRK2K,                                            +02500000
+               MF=(E,$PJTBPL)                                           02510000
+                                                                        02520000
+         STM   R15,R0,RCODES      SAVE RETURN/REASON CODES              02530000
+         LTR   R15,R15            DIRECTORY FAILED TO OPEN              02540000
+         BNZ   ERR_PRJT                                                 02550000
+                                                                        02560000
+*---------------------------------------------------------------        02570000
+                                                                        02580000
+         MVC   TBLNAME,=CL12'SYSTEMS'                                   02590000
+                                                                        02600000
+         $PRJTBLS OPEN,           OPEN SYSTEMS                         +02610000
+               TABLE='SYSTEMS',                                        +02620000
+               WORKA=WRK2K,                                            +02630000
+               MF=(E,$PJTBPL)                                           02640000
+                                                                        02650000
+         STM   R15,R0,RCODES      SAVE RETURN/REASON CODES              02660000
+         LTR   R15,R15            DIRECTORY FAILED TO OPEN              02670000
+         BZ    SYSTOPEN                                                 02680000
+                                                                        02690000
+         $PRJTBLS CREATE,         CREATE SYSTEMS                       +02700000
+               TABLE='SYSTEMS',                                        +02710000
+               WORKA=WRK2K,                                            +02720000
+               MF=(E,$PJTBPL)                                           02730000
+                                                                        02740000
+         LTR   R15,R15            TABLE CREATED?                        02750000
+         BNZ   ERR_PRJT           ERROR                                 02760000
+                                                                        02770000
+SYSTOPEN DS    0H                                                       02780000
+                                                                        02790000
+         EJECT ,                                                        02800000
+****************************************************************        02810000
+*                                                                       02820000
+*  INITIALIZE EXECUTION TABLE SPACE                                     02830000
+*                                                                       02840000
+****************************************************************        02850000
+XSP_INIT DS    0H                                                       02860000
+         STGGET $TOKLN,QH=ICTSTG  ALLOC EXECUTION SPACE TOKEN           02870000
+         ST    R1,ICTXSPT@        SAVE EXECUTION SPACE TOKEN ADDR       02880000
+                                                                        02890000
+         L     R2,ICTXSIZE        SIZE OF EXECUTION SPACE IN KBYTES     02900000
+         SLL   R2,10              CONVERT TO BYTE COUNT                 02910000
+                                                                        02920000
+         LA    R4,ICTJSTKN        JOB STEP TASK AS SPACE OWNER          02930000
+         TM    ICTSTAT2,ICT2$APF  APF AUTHORIZED REQUEST?               02940000
+         BNO   *+6                RETAIN TOKEN IF NOT                   02950000
+         SR    R4,R4              NO EXPLICIT TASK TOKEN OTHERWISE      02960000
+                                                                        02970000
+         $SPACE CREATE,           CREATE EXECUTION SPACE ADDR          +02980000
+               NAME='INTEXSPC',                                        +02990000
+               TOKEN=*ICTXSPT@,                                        +03000000
+               TCBTOKEN=(R4),                                          +03010000
+               SERIALIZE=*ICTLKMSP,                                    +03020000
+               OIECOUNT=*ICTXOIES,                                     +03030000
+               ALUSIZE=*=A(#ALUSIZE),                                  +03040000
+               SIZE=(R2),                                              +03050000
+               MF=(E,MFE_LIST)                                          03060000
+                                                                        03070000
+         STM   R15,R1,SPRCODES    SAVE RETURN CODES                     03080000
+         LTR   R15,R15            SAVE RETURN CODE                      03090000
+         BNZ   RET_WRKA           FAIL, RETURN WORKAREA                 03100000
+                                                                        03110000
+*---------------------------------------------------------------        03120000
+*  POST TABLE SERVICES OPTIONS FOR EXECUTION SPACE                      03130000
+*---------------------------------------------------------------        03140000
+         $SPACE CONFIG,POST,      SET TABLE SERVICES CONFIG OPTS       +03150000
+               WORD=TBSERV_CFGWORD,                                    +03160000
+               DATA=ICTTBCEX,                                          +03170000
+               TOKEN=*ICTXSPT@,                                        +03180000
+               MF=(E,MFE_LIST)                                          03190000
+                                                                        03200000
+         STM   R15,R1,SPRCODES    SAVE RETURN CODES                     03210000
+                                                                        03220000
+*---------------------------------------------------------------        03230000
+*  RETURN SPACE MANAGEMENT WORKAREA                                     03240000
+*---------------------------------------------------------------        03250000
+RET_WRKA DS    0H                                                       03260000
+         LM    R15,R1,SPRCODES    RESTORE $SPACE RETURN CODES           03270000
+         LTR   R15,R15            CREATE SUCCESSFUL?                    03280000
+         BNZ   ERR_EXSP           NO SPACE CREATE FAILED                03290000
+                                                                        03300000
+         EJECT ,                                                        03310000
+****************************************************************        03320000
+*                                                                       03330000
+*  INITIALIZE PROJECT ENTITY STRUCTURE                                  03340000
+*                                                                       03350000
+****************************************************************        03360000
+ENT_INIT DS    0H                                                       03370000
+         ICM   R0,15,ICTIPRJ      PROJECT ENTITY STRUCTURE              03380000
+         BNZ   INIT_CMP           PREVIOUSLY INITIALIZED                03390000
+                                                                        03400000
+         $ENTITY INIT,            INIT PROJECT ENTITY STRUCTURE        +03410000
+               ANCHOR=ICTIPRJ,                                         +03420000
+               QH=ICTSTG,                                              +03430000
+               ORDER=YES,                                              +03440000
+               MF=(E,$ENTPL)                                            03450000
+         BNZ   ERR_ENTY           ENTITY INITIALIZATION ERROR           03460000
+                                                                        03470000
+INIT_CMP DS    0H                                                       03480000
+         OI    ICTSTAT1,ICT1$PRJ  INDICATE DATABASE ACTIVE              03490000
+         LA    R15,RC00           NORMAL COMPLETION                     03500000
+         B     RET                RETURN                                03510000
+                                                                        03520000
+         EJECT ,                                                        03530000
+****************************************************************        03540000
+*                                                                       03550000
+*  INITIALIZATION ERRORS                                                03560000
+*                                                                       03570000
+****************************************************************        03580000
+ERR_DBIN DS    0H                                                       03590000
+         LA    R15,RC04           DATABASE INITIALIZATION ERROR         03600000
+         B     RET                RETURN                                03610000
+                                                                        03620000
+ERR_DBOP DS    0H                                                       03630000
+         LA    R15,RC08           DATABASE OPEN ERROR                   03640000
+         B     RET                RETURN                                03650000
+                                                                        03660000
+ERR_SYSC DS    0H                                                       03670000
+         LA    R15,RC12           SYSCATLG PROJECT OPEN FAILURE         03680000
+         B     RET                RETURN                                03690000
+                                                                        03700000
+ERR_PRJT DS    0H                                                       03710000
+         $MSG  015,FIELDS=(TBLNAME,RETCD,RSNCD)                         03720000
+                                                                        03730000
+         LA    R15,RC16           PROJECT TABLE OPEN FAILURE            03740000
+         B     RET                RETURN                                03750000
+                                                                        03760000
+ERR_ENTY DS    0H                                                       03770000
+         LA    R15,RC20           ENTITY STRUCTURE INIT FAILURE         03780000
+         B     RET                RETURN                                03790000
+                                                                        03800000
+ERR_EXSP DS    0H                                                       03810000
+         $MSG  279,               DUMP ERROR DETAILS                   +03820000
+               FIELDS=(=CL(L'PERSRVC)'SPACE',SPRC,SPSYSRC,SPSYSRSN)     03830000
+                                                                        03840000
+         LA    R15,RC24           EXECUTION SPACE CREATE FAILED         03850000
+         B     RET                RETURN                                03860000
+                                                                        03870000
+RET      DS    0H                                                       03880000
+         #EXIT ,                  RETURN                                03890000
+                                                                        03900000
+         EJECT ,                                                        03910000
+****************************************************************        03920000
+*                                                                       03930000
+*  ROUTINE: DBINIT - DATABASE INITIALIZATION                            03940000
+*                                                                       03950000
+*  DESCRIPTION:                                                         03960000
+*                                                                       03970000
+*    THE DATABASE HAS BEEN OPENED FOR LOAD PROCESSING,  CALL            03980000
+*    THE SERVICE TO WRITE THE DATABASE INITIALIZATION RECORD            03990000
+*    TO THE PROJECT DATABASE. THEN CLOSE THE INITIAL OPEN               04000000
+*    OF THE DATABASE SO THAT IT MAY BE REOPENED FOR STANDARD            04010000
+*    PROCESSING.                                                        04020000
+*                                                                       04030000
+*  ENTRY:  N/A                                                          04040000
+*                                                                       04050000
+*  EXIT:   R15/R0 RETURNED FROM $PROJECT REQUEST                        04060000
+*                                                                       04070000
+****************************************************************        04080000
+                                                                        04090000
+DBINIT   DS    0H                                                       04100000
+         STM   R0,R15,REGSAVE1    SAVE CALLER'S REGISTERS               04110000
+         $MSG  003                INITIALIZING PROJECT DATABASE         04120000
+                                                                        04130000
+         $DB   INIT,              INITIALIZE DATABASE                  +04140000
+               WORKA=WRK2K,                                            +04150000
+               MF=(E,$DBPL)                                             04160000
+                                                                        04170000
+         LTR   R15,R15            INITIALIZATION SUCCESSFULL?           04180000
+         BNZ   DBINFAIL           NO, ISSUE ERROR MESSAGE               04190000
+                                                                        04200000
+         $DB   CLOSE,             CLOSE DATABASE AFTER INIT            +04210000
+               WORKA=WRK2K,                                            +04220000
+               MF=(E,$DBPL)                                             04230000
+                                                                        04240000
+         LTR   R15,R15            CLOSE SUCCESSFULL?                    04250000
+         BZ    DBINEXIT           YES RETURN                            04260000
+                                                                        04270000
+DBINFAIL DS    0H                                                       04280000
+         STM   R15,R0,RCODES      SAVE RETURN/REASON CODES              04290000
+         $MSG  012,FIELDS=(RETCD,RSNCD)                                 04300000
+         LM    R15,R0,RCODES      RESTORE RET/RSN CODES                 04310000
+                                                                        04320000
+DBINEXIT DS    0H                                                       04330000
+         LM    R1,R14,REGSAVE1+4  RESTORE CALLER'S REGISTERS            04340000
+         LTR   R15,R15            SET CONDITION CODE                    04350000
+         BR    R14                AND RETURN                            04360000
+                                                                        04370000
+         EJECT ,                                                        04380000
+****************************************************************        04390000
+*                                                                       04400000
+*  ROUTINE: SYSPINIT - INITIALIZE SYSCATLG PROJECT                      04410000
+*                                                                       04420000
+*  DESCRIPTION:                                                         04430000
+*                                                                       04440000
+*    THIS ROUTINE WILL INITIALIZE THE SYSCATLG PROJECT AND SAVE         04450000
+*    IT IN THE PROJECT DATABASE.                                        04460000
+*                                                                       04470000
+*  ENTRY:  N/A                                                          04480000
+*                                                                       04490000
+*  EXIT:   R15/R0 RETURNED FROM $PROJECT REQUEST                        04500000
+*                                                                       04510000
+****************************************************************        04520000
+                                                                        04530000
+SYSPINIT DS    0H                                                       04540000
+         STM   R0,R15,REGSAVE1    SAVE CALLER'S REGISTERS               04550000
+         $MSG  004                INITIALIZING SYSCATLG PROJ            04560000
+                                                                        04570000
+         $PROJECT NEW,            CREATE SYSTEM PROJECT                +04580000
+               NAME='SYSCATLG',                                        +04590000
+               TOKEN=*ICTSYSP@,                                        +04600000
+               USER='INTEGRAT',                                        +04610000
+               SOURCE=TSKNAME,                                         +04620000
+               OIECOUNT=*ICTCOIES,                                     +04630000
+               SPCLOCK=*ICTLKCTL,                                      +04640000
+               SPCSIZE=*ICTCSIZE,                                      +04650000
+               TBSVCFG=*ICTTBCAT,                                      +04660000
+               TTOKEN=ICTJSTKN,   ASSOCIATE WITH $INTMAIN              +04670000
+               WORKA=WRK2K,                                            +04680000
+               ERRAREA=PROJERR,                                        +04690000
+               MF=(E,$PRJPL)                                            04700000
+                                                                        04710000
+         LTR   R15,R15            ERROR ?                               04720000
+         BNZ   SYINPERR           YES, REPORT PROJECT ERROR DETAILS     04730000
+                                                                        04740000
+*---------------------------------------------------------------        04750000
+*   CREATE SYSCATLG TABLES                                              04760000
+*---------------------------------------------------------------        04770000
+         $PRJTBLS CREATE,         CREATE PROJECT DIRECTORY             +04780000
+               TABLE='PROJDIR',                                        +04790000
+               WORKA=WRK2K,                                            +04800000
+               MF=(E,$PJTBPL)                                           04810000
+                                                                        04820000
+         LTR   R15,R15            TABLE CREATED?                        04830000
+         BNZ   SYINFAIL           ERROR                                 04840000
+                                                                        04850000
+         $PRJTBLS CREATE,         CREATE SYSAPPLS                      +04860000
+               TABLE='SYSAPPLS',                                       +04870000
+               WORKA=WRK2K,                                            +04880000
+               MF=(E,$PJTBPL)                                           04890000
+                                                                        04900000
+         LTR   R15,R15            TABLE CREATED?                        04910000
+         BNZ   SYINFAIL           ERROR                                 04920000
+                                                                        04930000
+         $PRJTBLS CREATE,         CREATE SYSPOOLS                      +04940000
+               TABLE='SYSPOOLS',                                       +04950000
+               WORKA=WRK2K,                                            +04960000
+               MF=(E,$PJTBPL)                                           04970000
+                                                                        04980000
+         LTR   R15,R15            TABLE CREATED?                        04990000
+         BNZ   SYINFAIL           ERROR                                 05000000
+                                                                        05010000
+         $PRJTBLS CREATE,         CREATE SYSTEMS                       +05020000
+               TABLE='SYSTEMS',                                        +05030000
+               WORKA=WRK2K,                                            +05040000
+               MF=(E,$PJTBPL)                                           05050000
+                                                                        05060000
+         LTR   R15,R15            TABLE CREATED?                        05070000
+         BNZ   SYINFAIL           ERROR                                 05080000
+                                                                        05090000
+*---------------------------------------------------------------        05100000
+*   SAVE NEWLY CREATE SYSCATLG                                          05110000
+*---------------------------------------------------------------        05120000
+         BAS   R14,SAVESYSP       SAVE SYSTEM PROJECT                   05130000
+         BZ    SYINEXIT           RETURN IF SUCCESSFULL                 05140000
+                                                                        05150000
+SYINPERR DS    0H                                                       05160000
+         STM   R15,R0,RCODES      PROTECT RETURN/REASON CODES           05170000
+         LA    R2,PROJERR         ADDRESS OF PRJSRV ERROR AREA          05180000
+         USING PERAREA,R2         ADDRESSABILITY                        05190000
+         ICM   R1,B'1111',PERRC   ERROR DETAILS AVAILABLE ?             05200000
+         BZ    SYINFAIL           NO, ERROR SYSTEM CATALOG              05210000
+                                                                        05220000
+         $MSG  279,               DUMP ERROR DETAILS                   +05230000
+               FIELDS=(PERSRVC,PERRC,PERSYSRC,PERSYSRS)                 05240000
+         XC    PERRC,PERRC        RESET PRJSRV ERROR                    05250000
+         DROP  R2                 PERAREA                               05260000
+                                                                        05270000
+         LM    R15,R0,RCODES      RESTORE RETURN/REASON CODES           05280000
+                                                                        05290000
+SYINFAIL DS    0H                                                       05300000
+         STM   R15,R0,RCODES      SAVE RETURN/REASON CODES              05310000
+         $MSG  013,FIELDS=(RETCD,RSNCD)                                 05320000
+         LM    R15,R0,RCODES      RESTORE RETURN/REASON CODES           05330000
+                                                                        05340000
+SYINEXIT DS    0H                                                       05350000
+         LM    R1,R14,REGSAVE1+4  RESTORE CALLER'S REGISTERS            05360000
+         LTR   R15,R15            SET CONDITION CODE                    05370000
+         BR    R14                AND RETURN                            05380000
+                                                                        05390000
+         EJECT ,                                                        05400000
+****************************************************************        05410000
+*                                                                       05420000
+*  ROUTINE: SAVESYSP - SAVE SYSCATLG PROJECT                            05430000
+*                                                                       05440000
+*  DESCRIPTION:                                                         05450000
+*                                                                       05460000
+*    THIS ROUTINE WILL SAVE THE CURRENT SYSTEM CATALOG PROJECT          05470000
+*                                                                       05480000
+*  ENTRY:  N/A                                                          05490000
+*                                                                       05500000
+*  EXIT:   R0/R15 CONTAIN RETURN/REASON CODES FROM $PROJECT REQ         05510000
+*                                                                       05520000
+****************************************************************        05530000
+SAVESYSP DS    0H                                                       05540000
+         STM   R0,R15,REGSAVE2    SAVE CALLER'S REGISTERS               05550000
+                                                                        05560000
+         $PROJECT SAVE,           SAVE SYSTEM PROJECT                  +05570000
+               NAME='SYSCATLG',                                        +05580000
+               TOKEN=*ICTSYSP@,                                        +05590000
+               USER='INTEGRAT',                                        +05600000
+               SOURCE=TSKNAME,                                         +05610000
+               WORKA=WRK2K,                                            +05620000
+               ERRAREA=PROJERR,                                        +05630000
+               MF=(E,$PRJPL)                                            05640000
+                                                                        05650000
+         LM    R1,R14,REGSAVE2+4  RESTORE CALLER'S REGISTERS            05660000
+         LTR   R15,R15            SET CONDITION CODE                    05670000
+         BR    R14                RETURN                                05680000
+                                                                        05690000
+         EJECT ,                                                        05700000
+****************************************************************        05710000
+*                                                                       05720000
+*  LITERALS AND CONSTANTS                                               05730000
+*                                                                       05740000
+****************************************************************        05750000
+         LTORG ,                  LITERAL POOL                          05760000
+                                                                        05770000
+         PRINT NOGEN                                                    05780000
+         ICVT  ,                                                        05790000
+         ITASK ,                                                        05800000
+         $TOKEN ,                                                       05810000
+         END   ,                                                        05820000

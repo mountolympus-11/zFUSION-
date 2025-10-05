@@ -1,0 +1,271 @@
+IPSBDEL  TITLE '- PREPARED STATEMENT BLOCK DELETE'                      00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE: IPSBDEL - Prepared Statement Block (PSB) delete              00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This routine is used to delete the data structures that            00080000
+*    represent SQL statements SQLPrepared by the cooperative            00090000
+*    process.  The PSB chain anchored in IUSER is run, freeing          00100000
+*    all PSBs or, alternatively, only the PSB identified by             00110000
+*    statement handle.  The first form is used by general               00120000
+*    task cleanup, the second (more selective) form is used             00130000
+*    to complete a coop 'free statement' directive.                     00140000
+*                                                                       00150000
+*    Additionally, the caller can provide a generic token               00160000
+*    that identifies a group of related PSBs.  Members of the           00170000
+*    group are those PSBs whose tokens match in the high order          00180000
+*    half (eight bytes currently).                                      00190000
+*                                                                       00200000
+*    IPSBPURG is called for the PSBPLAN segment and each of             00210000
+*    its multi-application extensions to release all plan               00220000
+*    resources.  The PSB and each of its extensions is freed            00230000
+*    in the process.                                                    00240000
+*                                                                       00250000
+*                                                                       00260000
+* ON ENTRY:                                                             00270000
+*                                                                       00280000
+*    R1 contains the address of a parameter list constructed            00290000
+*       as follows:                                                     00300000
+*                                                                       00310000
+*          +00 - addr of current or terminating process         (IPCB)  00320000
+*          +04 - addr of user instance block                    (IUSER) 00330000
+*                                                                       00340000
+*          +08 - statement token addr identifying the prepared          00350000
+*                statement to terminate, or zero if all PSBs            00360000
+*                are to be deleted.                                     00370000
+*                                                                       00380000
+*          +12 - TRUE:  request is a generic request directed           00390000
+*                       against all PSBs associated with the            00400000
+*                       given connection.  The high order eight         00410000
+*                       bytes of the given token generically            00420000
+*                       identifies the affected PSBs.                   00430000
+*                                                                       00440000
+*                FALSE: the token given specifically identifies         00450000
+*                       a single PSB.                                   00460000
+*                                                                       00470000
+*                                                                       00480000
+* ON EXIT:                                                              00490000
+*                                                                       00500000
+*    R15 contains one of the following return codes                     00510000
+*                                                                       00520000
+*          RC00 - PSB(s) deleted                                        00530000
+*          RC04 - no PSB matches the selection criteria                 00540000
+*                                                                       00550000
+**<DOC-OFF>****************************************************         00560000
+                                                                        00570000
+         EJECT                                                          00580000
+***************************************************************         00590000
+*                                                                       00600000
+* MAINTENANCE:                                                          00610000
+*                                                                       00620000
+*   04/23/94  R. Turgeon                                                00630000
+*             Initial version                                           00640000
+*                                                                       00650000
+*   11/22/94  R. Turgeon   PAR #156358                                  00660000
+*             Modified to accept the SQL statement serving as           00670000
+*             object of the SQLPrepare() function                       00680000
+*                                                                       00690000
+*   10/09/95  R. Turgeon   Rel 2.1   PLANCACHE                          00700000
+*             IPSBPURG plist modified in support of PLANCACHE           00710000
+*                                                                       00720000
+***************************************************************         00730000
+                                                                        00740000
+         EJECT                                                          00750000
+         #WORK ,                       READ/WRITE WORKAREA              00760000
+         #ENDWORK ,                                                     00770000
+                                                                        00780000
+         EJECT                                                          00790000
+         IUSER ,                       COOP INSTANCE (USER) BLOCK       00800000
+                                                                        00810000
+         EJECT                                                          00820000
+         NAV   ,                       NAVIGATION / PLAN STRUCTURES     00830000
+                                                                        00840000
+         EJECT                                                          00850000
+         PSB   ,                       TABLE INTERFACE BLOCK (TIB)      00860000
+                                                                        00870000
+         EJECT                                                          00880000
+         SQLSEMAL ,                    SQL SEMANTIC SUMMARY             00890000
+                                                                        00900000
+         EJECT                                                          00910000
+         EQUS  ,                                                        00920000
+                                                                        00930000
+         EJECT                                                          00940000
+IPSBDEL  #ENTER BASE=R12,PREG=R8                                        00950000
+                                                                        00960000
+         USING ITASK,R10               ITASK ADDRESSABILITY             00970000
+                                                                        00980000
+         EJECT                                                          00990000
+***************************************************************         01000000
+*                                                                       01010000
+*   Identify current workunit, user, and terminating project            01020000
+*                                                                       01030000
+***************************************************************         01040000
+                                                                        01050000
+         L     R9,0(,R8)               WORKUNIT (PROCESS)               01060000
+         USING IPCB,R9                                                  01070000
+         L     R7,8(,R8)               PREPARED STMT TOKEN OR ZERO      01080000
+                                                                        01090000
+         LA    R4,L'PSBTOKEN           ASSUME SPECIFIC PSB IDENTIFIED   01100000
+         ICM   R0,15,12(R8)            GENERIC REQUEST?                 01110000
+         BZ    *+8                     SKIP IF NOT                      01120000
+         SRL   R4,1                    USE HIGHORDER ONLY               01130000
+         BCTR  R4,0                    MAINTAIN IN EX-READY FORM        01140000
+                                                                        01150000
+         L     R8,4(,R8)               IUSER PASSED AS PARM             01160000
+         USING IUSER,R8                USER ASSOCIATION                 01170000
+                                                                        01180000
+*--------------------------------------------------------------         01190000
+*   Run PSB chain, locate those scheduled for resource release          01200000
+*--------------------------------------------------------------         01210000
+                                                                        01220000
+         LA    R3,RC04                 ASSUME NO DELETES WILL OCCUR     01230000
+         USING PSB,R6                  DECLARE INTENTIONS               01240000
+                                                                        01250000
+ALL      DS    0H                      START FROM LIST ORIGIN           01260000
+         ICM   R6,15,USRPSBS           PSB'S PRESENT?                   01270000
+         BZ    FINIS                   DONE IF NOT                      01280000
+                                                                        01290000
+TOP      DS    0H                                                       01300000
+         LTR   R7,R7                   DELETING ALL PSB'S?              01310000
+         BZ    DELETE                  SELECTED IF SO                   01320000
+         CLC   PSBTOKEN(*-*),0(R7)     SPECIFICALLY IDENTIFIED?         01330000
+         EX    R4,*-6                                                   01340000
+         BE    DELETE                  SELECTED IF SO                   01350000
+                                                                        01360000
+         ICM   R6,15,PSBNEXT           ADVANCE TO NEXT PSB              01370000
+         BNZ   TOP                     AGAIN IF SOME REMAIN             01380000
+         B     FINIS                   ELSE DONE                        01390000
+                                                                        01400000
+***************************************************************         01410000
+*                                                                       01420000
+*   Dechain the matched PSB from the prepared statement list            01430000
+*                                                                       01440000
+***************************************************************         01450000
+                                                                        01460000
+L        USING PSB,R5                  LINKING (PREV,NEXT) PSB          01470000
+                                                                        01480000
+DELETE   DS    0H                      DECHAIN THE PSB                  01490000
+         ICM   R5,15,PSBPREV           LEFT ENTRY PRESENT?              01500000
+         BZ    *+10                    SKIP IF NOT                      01510000
+         MVC   L.PSBNEXT,PSBNEXT       DROP FROM NEXT CHAIN             01520000
+                                                                        01530000
+         LTR   R5,R5                   PSB AT HEAD OF LIST?             01540000
+         BNZ   *+10                    SKIP IF NOT                      01550000
+         MVC   USRPSBS,PSBNEXT         REANCHOR REMAINING PSB CHAIN     01560000
+                                                                        01570000
+         ICM   R5,15,PSBNEXT           RIGHT ENTRY PRESENT?             01580000
+         BZ    *+10                    SKIP IF NOT                      01590000
+         MVC   L.PSBPREV,PSBPREV       DROP FROM PREV CHAIN             01600000
+         DROP  L                       LINKING PSB                      01610000
+                                                                        01620000
+***************************************************************         01630000
+*                                                                       01640000
+*   Delete the SQL statement parse workareas and the semantic           01650000
+*   analysis.  Detach from any residual VDB table definitions.          01660000
+*                                                                       01670000
+***************************************************************         01680000
+                                                                        01690000
+         @CALL ITISQCLN,(*PSBQSEMP,PSBQPTI),                           X01700000
+               CTYPE=CVT,                                              X01710000
+               MF=(E,MFE_LIST)                                          01720000
+                                                                        01730000
+         ICM   R1,15,PSBQVDBL          R1 <== RESIDUAL VDB DEFINITION?  01740000
+         BZ    DELVDB                  SKIP CLEANUP CALL IF NOT         01750000
+         XC    PSBQVDBL,PSBQVDBL       DISCHARGE POINTER                01760000
+                                                                        01770000
+         @CALL IVDBDET,CTYPE=CVT       DETACH THE VDB DEFINITION        01780000
+                                                                        01790000
+DELVDB   DS    0H                                                       01800000
+                                                                        01810000
+***************************************************************         01820000
+*                                                                       01830000
+*   Delete the multi-application sequencing information from            01840000
+*   the PSB, if present.                                                01850000
+*                                                                       01860000
+***************************************************************         01870000
+                                                                        01880000
+         CLI   PSBMULTI,FALSE          MULTI-APPLICATION PLAN?          01890000
+         BE    DELMULTI                SKIP IF NOT                      01900000
+                                                                        01910000
+         L     R2,PSBMALST             PSAPPL LIST                      01920000
+         L     R3,PSBMASIZ             PSAPPL LIST SIZE                 01930000
+                                                                        01940000
+         STGRETN ADDR=(R2),LEN=(R3),QH=USRSTG                           01950000
+                                                                        01960000
+DELMULTI DS    0H                                                       01970000
+                                                                        01980000
+***************************************************************         01990000
+*                                                                       02000000
+*   Delete retained plans currently 'owned' by the PSB and its          02010000
+*   extensions.                                                         02020000
+*                                                                       02030000
+***************************************************************         02040000
+                                                                        02050000
+         LA    R5,PSBPLAN              ADDRESS PSB PLAN SECTION         02060000
+         USING PSBPLAN,R5              CHOKE UP ON THE BAT              02070000
+                                                                        02080000
+         @CALL IPSBPURG,((R5)),                                        X02090000
+               CTYPE=CVT,MF=(E,MFE_LIST)                                02100000
+                                                                        02110000
+         L     R5,PSBPANXT             PSBPLAN MULTIAPP EXTENSION       02120000
+                                                                        02130000
+*--------------------------------------------------------------         02140000
+*   Delete multiapp plan extensions                                     02150000
+*--------------------------------------------------------------         02160000
+                                                                        02170000
+DELEXTN  DS    0H                                                       02180000
+         LTR   R5,R5                   R1 <== PSB PLAN EXTENSION        02190000
+         BZ    ADVANCE                 DONE IF NONE                     02200000
+                                                                        02210000
+         @CALL IPSBPURG,((R5)),                                        X02220000
+               CTYPE=CVT,MF=(E,MFE_LIST)                                02230000
+                                                                        02240000
+         LR    R2,R5                   PSB PLAN EXTENSION               02250000
+         L     R5,PSBPANXT             LOCATE NEXT EXTENSION            02260000
+                                                                        02270000
+         STGRETN ADDR=(R2),LEN=PSBPLN,QH=USRSTG                         02280000
+                                                                        02290000
+         B     DELEXTN                 AGAIN                            02300000
+         DROP  R5                      PSBPLAN                          02310000
+                                                                        02320000
+*--------------------------------------------------------------         02330000
+*   PSB deletion and continuation                                       02340000
+*--------------------------------------------------------------         02350000
+                                                                        02360000
+ADVANCE  DS    0H                                                       02370000
+         ICM   R2,15,PSBQSQLL          SQL STATEMENT ATTACHED?          02380000
+         BNP   ADVPSB                                                   02390000
+         L     R3,PSBQSQLA             SQL STATEMENT ORIGIN             02400000
+                                                                        02410000
+         STGRETN ADDR=(R3),LEN=(R2),QH=USRSTG                           02420000
+                                                                        02430000
+ADVPSB   DS    0H                                                       02440000
+         STGRETN ADDR=PSB,LEN=PSBLN,QH=USRSTG                           02450000
+                                                                        02460000
+         LA    R3,RC00                 PSB(S) DELETED                   02470000
+         B     ALL                     RESTART (USUALLY DELETE ALL)     02480000
+                                                                        02490000
+*--------------------------------------------------------------         02500000
+*   Return to requester                                                 02510000
+*--------------------------------------------------------------         02520000
+                                                                        02530000
+FINIS    DS    0H                                                       02540000
+         LR    R15,R3                  REFLECT PROGRAM ACTION           02550000
+         #EXIT ,                       RETURN                           02560000
+                                                                        02570000
+         EJECT                                                          02580000
+***************************************************************         02590000
+*                                                                       02600000
+*   Local read-only storage                                             02610000
+*                                                                       02620000
+***************************************************************         02630000
+                                                                        02640000
+         LTORG ,                                                        02650000
+                                                                        02660000
+         PRINT NOGEN                                                    02670000
+         ICVT  ,                                                        02680000
+         ITASK ,                                                        02690000
+         IPCB  ,                                                        02700000
+         END   ,                                                        02710000

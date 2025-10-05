@@ -1,0 +1,962 @@
+         TITLE 'IRCVESTA - ITASK / PROCESS RECOVERY CONTROL'            00010000
+         RCVYWORK ,                                                     00020000
+                                                                        00030000
+         EJECT                                                          00040000
+         $SDUMP DSECT=YES                                               00050000
+                                                                        00060000
+         EJECT                                                          00070000
+         ITASK ,                                                        00080000
+                                                                        00090000
+         EJECT                                                          00100000
+         IPCB  ,                                                        00110000
+                                                                        00120000
+         EJECT                                                          00130000
+         COPY  DSA                SAS-C DSA                             00140000
+                                                                        00150000
+         EJECT                                                          00160000
+         $TASK DSECT=YES          TASK MANAGER PLIST                    00170000
+                                                                        00180000
+         EJECT                                                          00190000
+         $LOCK ,                  LOCK STRUCTURE                        00200000
+                                                                        00210000
+         EJECT                                                          00220000
+         $QLOCK ,                 LOCK QUEUE ENTRY AND STATUS           00230000
+                                                                        00240000
+         EJECT                                                          00250000
+#STDWORK #WORK                    USED FOR POST-MORTEM REF ONLY         00260000
+         #ENDWORK ,                                                     00270000
+                                                                        00280000
+         EJECT                                                          00290000
+         TRACODES ,               TRACE TABLE ENTRY CODES               00300000
+                                                                        00310000
+         ABCODES ,                $ABEND CODES                          00320000
+                                                                        00330000
+         EQUS  ,                                                        00340000
+         EJECT ,                                                        00350000
+                                                                        00360000
+**<DOC-ON>*****************************************************         00370000
+*                                                                       00380000
+* ROUTINE: IRCVESTA - ITASK / Process recovery control routine          00390000
+*                                                                       00400000
+* DESCRIPTION:                                                          00410000
+*                                                                       00420000
+*    This routine serves as the primary ESTAE shared by all             00430000
+*    processes running under an ITASK.  Its function is to              00440000
+*    restore the standard execution environment after a                 00450000
+*    scheduled ($ABEND) or unscheduled failure, to drive                00460000
+*    process-level recovery routines defined by $RCVRY macros           00470000
+*    issued by the process, and to attempt retry when retry is          00480000
+*    requested and permitted.                                           00490000
+*                                                                       00500000
+*    When XDC is present, this routine first exits to that              00510000
+*    facility to allow interactive debugging.  The XDC END              00520000
+*    command continues the error recovery processing, GO forces         00530000
+*    an immediate percolation.  Additionally, when XDC is               00540000
+*    present it is established as a second level ESTAE for the          00550000
+*    duration of this routine.                                          00560000
+*                                                                       00570000
+*                                                                       00580000
+* NOTES:                                                                00590000
+*                                                                       00600000
+*    All locks are released upon entry.  Recovery and retry             00610000
+*    routines must reacquire locks as needed.                           00620000
+*                                                                       00630000
+*    If the expedited termination flag (ICT3$PX) is set, XDC            00640000
+*    invokation is bypassed and recovery routines are not               00650000
+*    allowed to request retry. The intent of expedited                  00660000
+*    termination is to end execution with a minimum of operator         00670000
+*    interaction in debugging environments.                             00680000
+*                                                                       00690000
+*    Messages describing the failure and recovery, if                   00700000
+*    applicable, and a dump of the ITASK and related data areas         00710000
+*    occurs after all eligible recovery routines have                   00720000
+*    completed. The recovery routines can suppress these                00730000
+*    messages and/or the dump by resetting the following flags          00740000
+*    in ITASK.TSKERR.  Setting the "dump flag" causes a dump            00750000
+*    even if not originally requested.                                  00760000
+*                                                                       00770000
+*       TSKEABFL.TSKEAB_DUMP - Address space and TOKEN space dump       00780000
+*       TSKELOGF.TSKELG_LOG  - Failure log                              00790000
+*                                                                       00800000
+*                                                                       00810000
+* ON ENTRY:                                                             00820000
+*                                                                       00830000
+*    R1  contains the address of the SDWA (usually). Refer to           00840000
+*        the Assembler Programmer's Reference for details.              00850000
+*                                                                       00860000
+* ON EXIT:                                                              00870000
+*                                                                       00880000
+*    Percolation occurs if no SDWA is provided, or if the               00890000
+*    standard execution environment cannot be restored.                 00900000
+*    Otherwise, control is transferred back to STDENV via a             00910000
+*    SETRP to RETRYRTN also included in this assembly.                  00920000
+*                                                                       00930000
+**<DOC-OFF>****************************************************         00940000
+                                                                        00950000
+                                                                        00960000
+***************************************************************         00970000
+*                                                                       00980000
+* MAINTENANCE:                                                          00990000
+*                                                                       01000000
+*    05/15/93 R. Turgeon                                                01010000
+*             Initial version                                           01020000
+*                                                                       01030000
+*    06/16/93 R. Turgeon                                                01040000
+*                                                                       01050000
+*             Merge functions previously contained in the               01060000
+*             recovery routine into the retry routine (RETRYRTN)        01070000
+*             to provide a friendlier environment for $RCVRY            01080000
+*             routines and to allow intertask messaging and             01090000
+*             logging after introduction of $LOCK mgr.                  01100000
+*                                                                       01110000
+*    07/17/93 R. Turgeon                                                01120000
+*             Trace table entries / Push and pop of trace table         01130000
+*                                                                       01140000
+*    09/17/93 R. Turgeon                                                01150000
+*             Split termination / retry logic into IRCVRTRY             01160000
+*             module to ease addressability constaints                  01170000
+*                                                                       01180000
+*    06/03/94 T. Weltzer                                                01190000
+*             Code tweak for C environment cleanup work                 01200000
+*                                                                       01210000
+*    06/15/94 T. Weltzer                                                01220000
+*             Added SVC dump logic                                      01230000
+*                                                                       01240000
+*    07/12/94 R. Turgeon                                                01250000
+*             Eliminate exit to XDC when user ABEND due to              01260000
+*             no-task-epilog (SYSABE_NTEPLG) which occurs               01270000
+*             repeatedly after ATTN and END NOASK from XDC.             01280000
+*                                                                       01290000
+*    07/14/94 R. Colmone          Par# 134224                           01300000
+*             Added post of Task manager Dispatch EPB to                01310000
+*             ensure that events table is not left in a                 01320000
+*             damaged state (unwaitable) after retry.                   01330000
+*                                                                       01340000
+*    12/06/94 R. Colmone                                                01350000
+*             Added QLOCK parameter to $SER REQUEUE request.            01360000
+*                                                                       01370000
+*    12/12/94 R. Turgeon                                                01380000
+*             Added FORCE=YES to all ABEND class $TRACE requests        01390000
+*             ensuring that these diagnostic entries are always         01400000
+*             generated.                                                01410000
+*                                                                       01420000
+*    01/24/95 T. Weltzer                                                01430000
+*             SVC dump title change                                     01440000
+*                                                                       01450000
+***************************************************************         01460000
+                                                                        01470000
+         EJECT ,                                                        01480000
+IRCVESTA CSECT ,                  ENTERED FROM RTM                      01490000
+IRCVESTA AMODE 31                                                       01500000
+IRCVESTA RMODE ANY                                                      01510000
+                                                                        01520000
+         ENTRY $$ESTAE            ENTRY POINT                           01530000
+         DC    CL8'CALLSXDC'      XDC PRODUCT REQUIREMENT               01540000
+                                                                        01550000
+$$ESTAE  DS    0H                                                       01560000
+         USING *,R15              TEMPORARY ADDRESSABILITY              01570000
+                                                                        01580000
+         @CPYRYT ,                COPYRIGHT                             01590000
+                                                                        01600000
+         C     R0,=A(RC12)        SDWA AVAILABLE?                       01610000
+         BE    GETOUT             PERCOLATE IF NOT                      01620000
+                                                                        01630000
+         TM    SDWAERRD-SDWA(R1),SDWARPIV  RELIABLE SDWA?               01640000
+         BNO   STDRCVY            ONWARD IF SO                          01650000
+                                                                        01660000
+GETOUT   DS    0H                                                       01670000
+                                                                        01680000
+         LA    R15,RC00           IMMEDIATE PERCOLATE OTHERWISE         01690000
+         BR    R14                DONE                                  01700000
+                                                                        01710000
+         EJECT ,                                                        01720000
+***************************************************************         01730000
+*                                                                       01740000
+*   PROCESS PGM FAILURE, ACCEPT SDWA AND ACQUIRE LOCAL WORKAREA         01750000
+*                                                                       01760000
+***************************************************************         01770000
+STDRCVY  DS    0H                                                       01780000
+         STM   R14,R12,12(R13)    SAVE CALLER'S REGISTERS               01790000
+         LR    R12,R15            ESTABLISH BASE ADDRESS                01800000
+         USING $$ESTAE,R12        DECLARE ADDRESSING INTENTIONS         01810000
+         LR    R8,R1              SDWA, IF PROVIDED                     01820000
+         USING SDWA,R8            LIFE OF FUNCTION ADDRESSABILITY       01830000
+         L     R7,SDWAXPAD        SDWA EXTENSION AREA PTRS              01840000
+         USING SDWAPTRS,R7        PTR EXTENSION IS ALWAYS PRESENT       01850000
+         DROP  R15                                                      01860000
+                                                                        01870000
+         STORAGE OBTAIN,LENGTH=WORKLEN,COND=YES                         01880000
+                                                                        01890000
+         LTR   R15,R15            STORAGE OBTAINED?                     01900000
+         BZ    STDLINK            PREPARE NORMAL EXECUTION ENVIRON      01910000
+         LA    R15,RC00           ELSE INDICATE PERCOLATE               01920000
+         L     R14,12(,R13)       RESTORE REGS                          01930000
+         LM    R2,R12,28(R13)                                           01940000
+         BR    R14                                                      01950000
+                                                                        01960000
+*--------------------------------------------------------------         01970000
+*   SDWA PROVIDED - COMPLETE ENTRY LINKAGE                              01980000
+*--------------------------------------------------------------         01990000
+STDLINK  DS    0H                 PREAPRE EXEC ENVIRONMENT              02000000
+         LTR   R14,R1             NEW WORKAREA                          02010000
+         LH    R15,=AL2(WORKLEN)  WORKAREA LENGTH                       02020000
+         SR    R3,R3              PREPARE FOR CLEAR                     02030000
+         MVCL  R14,R2             CLEAR                                 02040000
+                                                                        02050000
+         ST    R13,4(,R1)         BACKWARD SAVEAREA LINKAGE             02060000
+         ST    R1,8(,R13)         FORWARD  SAVEAREA LINKAGE             02070000
+         LR    R13,R1             WORKAREA ADDRESS                      02080000
+         USING WORKAREA,R13       ESTABLISH ADDRESSABILITY              02090000
+                                                                        02100000
+         SPLEVEL SET=3            SET MVS/SP LEVEL GLOBAL               02110000
+                                                                        02120000
+         EJECT ,                                                        02130000
+***************************************************************         02140000
+*                                                                       02150000
+*   ANALYZE FAILURE DESCRIBED IN CURRENT ITASK AND/OR SDWA              02160000
+*                                                                       02170000
+***************************************************************         02180000
+         @RESTENV ,               RESTORE STD ENVIRONMENT               02190000
+                                                                        02200000
+         USING ICVT,R11           ENVIRONMENTALS                        02210000
+         CLC   ICTID,=CL8'ICVT'   CORRECT FORMAT                        02220000
+         BNE   PERCLATE                                                 02230000
+                                                                        02240000
+         ST    R10,PTRITASK       ADDR OF ABENDING ITASK                02250000
+         LTR   R10,R10            ABEND IN STDENV?                      02260000
+         BZ    *+10               SKIP IF NOT                           02270000
+         MVC   PTRIPCB,TSKPCBC-ITASK(R10)                               02280000
+                                                                        02290000
+*--------------------------------------------------------------         02300000
+*   CUT A TRACE ENTRY, THEN SWITCH TO PRESERVE TRACE TABLE              02310000
+*--------------------------------------------------------------         02320000
+         $TRACE *=A(TRC_ABEND),16,FORCE=YES                             02330000
+         BNZ   NOTRACE1           TRACE INACTIVE                        02340000
+         MVC   0(8,R1),SDWAEC1    PSW AT TIME OF FAILURE                02350000
+         MVC   8(1,R1),SDWAICD1   PIC                                   02360000
+         MVC   9(3,R1),SDWACMPC   COMPLETION CODES                      02370000
+         MVC   12(4,R1),SDWATRAN  TRANSLATION EXCEPTION ADDR            02380000
+NOTRACE1 DS    0H                                                       02390000
+                                                                        02400000
+         $TRACE TYPE=PUSH,        FREEZE CURRENT TRACE TABLE           X02410000
+               TASK=*PTRITASK,    ASSOCIATED TASK                      X02420000
+               PCB=*PTRIPCB,      ASSOCIATED PROCESS                   X02430000
+               MF=(E,WK256)                                             02440000
+                                                                        02450000
+         LTR   R15,R15            SWITCH MADE?                          02460000
+         BNZ   *+8                SKIP IF NOT                           02470000
+         OI    STATFLGS,STAT_SWI  INDICATE TRACE TABLE SWITCHED         02480000
+                                                                        02490000
+*--------------------------------------------------------------         02500000
+*   RAISE EXPEDITED TERMINATE FLAG ON X22 ABEND                         02510000
+*--------------------------------------------------------------         02520000
+         ICM   R0,3,SDWACMPC      ABEND CODE SUFFIX                     02530000
+         SRL   R0,4               RIGHT MOST BYTE OF SYSTEM COMPCODE    02540000
+         CLM   R0,1,X22           ABENDSX22?                            02550000
+         BNE   *+8                NOT OPERATOR CANCEL                   02560000
+         OI    ICTSTAT3,ICT3$PX   EXPEDITED TERMINATE                   02570000
+                                                                        02580000
+*--------------------------------------------------------------         02590000
+*  Determine if abend occured from an XDC #DIR trap executed            02600000
+*  from an IRB. If so, termination is expedited and no retry            02610000
+*  will be permitted.                                                   02620000
+*--------------------------------------------------------------         02630000
+         CLM   R0,1,=X'C1'        ABENDS0C1 IS POSSIBLE XDCTRAP         02640000
+         BNE   NO_XTRAP           CAN'T BE XDC TRAP                     02650000
+                                                                        02660000
+         USING PSA,0              PSA ADDRESSABILITY                    02670000
+         L     R1,PSATOLD         ADDRESS OF CURRENT TCB                02680000
+         USING TCB,R1             TCB ADDRESSABILITY                    02690000
+         L     R1,TCBRBP          ADDRESS OF CURRENT RB                 02700000
+         USING RBBASIC,R1         TOP RB ADDRESSABILITY                 02710000
+         ICM   R1,15,RBLINK       ADDRESS OF PREV RB (SVRB)             02720000
+         BZ    NO_XTRAP           ERROR IF NONE                         02730000
+         ICM   R1,15,RBLINK       ADDRESS OF ERROR LEVEL RB             02740000
+         BZ    NO_XTRAP           ERROR IF NONE                         02750000
+                                                                        02760000
+         IC    R0,RBSTAB1         COPY STATUS BITS                      02770000
+         N     R0,=A(RBFTP)       RESET NON-TYPE BITS                   02780000
+         CLM   R0,1,=AL1(RBFTIRB) ABEND OCCUR IN AN IRB?                02790000
+         BNE   NO_XTRAP           NO,  CAN'T BE FROM ATTN KEY           02800000
+                                                                        02810000
+         L     R2,RBOPSWA         GET PSW ADDRESS OF ABEND              02820000
+         SH    R1,=H'3'           ADDRESS OF INSTRUCTION LENGTH         02830000
+         SR    R0,R0              PREPARE FOR INSERT                    02840000
+         IC    R0,0(,R1)          GET INSTRUCTION LENGTH                02850000
+         SR    R2,R0              ADDRESS OF FAILING INSTRUCTION        02860000
+         CLC   =X'00DEAD',0(R2)   XDC ATTN INTERRUPT TRAP               02870000
+         BNE   NO_XTRAP           NO, CONTINUE                          02880000
+                                                                        02890000
+         OI    ICTSTAT3,ICT3$PX   EXPEDITED TERMINATION                 02900000
+         OI    ICTSTAT3,ICT3$NRT  NO RETRY PERMITTED                    02910000
+         DROP  R1                 RBBASIC                               02920000
+                                                                        02930000
+NO_XTRAP DS    0H                                                       02940000
+         TM    ICTSTAT3,ICT3$NRT  NO RETRY PERMITTED                    02950000
+         BO    NORETRY                                                  02960000
+                                                                        02970000
+*--------------------------------------------------------------         02980000
+*   INVOKE XDC DEBUGGER DIRECTLY IF XDC OPTION ENABLED                  02990000
+*--------------------------------------------------------------         03000000
+         TM    ICTSTAT2,ICT2$XDC  XDC INTERFACE REQUESTED?              03010000
+         BNO   NOXDCREQ           SKIP IF NOT                           03020000
+         TM    ICTSTAT3,ICT3$PX   EXPEDITED TERMINATE?                  03030000
+         BO    NOXDCREQ           FULL SPEED AHEAD                      03040000
+         CLC   =AL3(SYSABE_NTEPLG),SDWACMPC                             03050000
+         BE    NOXDCREQ           ELIM PROMPTS FROM XDC ATTN/END-NOASK  03060000
+                                                                        03070000
+         L     R1,4(,R13)         LOCATE REGS AT ENTRY                  03080000
+         L     R0,20(,R1)         ESTAE ENTRY CODE                      03090000
+         LA    R1,SDWA            SDWA PTR                              03100000
+         L     R15,ICTXDC         XDC EPA                               03110000
+         BASR  R14,R15            INVOKE DEBUGGER                       03120000
+         LTR   R15,R15            CONTINUE ERROR RECOVERY?              03130000
+         BZ    NOXDCREQ           ONWARD IF SO                          03140000
+                                                                        03150000
+*--------------------------------------------------------------         03160000
+*   XDC GO COMMAND ISSUED TO RESUME AT BREAKPOINT                       03170000
+*--------------------------------------------------------------         03180000
+         TM    STATFLGS,STAT_SWI  TRACE TABLE SWITCH OCCURRED?          03190000
+         BNO   FNTRCPOP           SKIP SWITCH BACK IF NOT               03200000
+                                                                        03210000
+         $TRACE TYPE=POP,         RESUME RECORDING IN MAIN TABLE       X03220000
+               TASK=*PTRITASK,    ASSOCIATED TASK                      X03230000
+               PCB=*PTRIPCB,      ASSOCIATED PROCESS                   X03240000
+               MF=(E,WK256)                                             03250000
+                                                                        03260000
+FNTRCPOP DS    0H                 INDICATE REAWAKENING                  03270000
+         $TRACE *=A(TRC_ABENDXDCGO),16,FORCE=YES                        03280000
+                                                                        03290000
+         SVC   3                  RESUME INTERRUPTED ITASK              03300000
+                                                                        03310000
+*--------------------------------------------------------------         03320000
+*   CONTINUE ABEND / RECOVERY, RECOVER FAILURE ENVIRONMENT              03330000
+*--------------------------------------------------------------         03340000
+NOXDCREQ DS    0H                                                       03350000
+         LTR   R10,R10            ITASK LOCATED AS EXPECTED?            03360000
+         BZ    PERCLATE           FAIL IF NOT                           03370000
+         USING ITASK,R10                                                03380000
+         L     R9,TSK@ERR         ADDR OF ERROR LOGGING AND RECOVERY    03390000
+         USING TSKERR,R9          SECTION FORMAT                        03400000
+                                                                        03410000
+         TM    TSKFLGS,TSK$ABE    ABEND RECURSION? (IN ESTAE)           03420000
+         BO    PERCLATE           ABANDON RECOVERY IF SO                03430000
+         TM    TSKFLGS2,TSK$RCVY  ABEND RECURSION? (IN RECOVERY RTN)    03440000
+         BO    PERCLATE           ABANDON RECOVERY IF SO                03450000
+         OI    TSKFLGS,TSK$ABE    ESTAE ROUTINE IN CONTROL              03460000
+                                                                        03470000
+*--------------------------------------------------------------         03480000
+*   ESTABLISH XDC ERROR RECOVERY ENVIRONMENT FOR THIS ESTAE RTN         03490000
+*--------------------------------------------------------------         03500000
+         ICM   R0,15,ICTXDC       XDC PRESENT?                          03510000
+         BZ    NOESTAE            THE TOOL OF CHOICE                    03520000
+         MVC   ESTAEMFL($ESTAELN),$ESTAE                                03530000
+                                                                        03540000
+         ESTAEX (0),MF=(E,ESTAEMFL)                                     03550000
+                                                                        03560000
+         OI    STATFLGS,STAT_CT   INDICATE LOCAL ESTAE                  03570000
+NOESTAE  DS    0H                                                       03580000
+                                                                        03590000
+                                                                        03600000
+                                                                        03610000
+         EJECT ,                                                        03620000
+**<DOC-ON>*****************************************************         03630000
+*                                                                       03640000
+*   Process the failure. First, identify the failed unit of             03650000
+*   work and release any critical resources associated with             03660000
+*   the ITASK.  If this routine was entered on behalf of a              03670000
+*   $ABEND macro, much of the failure information has already           03680000
+*   been placed in the itask error log and recovery segment             03690000
+*   beginning at label TSKERR.  Otherwise, that data must be            03700000
+*   extracted from the SDWA and program saveareas.                      03710000
+*                                                                       03720000
+**<DOC-OFF>****************************************************         03730000
+                                                                        03740000
+         L     R1,TSKSERQ         QLOCK ASSOCIATED WITH ITASK           03750000
+         ICM   R2,15,TSKPCBC      FAILURE OCCURRED IN PROCESS MODE?     03760000
+         BZ    *+8                SKIP IF NOT                           03770000
+         L     R1,PCBSERQ-IPCB(,R2)   QLOCK ASSOCIATED WITH PROCESS     03780000
+         ST    R1,PTRQLOCK        SAVE LOCK CONTROL AREA PTR            03790000
+                                                                        03800000
+*--------------------------------------------------------------         03810000
+*   CHURN THE LOCK IF WORKUNIT QLOCK IS ON PENDING QUEUE                03820000
+*--------------------------------------------------------------         03830000
+         ICM   R3,15,PTRQLOCK     LOCK ACCESS AREA FOR WORKUNIT         03840000
+         BZ    UNPEND             NO LOCKS PENDING IF NOT AVAIL         03850000
+         USING QLOCK,R3           LOCK ACCESS FORMAT                    03860000
+                                                                        03870000
+         TM    QLOFLAGS,QLOFINQ   CONTENDING FOR LOCK?                  03880000
+         BNO   UNPEND             NO LOCKS PENDING                      03890000
+         OI    QLOFLAGS,QLOFCNCL  INDICATE CANCELATION OF REQUEST       03900000
+                                                                        03910000
+         $SER  REQUEUE,           WITHDRAW PENDING REQUEST             +03920000
+               QLOCK=QLOCK,                                            +03930000
+               LOCKPTR=*QLOLOCK                                         03940000
+                                                                        03950000
+UNPEND   DS    0H                 QLOCK DECHAINED FROM LOCK QUEUE       03960000
+         DROP  R3                 QLOCK                                 03970000
+                                                                        03980000
+*--------------------------------------------------------------         03990000
+*   RELEASE LOCKS HELD BY FAILING WORKUNIT                              04000000
+*--------------------------------------------------------------         04010000
+         SR    R1,R1              RELEASE LOCKS HELD BY STD WORKUNIT    04020000
+                                                                        04030000
+         @CALL ISERFREE,          RELEASE ALL LOCKS                    X04040000
+               CTYPE=CVT,         SYSTEM MANAGED ANCHOR                X04050000
+               WKA=WK256          WORKAREA REQUIRED                     04060000
+                                                                        04070000
+*************************************************************** 134224  04080000
+*                                                                       04090000
+*   The following post of the Task Dispatcher EPB is a harmless 134224  04100000
+*   operation and will only cause a trip through the dispatcher.134224  04110000
+*   The purpose of this post is to cause the events table to    134224  04120000
+*   become READY if the abend occured while the events table    134224  04130000
+*   is currently being waited on.  This condition is possible   134224  04140000
+*   if the ABEND occurred in an IRB, and the PRB (currently     134224  04150000
+*   waiting) is the retry level.  Note that if a retry occurs   134224  04160000
+*   while the events table is being waited on, the events       134224  04170000
+*   table is left in a state where the table can no longer      134224  04180000
+*   be waited on again.  Subsequent attemps will cause an       134224  04190000
+*   S37D ABEND.                                                 134224  04200000
+*                                                                       04210000
+*************************************************************** 134224  04220000
+                                                                        04230000
+         $TASK POST,EPB=TSKDEPB,MF=(E,$TASKMFL)                 134224  04240000
+                                                                        04250000
+*--------------------------------------------------------------         04260000
+*   ABENDU001 SIGNIFIES A PREPARED ENTRY TO RECOVERY VIA $ABEND         04270000
+*--------------------------------------------------------------         04280000
+         MVI   ABETYPE,C'I'       ASSUME USER 1 ABEND                   04290000
+         SR    R1,R1              PREPARE FOR INSERT                    04300000
+         ICM   R1,7,SDWACMPC      FETCH COMPLETION CODE S12.U12         04310000
+         LA    R0,1               $ABEND COMPLETION CODE                04320000
+         CR    R0,R1              ENTERED VIA $ABEND?                   04330000
+         BE    PRESAVED           STATUS INFO ALREADY ACQUIRED IF SO    04340000
+                                                                        04350000
+         XC    TSKERR(TSKERRLN),TSKERR                                  04360000
+         LA    R0,X'FFF'          MASK LOW ORDER 12 BITS                04370000
+         NR    R0,R1              USER ABEND?                           04380000
+         BZ    SYSCODE            SKIP IF NOT                           04390000
+         ST    R0,TSKERC          POST USER COMPLETION CODE             04400000
+         MVI   ABETYPE,C'U'       USER ABEND                            04410000
+         OI    TSKEABFL,TSKEAB_USR                                      04420000
+         B     MERGSDWA                                                 04430000
+                                                                        04440000
+SYSCODE  DS    0H                                                       04450000
+         SRL   R1,12              SHIFT SYSTEM CODE TO LOW ORDER        04460000
+         ST    R1,TSKERC          POST SYSTEM COMPLETION CODE           04470000
+         MVI   ABETYPE,C'S'       SYSTEM DETECTED ABEND                 04480000
+         OI    TSKEABFL,TSKEAB_SYS                                      04490000
+                                                                        04500000
+MERGSDWA DS    0H                                                       04510000
+         MVC   TSKEGRS(4*16),SDWAGRSV  EXTRACT GPRS                     04520000
+         OI    TSKEABFL,TSKEAB_DUMP+TSKEAB_PCB                          04530000
+         OI    TSKELOGF,TSKELG_LOG     LOG THE FAILURE                  04540000
+                                                                        04550000
+         ICM   R6,15,SDWASRVP          RECORDABLE EXTENSION PROVIDED?   04560000
+         BZ    *+10                    SKIP IF NOT                      04570000
+         MVC   TSKERSN,SDWACRC-SDWARC1(R6)  REASON CODE                 04580000
+                                                                        04590000
+*--------------------------------------------------------------         04600000
+*   IDENTIFY FAILING UNIT OF WORK                                       04610000
+*--------------------------------------------------------------         04620000
+PRESAVED DS    0H                                                       04630000
+         ST    R8,TSKESDWA        RETAIN SDWA PTR                       04640000
+         MVC   TSKELMOD,$NAVAIL   LMOD NAME NOT AVAIL                   04650000
+         MVC   TSKEPCBN,$NAVAIL   PROCESS NAME NOT AVAIL                04660000
+                                                                        04670000
+         ICM   R15,15,TSKPCBC     PCB ACTIVE?                           04680000
+         BZ    *+10               SKIP IF NOT                           04690000
+         MVC   TSKEPCBN,PCBNAME-IPCB(R15)                               04700000
+                                                                        04710000
+         LTR   R15,R15            PCB ACTIVE?                           04720000
+         BNZ   *+8                SKIP IF SO                            04730000
+         OI    TSKEABFL,TSKEAB_ITASK                                    04740000
+         MVC   TSKERCVR(16*4),TSKEGRS  INITAL RETRY REGS                04750000
+                                                                        04760000
+         ST    R10,TSKERCVR+(R10*4)    STANDARD ENV RQMT                04770000
+         ST    R10,SDWASR10            TCB LEVEL RETRY AS WELL          04780000
+         ST    R11,TSKERCVR+(R11*4)    STANDARD ENV RQMT                04790000
+         ST    R11,SDWASR11            TCB LEVEL RETRY AS WELL          04800000
+                                                                        04810000
+*--------------------------------------------------------------         04820000
+*   COLLECT S/370 DATA NOT AFFECTED BY EXECUTION ENVIRONMENT            04830000
+*--------------------------------------------------------------         04840000
+         SR    R1,R1              PREPARE FOR INSERT                    04850000
+         IC    R1,SDWAEC1+2       FETCH ASC MODE AND OTHER BITS         04860000
+         N     R1,=A(B'11000000') ISOLATE ASC MODE                      04870000
+         CLI   =B'01000000',*-*   ASC MODE TEST                         04880000
+         EX    R1,*-4             ASC=AR?                               04890000
+         BNE   *+8                SKIP IF NOT                           04900000
+         OI    STATFLGS,STAT_AR   INDICATE ASC=AR AT TIME OF FAILURE    04910000
+                                                                        04920000
+         ICM   R6,15,SDWASRVP     RECORDABLE EXTENSION PROVIDED?        04930000
+         BZ    XLATERR            SKIP IF NOT                           04940000
+         USING SDWARC1,R6         TEMP ADDRESSABILITY TO EXTENSION      04950000
+         TM    SDWAXFLG,SDWATEAV  TRANSLATION EXCEPTION?                04960000
+         BNO   NOXLAT             SKIP IF NOT                           04970000
+         MVC   TSKETRAN,SDWATRAN  RETAIN EXCEPTION ADDRESS              04980000
+         MVC   TSKETEAR,SDWATEAR  RETAIN CONTRIBUTING AR #              04990000
+                                                                        05000000
+NOXLAT   DS    0H                                                       05010000
+*------------------------------------------------------------------     05020000
+* Locate first non-zero AR reg to get ALET for dataspace dump.          05030000
+* AR regs 13-1 are not considered unless all are zero in which case     05040000
+* AR reg in SDWATEAR used.  If SDWATEAR's AR reg is zero then no        05050000
+* dataspace dump is taken.                                              05060000
+*------------------------------------------------------------------     05070000
+         LA    R3,SDWAARE2        AR REG 2 (AT TIME OF ERROR) ADDRESS   05080000
+         LA    R4,4               REG SIZE                              05090000
+         LA    R5,((R12-R2)*4)(0,R3) ADDRESS LAST AR REG TO SCAN        05100000
+                                                                        05110000
+NXTAR    DS    0H                                                       05120000
+         ICM   R2,15,0(R3)        GET AR REG'S VALUE                    05130000
+         BNZ   HAVAR              ZERO ? NO, HAVE AN AR VALUE TO USE    05140000
+         BXLE  R3,R4,NXTAR          YES, CHECK NEXT AR REG              05150000
+                                                                        05160000
+         SR    R1,R1              SDWATEAR'S AR REG ZERO ?              05170000
+         IC    R1,SDWATEAR                                              05180000
+         SLL   R1,2                                                     05190000
+         L     R2,SDWAARER(R1)                                          05200000
+         LTR   R2,R2                                                    05210000
+         BZ    XLATERR              YES, NO DATASPACE DUMP              05220000
+                                                                        05230000
+HAVAR    DS 0H                                                          05240000
+         XC    WK256,WK256        CONVERT ALET TO STOKEN                05250000
+                                                                        05260000
+         ALESERV EXTRACT,ALET=(R2),STOKEN=DMPSTOKN,                    +05270000
+               MF=(E,WK256)                                             05280000
+                                                                        05290000
+         LTR   R15,R15            TRANSLATED OK ?                       05300000
+         BNZ   XLATERR              NO, UNABLE TO DUMP SPACE            05310000
+         OI    STATFLGS,STAT_STK  STOKEN AVAILABLE FOR DUMP             05320000
+                                                                        05330000
+         DROP  R6                 SDWARC1 - RECORDABLE EXTENSION        05340000
+                                                                        05350000
+XLATERR  DS    0H                                                       05360000
+         L     R2,SDWAEC1+4       INSTRUCTION ADDRESS AND FLAG          05370000
+         N     R2,CLEARBIT        CLEAR AMODE FLAG                      05380000
+         ST    R2,TSKEADDR        SAVE SANITIZED ADDR                   05390000
+                                                                        05400000
+         SR    R3,R3              PREPARE FOR INSERT                    05410000
+         IC    R3,SDWAEC1+2       FETCH ASC MODE AND OTHER FLAGS        05420000
+         SRL   R3,6               ASC MODE BITS LEFT JUSTIFIED          05430000
+         MH    R3,=AL2(L'$ASCMODE)   CONVERT TO TABLE INDEX             05440000
+         LA    R4,$ASCMODE(R3)    IDENTIFY APPROPRATE LABEL             05450000
+         MVC   ASCMODE,0(R4)      EXTRACT FOR MSG                       05460000
+                                                                        05470000
+         EJECT ,                                                        05480000
+**<DOC-ON>*****************************************************         05490000
+*                                                                       05500000
+*   Determine the execution environment in which the failure            05510000
+*   occurred.  We recognize three cases, as follows:                    05520000
+*                                                                       05530000
+*   1) The abend occurred in the "standard" exec environment.           05540000
+*      In this case, R10 contains the ITASK addr and R11 carries        05550000
+*      the ICVT addr. Additionally, R13 contains the addr of a          05560000
+*      standard workarea described by #WORK.                            05570000
+*                                                                       05580000
+*      A. When the abending routine acquires or accepts a               05590000
+*         savearea, #WORK.WAPGMNM contains the CSECT name and           05600000
+*         R12 (standard module base) matches #WORK.WAPGMEPA.            05610000
+*                                                                       05620000
+*      B. If the abending routine is a lowest-level routine and         05630000
+*         did not require its own savearea, R12 will not match          05640000
+*         #WORK.WAPGMEPA and the CSECT name cannot be obtained.         05650000
+*         However, R12 will match the R15 value stored in the           05660000
+*         current savearea.                                             05670000
+*                                                                       05680000
+*      Note that if the failure was forced by $ABEND, the std           05690000
+*      execution environment is assumed since the macro is              05700000
+*      valid only in the standard environment.                          05710000
+*                                                                       05720000
+*   2) The abend occurred in a SAS-C function. This case is             05730000
+*      identified when the eyecatcher 'CSA' appears in the              05740000
+*      first word of the dynamic savearea addressed via R13.            05750000
+*      the standard C function base address resides in R5.              05760000
+*                                                                       05770000
+*   3) Otherwise, the abend occurred in "foreign" code. No              05780000
+*      CSECT level identification is attempted.  (Note that             05790000
+*      much of the product runs in "foreign" environments.)             05800000
+*                                                                       05810000
+**<DOC-OFF>****************************************************         05820000
+                                                                        05830000
+         TM    TSKEABFL,TSKEAB_ENVIR   STANDARD ENV ALREADY POSTED?     05840000
+         BO    ENVSTD                  NO FURTHER TEST IF SO            05850000
+         MVC   ENVIRON,$ENVOTHR        ASSUME UNKNOWN EXEC ENVIRON      05860000
+         TM    SDWAEC1+2,B'11000000'   PRIMARY SPACE MODE?              05870000
+         BNZ   FINENV                  ELSE NON-STANDARD EXEC ENVIR     05880000
+                                                                        05890000
+         ICM   R1,15,TSKEGRD      FETCH R13                             05900000
+         BZ    FINENV             NON-STANDARD                          05910000
+         TM    =X'03',*-*         ALIGNMENT TEST                        05920000
+         EX    R1,*-4             WORKAREA AT LEAST FWORD ALIGNED?      05930000
+         BNZ   FINENV             NON-STANDARD OTHERWISE                05940000
+         CLC   =C'F1SA',4(R1)     PRODUCT STANDARD SA CONVENTION?       05950000
+         BE    FINENV             NON-STANDARD OTHERWISE                05960000
+                                                                        05970000
+*--------------------------------------------------------------         05980000
+*   IDENTIFY C RUN-TIME ENVIRON - SASC ENVIRONMENTAL FAILURES.          05990000
+*   WE RELY ON THE FACT THAT U12XX ABENDS ARE ONLY ISSUED BY            06000000
+*   SASC IN OUR ENVIRONMENT.                                            06010000
+*--------------------------------------------------------------         06020000
+                                                                        06030000
+CABEND   DS    0H                                                       06040000
+         CLC   =C'CSA',DSAUSER-DSA(R1) SAS-C RUN TIME ENVIRONMENT?      06050000
+         BNE   NOTCENV            SKIP IF NOT                           06060000
+                                                                        06070000
+         MVC   ENVIRON,$ENVC      SUSPECT A C ENVIRON                   06080000
+         L     R5,TSKEGR5         R5 IS SASC FUNCTION BASE              06090000
+         N     R5,CLEARBIT        CLEAR HIGH ORDER BIT                  06100000
+         ST    R5,TSKECORG        CSECT ORIGIN                          06110000
+                                                                        06120000
+*--------------------------------------------------------------         06130000
+*   LEFT JUSTIFY CSECT (FUNCTION) NAME                                  06140000
+*--------------------------------------------------------------         06150000
+         USING DSA,R1                                                   06160000
+         LA    R3,DSAOWNER          first char of name                  06170000
+         LA    R4,1                 char by char check                  06180000
+         LA    R5,L'DSAOWNER-1(,R3) last char of name                   06190000
+         DROP  R1                                                       06200000
+                                                                        06210000
+CHKNEXT  DS    0H                                                       06220000
+         CLI   0(R3),C' '         Blank ?                               06230000
+         BNE   FIRSTNB            no, done                              06240000
+         BXLE  R3,R4,CHKNEXT      yes, check next char                  06250000
+         MVC   TSKECSEC,$NAVAIL   all blank, not available              06260000
+         B     FINENV             done                                  06270000
+                                                                        06280000
+FIRSTNB  DS    0H                                                       06290000
+         MVC   TSKECSEC,=CL8' '   init target to blanks                 06300000
+         SR    R5,R3              get remaining source length - 1       06310000
+         EX    R5,*+4             copy source to target                 06320000
+         MVC   TSKECSEC(0),0(R3)                                        06330000
+         B     FINENV             NON-STD ENVIRONMENT                   06340000
+                                                                        06350000
+NOTCENV  DS    0H                                                       06360000
+                                                                        06370000
+*--------------------------------------------------------------         06380000
+*   IDENTIFY STANDARD ENVIRONMENT                                       06390000
+*--------------------------------------------------------------         06400000
+         C     R11,TSKEGRB        ICVT PTR IN STD ENVIRONMENT           06410000
+         BNE   FINENV             NON-STD ENV                           06420000
+         C     R10,TSKEGRA        ITASK PTR IN STD ENVIRONMENT          06430000
+         BNE   FINENV             NON-STD ENV                           06440000
+                                                                        06450000
+         L     R3,TSKEGRD         FETCH WORKAREA PTR                    06460000
+         USING #STDWORK,R3        STANDARD WORKAREA FORMAT              06470000
+         L     R2,TSKEGRC         FETCH STANDARD BASE REG               06480000
+         N     R2,CLEARBIT        SANITIZE                              06490000
+         L     R4,WAPGMEPA        FETCH POSTED EPA FROM STD ENVIR       06500000
+         N     R4,CLEARBIT        SANITIZE AS WELL                      06510000
+         CR    R2,R4              BASE REG MATCHES EPA?                 06520000
+         BNE   CASE1B             POSSIBLE LOWEST LEVEL ROUTINE         06530000
+         ST    R2,TSKECORG        SAVE CSECT ORIGIN                     06540000
+         MVC   TSKECSEC,WAPGMNM   EXTRACT CSECT NAME                    06550000
+         B     ENVSTD             DONE                                  06560000
+                                                                        06570000
+CASE1B   DS    0H                                                       06580000
+         L     R15,16(,R3)        FETCH EPA OF CALLED ROUTINE           06590000
+         N     R15,CLEARBIT       SANITIZE                              06600000
+         CR    R15,R2             LIKELY EXECUTING A LOW-LEVEL RTN?     06610000
+         BNE   FINENV             NO CLUE OTHERWISE                     06620000
+         ST    R2,TSKECORG        SAVE CSECT ORIGIN, NAME IS UNKNOWN    06630000
+         DROP  R3                 STANDARD WORKAREA                     06640000
+                                                                        06650000
+ENVSTD   DS    0H                 STANDARD EXEC ENVIRONMENT             06660000
+         OI    TSKEABFL,TSKEAB_ENVIR                                    06670000
+         MVC   ENVIRON,$ENVSTD                                          06680000
+                                                                        06690000
+FINENV   DS    0H                                                       06700000
+         TM    TSKECSEC,BF        CSECT NAME PREV POSTED ($ABEND,ETC)?  06710000
+         BNZ   *+10               RETAIN AS IS IF SO                    06720000
+         MVC   TSKECSEC,$NAVAIL   CSECT NAME NOT AVAIL                  06730000
+                                                                        06740000
+         EJECT ,                                                        06750000
+***************************************************************         06760000
+*                                                                       06770000
+*   Identify the failing load module.  Usually, this is the             06780000
+*   load module that contains the failing instruction. However,         06790000
+*   if the instruction addr cannot be related to an LMOD,               06800000
+*   perhaps because of a wild branch, attempt to identify the           06810000
+*   LMOD associated with the failing CSECT, if that has been            06820000
+*   identified.                                                         06830000
+*                                                                       06840000
+***************************************************************         06850000
+                                                                        06860000
+         @CALL IRCVLMOD,(*TSKEADDR,TSKELMOD,TSKELORG,TSKELLEN),        X06870000
+               MF=(E,WK256)                                             06880000
+                                                                        06890000
+         LTR   R15,R15            LMOD IDENTIFIED?                      06900000
+         BZ    LMODEND            DONE HERE IF SO                       06910000
+         ICM   R2,15,TSKECORG     CSECT IDENTIFIED?                     06920000
+         BZ    LMODEND            VERY CONFUSED IF NOT                  06930000
+                                                                        06940000
+         @CALL IRCVLMOD,((R2),TSKELMOD,TSKELORG,TSKELLEN),             X06950000
+               MF=(E,WK256)                                             06960000
+                                                                        06970000
+LMODEND  DS    0H                                                       06980000
+                                                                        06990000
+*--------------------------------------------------------------         07000000
+*   COMPUTE OFFSET FROM FAILING CSECT OR LMOD                           07010000
+*--------------------------------------------------------------         07020000
+         L     R0,TSKEADDR        FAILING INSTRUCTION ADDRESS           07030000
+         ICM   R1,15,TSKECORG     CSECT IDENTIFIED?                     07040000
+         BZ    NOCSECT            NO MEANINGFUL RELATION TO CSECT       07050000
+         SR    R0,R1              POSITIVE DISPL FROM CSECT?            07060000
+         BM    NOCSECT            NOT APPLICABLE OTHERWISE              07070000
+         C     R0,=A(4096)        SUSPICIOUS DISPLACEMENT?              07080000
+         BH    NOCSECT            APPEAL TO LMOD IF SO                  07090000
+         ST    R0,OFFSET          REASONABLE ATTEMPT SO FAR             07100000
+         MVC   OFFTYPE,=CL8'CSECT-'  OFFSET COMPUTED FROM CSECT         07110000
+         B     FIN_DISP           RETAIN IT IF NOT                      07120000
+                                                                        07130000
+NOCSECT  DS    0H                 CSECT OFFSET INVALID OR SUSPICIOUS    07140000
+         L     R0,TSKEADDR        REFRESH FAILING INSTRUCTION ADDRESS   07150000
+         ICM   R1,15,TSKELORG     LMOD IDENTIFIED?                      07160000
+         BZ    FIN_DISP           NOWHERE ELSE TO TURN                  07170000
+         SR    R0,R1              POSITIVE DISPL FROM LMOD?             07180000
+         BM    FIN_DISP           NOT WORKING OUT                       07190000
+         CL    R0,TSKELLEN        FAILURE CONTAINED IN LMOD?            07200000
+         BH    FIN_DISP           REJECT IF NOT                         07210000
+         ST    R0,OFFSET          REASONABLE ATTEMPT SO FAR             07220000
+         MVC   OFFTYPE,=CL8'LMOD-'   OFFSET COMPUTED FROM LMOD          07230000
+                                                                        07240000
+FIN_DISP DS    0H                                                       07250000
+                                                                        07260000
+*--------------------------------------------------------------         07270000
+*   ASSIGN DEFAULT FAILURE TITLE IF NONE PROVIDED BY $ABEND             07280000
+*--------------------------------------------------------------         07290000
+         ICM   R0,15,TSKELABL     FAILURE TITLE/LABEL TEXT PROVIDED     07300000
+         BNZ   ENDTITLE           SKIP IF SO                            07310000
+         LA    R2,UAETITLE        UNANTICIPATED ABEND TITLE SUPPLIED    07320000
+         ST    R2,TSKELAB@                                              07330000
+         LA    R3,L'UAETITLE                                            07340000
+         ST    R3,TSKELABL                                              07350000
+                                                                        07360000
+ENDTITLE DS    0H                                                       07370000
+                                                                        07380000
+         EJECT ,                                                        07390000
+***************************************************************         07400000
+*                                                                       07410000
+*   Invoke error recovery routines for process-level failures.          07420000
+*   IRCVPCB is invoked to run the recovery stack for the failed         07430000
+*   PCB.  If retry is requested, the abend condition is cleared         07440000
+*   and the retry routine EPA is posted for subsequent dispatch.        07450000
+*                                                                       07460000
+***************************************************************         07470000
+         ICM   R5,15,TSKPCBC      PROCESS LEVEL DISPATCH?               07480000
+         BZ    NORCVRY            NO RECOVERY MECHANISM IF NOT          07490000
+                                                                        07500000
+         OI    TSKEINFO,TSKEINF_NRETRY     ASSUME NO RETRY              07510000
+         TM    ICTSTAT3,ICT3$PX            EXPEDITED TERMINATION?       07520000
+         BO    SETRTRY                     NO RETRY IF SO               07530000
+         NI    TSKEINFO,FF-TSKEINF_NRETRY  RETRY PERMITTED              07540000
+                                                                        07550000
+SETRTRY  DS    0H                                                       07560000
+         LA    R2,FALSE           DISALLOW RETRY                        07570000
+         TM    TSKEINFO,TSKEINF_NRETRY   RETRY ALLOWED?                 07580000
+         BO    *+8                SKIP IF NOT                           07590000
+         LA    R2,TRUE            RETRY USUALLY PERMITTED               07600000
+                                                                        07610000
+         @CALL IRCVPCB,((R5),SDWA,(R2)),                               X07620000
+               CTYPE=CVT,         SYSTEM MANAGED ANCHOR                X07630000
+               MF=(E,WK256)       ATTEMPT RECOVERY AT PCB LEVEL         07640000
+                                                                        07650000
+         LTR   R15,R15            PERCOLATE?                            07660000
+         BZ    NORCVRY            GOING DOWN WHEN RC=0                  07670000
+         ST    R15,TSKERCVP       ELSE SAVE RETRY RTN EPA               07680000
+                                                                        07690000
+NORCVRY  DS    0H                                                       07700000
+         EJECT ,                                                        07710000
+**<DOC-ON>*****************************************************         07720000
+*                                                                       07730000
+*   Because this ESTAE recovery routine runs under an IRB,              07740000
+*   STDENV services such as inter-task messaging are not                07750000
+*   available.  For this reason, the logging of failure                 07760000
+*   information must be deferred to the retry routine, where            07770000
+*   the standard environment is reestablished.                          07780000
+*                                                                       07790000
+**<DOC-OFF>****************************************************         07800000
+                                                                        07810000
+         MVC   RECLMOD,TSKELMOD   IDENTIFY FAILING LMOD                 07820000
+         MVC   RECCSECT,TSKECSEC  FAILING CSECT                         07830000
+         MVC   RECRCVY,=CL8'IRCVESTA'  RECOVERY ROUTINE                 07840000
+                                                                        07850000
+         NI    SDWACMPF,FF-SDWAREQ     ASSUME NO DUMP REQUIRED          07860000
+         TM    TSKEABFL,TSKEAB_DUMP    AS ASSUMED?                      07870000
+         BNO   NOSVCDMP                SKIP IF SO                       07880000
+         OI    SDWACMPF,SDWAREQ        ELSE DUMP=YES                    07890000
+                                                                        07900000
+         EJECT ,                                                        07910000
+*--------------------------------------------------------------         07920000
+*  SVC Dump                                                             07930000
+*--------------------------------------------------------------         07940000
+         TM    SDWAERRC,SDWAEAS   OK TO DUMP ?                          07950000
+         BO    NOSVCDMP             NO, SKIP DUMP                       07960000
+                                                                        07970000
+         SR    R2,R2              ASSUME NO STOKEN TO DUMP              07980000
+         TM    STATFLGS,STAT_STK  STOKEN AVAILABLE FOR DUMPING ?        07990000
+         BNO   SVCDHDR              NO, DUMP W/O DATA SPACE             08000000
+                                                                        08010000
+         MVC   DMPLEN,=A(DMPSLLEN) STOKEN STORAGE-TO-DUMP LIST LENGTH   08020000
+         MVC   DMPCOUNT,=F'1'     ONE ADDRESS RANGE                     08030000
+         MVC   DMPSTART,=F'0'     DUMP IT ALL                           08040000
+         MVC   DMPEND,=X'7FFFFFFF'                                      08050000
+         LA    R2,DMPSL                                                 08060000
+                                                                        08070000
+SVCDHDR  DS 0H                         FORMAT THE TITLE                 08080000
+         MVC   HDRT(L'DMPTITLE),DMPTITLE                                08090000
+         MVC   HDRL,=AL1(HDRTL)                                         08100000
+         MVC   HDRJOB,ICTJOBNM         jobname                          08110000
+         MVC   HDRINT,=C'INT'          INT                              08120000
+         MVC   HDRVER,ICTVER           #                                08130000
+         TR    HDRVER(1),HEXTAB                                         08140000
+         MVC   HDRREL,ICTREL           #                                08150000
+         TR    HDRREL(1),HEXTAB                                         08160000
+         MVC   HDRLVL,ICTRELVL         X                                08170000
+         MVC   HDRASC(2),ASCMODE       ASC=                             08180000
+                                                                        08190000
+         CLI   ABETYPE,C'S'            TYP=SYS (as assumed) ?           08200000
+         BE    ABTYPSET                                                 08210000
+         MVC   HDRABETP,=C'INT'                                         08220000
+         CLI   ABETYPE,C'I'            TYP=INT ?                        08230000
+         BE    ABTYPSET                                                 08240000
+         MVC   HDRABETP,=C'USR'        TYP=USR                          08250000
+                                                                        08260000
+ABTYPSET DS    0H                                                       08270000
+         MVC   WORK5(4),TSKERC         CDE=XXX                          08280000
+         UNPK  WORK9,WORK5                                              08290000
+         TR    WORK9(8),HEXTAB-C'0'                                     08300000
+         MVC   HDRERC,WORK9+5                                           08310000
+                                                                        08320000
+         MVC   WORK5(4),TSKERSN        RSN=XXX                          08330000
+         UNPK  WORK9,WORK5                                              08340000
+         TR    WORK9(8),HEXTAB-C'0'                                     08350000
+         MVC   HDRRSN,WORK9+5                                           08360000
+                                                                        08370000
+         CLI   OFFTYPE,C'L'            LMOD+ (as assumed) ?             08380000
+         BE    OFFTSET                                                  08390000
+         MVC   HDROFFTY,=C'CSECT+'                                      08400000
+                                                                        08410000
+OFFTSET  DS    0H                                                       08420000
+         MVC   WORK5(4),OFFSET         XXXXXXXX (offset)                08430000
+         UNPK  WORK9,WORK5                                              08440000
+         TR    WORK9(8),HEXTAB-C'0'                                     08450000
+         MVC   HDROFFST,WORK9                                           08460000
+                                                                        08470000
+         MVC   HDRLMOD,TSKELMOD        LMOD=                            08480000
+         MVC   HDRCSECT,TSKECSEC       CSECT=                           08490000
+                                                                        08500000
+         OI    STATFLGS,STAT_DMP  REMEMBER SVC DUMP INVOKED             08510000
+                                                                        08520000
+         $SDUMP HDR=HDR,          SVC DUMP                             +08530000
+               DTYPE=TYPE0,                                            +08540000
+               STOKENL=(R2),                                           +08550000
+               MF=(E,WK256)                                             08560000
+                                                                        08570000
+         ST    R15,SDUMPRC        SAVE RETURN CODE FOR RETRY MESSAGE    08580000
+         ST    R0,SDUMPRSN        SAVE REASON CODE FOR RETRY MESSAGE    08590000
+                                                                        08600000
+         LTR   R15,R15            SVC DUMP OK ?                         08610000
+         BM    NOSVCDMP             NO, DID NOT DUMP                    08620000
+         C     R15,=F'8'          SVC DUMP OK ?                         08630000
+         BNL   NOSVCDMP             NO, DID NOT DUMP                    08640000
+         NI    SDWACMPF,FF-SDWAREQ SUPPRESS SYSABEND/SYSMDUMP/SYSUDUMP  08650000
+NOSVCDMP DS    0H                                                       08660000
+                                                                        08670000
+*--------------------------------------------------------------         08680000
+*   CONSTRUCT ENVIRONMENT FOR RETRY ROUTINE                             08690000
+*--------------------------------------------------------------         08700000
+         STM   R10,R13,SDWASR10   RESTORE ENVIRONMENTAL REGS            08710000
+         L     R2,=V(IRCVRTRY)    ADDRESS OF RETRY ROUTINE              08720000
+         ST    R2,SDWASR15        EPA                                   08730000
+         ST    R2,SDWASR12        BASE REGISTER AS WELL                 08740000
+         ST    R8,SDWASR01        ADDR OF SDWA                          08750000
+                                                                        08760000
+         SETRP RC=4,              CONTINUE ANALYSIS IN STDENV          X08770000
+               WKAREA=(R8),       SDWA ADDRESSABILITY                  X08780000
+               RETADDR=(R2),      RESUME ADDR                          X08790000
+               FRESDWA=NO,        RETRY ROUTINE WILL FREE SDWA         X08800000
+               RETREGS=YES        RETRY RUNS WITH STD ENVIRON           08810000
+                                                                        08820000
+*--------------------------------------------------------------         08830000
+*   RECOVER / TERMINATE PROCESS DONE AT FAILING RB LEVEL                08840000
+*--------------------------------------------------------------         08850000
+EXIT     DS    0H                                                       08860000
+         TM    STATFLGS,STAT_CT   RUNNING UNDER ESTAE?                  08870000
+         BNO   EXNOESTA           SKIP IF NOT                           08880000
+                                                                        08890000
+         ESTAEX 0                 DELETE LOCAL ESTAE                    08900000
+                                                                        08910000
+EXNOESTA DS    0H                                                       08920000
+         L     R13,4(,R13)        RESTORE SAVEAREA PTR                  08930000
+         LM    R14,R12,12(R13)    RESTORE SYSTEM REGS                   08940000
+         BR    R14                RETURN                                08950000
+                                                                        08960000
+*--------------------------------------------------------------         08970000
+*   UNRECOVERABLE ENVIRONMENT, PERCOLATE                                08980000
+*--------------------------------------------------------------         08990000
+PERCLATE DS    0H                                                       09000000
+         WTO   'INTRCV000 ABEND RECURSION DETECTED - TASK TERMINATED', X09010000
+               ROUTCDE=(2,11)                                           09020000
+                                                                        09030000
+NORETRY  DS    0H                                                       09040000
+         SETRP RC=0,              PERCOLATE                            X09050000
+               WKAREA=(R8),       SDWA ADDRESSABILITY                  X09060000
+               RECPARM=RECAREA    DIAGNOSTIC INFO                       09070000
+                                                                        09080000
+         STORAGE RELEASE,ADDR=(R13),LENGTH=WORKLEN                      09090000
+                                                                        09100000
+         L     R13,4(,R13)        RESTORE SAVEAREA PTR                  09110000
+         LM    R14,R12,12(R13)    RESTORE SYSTEM REGS                   09120000
+         BR    R14                RETURN                                09130000
+                                                                        09140000
+         EJECT ,                                                        09150000
+***************************************************************         09160000
+*                                                                       09170000
+*   LOCAL READ-ONLY STORAGE, ETC.                                       09180000
+*                                                                       09190000
+***************************************************************         09200000
+ALIGN    DS    0F                                                       09210000
+CLEARBIT DC    X'7FFFFFFF'        MASK CLEARING HIGH ORDER BIT          09220000
+X22      DC    X'22'              X22 ABEND CODE SUFFIX                 09230000
+HEXTAB   DC    C'0123456789ABCDEF' TRANSLATE TABLE                      09240000
+                                                                        09250000
+$ESTAE   ESTAEX *-*,CT,TERM=YES,PURGE=NONE,ASYNCH=YES,MF=L              09260000
+$ESTAELN EQU   *-$ESTAE                                                 09270000
+                                                                        09280000
+*------- MESSAGE TOKENS ---------------------------------------         09290000
+                                                                        09300000
+UAETITLE DC    C'Unexpected program failure encountered'                09310000
+                                                                        09320000
+$ENVSTD  DC    CL8'STD'           EXECUTION ENVIRONMENTS                09330000
+$ENVC    DC    CL8'C'                                                   09340000
+$ENVOTHR DC    CL8'NON-STD'                                             09350000
+                                                                        09360000
+$NAVAIL  DC    CL8'N/Avail'       INFORMATION NOT AVAILABLE             09370000
+                                                                        09380000
+$ASCMODE DS    0CL10              ADDRSPC CONTROL MODES                 09390000
+         DC    CL10'Primary'                                            09400000
+         DC    CL10'AR'                                                 09410000
+         DC    CL10'Secondary'                                          09420000
+         DC    CL10'Home'                                               09430000
+                                                                        09440000
+DMPTL    DS    0C                 DUMP TITLE INITIALIZER                09450000
+         DC    C'----+--- INT-.-- ASC=-- TYP=SYS CDE=--- RSN=--- AT LMOx09460000
+               D+ ----+--- LMOD=----+--- CSECT=----+---'                09470000
+DMPTITLE EQU   DMPTL,*-DMPTL                                            09480000
+                                                                        09490000
+*--------------------------------------------------------------         09500000
+                                                                        09510000
+         LTORG ,                                                        09520000
+                                                                        09530000
+         EJECT ,                                                        09540000
+         IHASDWA ,                                                      09550000
+         PRINT NOGEN                                                    09560000
+         ICVT  ,                                                        09570000
+                                                                        09580000
+         IHAPSA ,                                                       09590000
+         IKJTCB ,                                                       09600000
+         IHARB ,                                                        09610000
+         END   ,                                                        09620000

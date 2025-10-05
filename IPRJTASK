@@ -1,0 +1,1679 @@
+IPRJTASK TITLE '- PROJECT/DATABASE SERVICE TASK'                        00010000
+**<DOC-ON>******************************************************        00020000
+*                                                                       00030000
+*  ROUTINE:  IPRJTASK - PROJECT/DATABASE SERVICE TASK                   00040000
+*                                                                       00050000
+*  DESCRIPTION:                                                         00060000
+*                                                                       00070000
+*    The function of this routine is to process requests for            00080000
+*    database/project services.  This task receives messages to         00090000
+*    open, close, save, saveas, close and delete projects.              00100000
+*                                                                       00110000
+*    When the project task initially receives control,  the             00120000
+*    project task initialization routine (IPRJINIT) is called           00130000
+*    to open/initialize the database and SYSCATLG project               00140000
+*    space.                                                             00150000
+*                                                                       00160000
+*    When messages are received to process project requests,            00170000
+*    $PROJECT services are used to create/destroy project data          00180000
+*    spaces and import/export projects from the project database.       00190000
+*    A project directory table SYSPROJ_DIR is maintained in the         00200000
+*    SYSCATLG project which maintains the current state of the          00210000
+*    project database.                                                  00220000
+*                                                                       00230000
+*    Open/active projects spaces are identified by an IPROJ             00240000
+*    control block.  Each project space which is currently open         00250000
+*    in the system is represented by this block.  The method of         00260000
+*    locating this block is via the $ENTITY manager services.           00270000
+*    The first word of the userdata contains the address of the         00280000
+*    IPROJ control block for the name project (ENTITY).                 00290000
+*    Projects maintained in this structure are of two distinct          00300000
+*    access types (workbench or runtime).  Workbench and                00310000
+*    runtime projects are maintained under separate qnames,             00320000
+*    thus allowing a project to be opened for both workbench            00330000
+*    and runtime access concurrently.  Workbench access to a            00340000
+*    project is exclusive ownership (USECT=1) and runtime               00350000
+*    access to a project may be shared.  Access to the project          00360000
+*    entity structure is serialized under control of the                00370000
+*    project lock.  Any Process (PCB) attempting to access this         00380000
+*    structure must first acquire this lock.                            00390000
+*                                                                       00400000
+*  ENTRY:   N/A                                                         00410000
+*                                                                       00420000
+*  EXIT:                                                                00430000
+*                                                                       00440000
+*     R15 will contain one of the following return codes upon           00450000
+*     Exit.                                                             00460000
+*                                                                       00470000
+*        RC00 - Project task processing completion                      00480000
+*        RC04 - Database initialization failed                          00490000
+*        RC08 - Database open failed                                    00500000
+*        RC12 - SYSCATLG project open/init failed                       00510000
+*        RC16 - Project tables failed to open                           00520000
+*        RC20 - Project Entity structure initialzation failed           00530000
+*        RC24 - Execution space create failed                           00540000
+*                                                                       00550000
+*  WORK PROCESSING RC/RSN CODES:                                        00560000
+*                                                                       00570000
+*     Refer to the table at label MSGTBL for a list of the              00580000
+*     return/reason codes from each of the speicified components        00590000
+*     along with their associated message id.                           00600000
+*                                                                       00610000
+**<DOC-OFF>*****************************************************        00620000
+                                                                        00630000
+         EJECT                                                          00640000
+****************************************************************        00650000
+*                                                                       00660000
+* MAINTENANCE:                                                          00670000
+*                                                                       00680000
+*    04/05/94  Tim Weltzer                                              00690000
+*              Added SAVEALL function                                   00700000
+*                                                                       00710000
+*    05/25/94  Tim Weltzer                                              00720000
+*              Added PUSHCAN & POPCAN                                   00730000
+*                                                                       00740000
+*    09/27/94  Tim Weltzer                                              00750000
+*              Changed method of obtaining requesting user's name       00760000
+*                                                                       00770000
+*    08/31/95  R. Turgeon        Rel 2.1                                00780000
+*              Copy VDBCACHE() and PLANCACHE() to IPROJ                 00790000
+*              supporting the retention and ageing of inactive          00800000
+*              VDB table definitions and navigation plans               00810000
+*                                                                       00820000
+****************************************************************        00830000
+                                                                        00840000
+         EJECT                                                          00850000
+         $TASK DSECT=YES          $TASK PLIST                           00860000
+                                                                        00870000
+         EJECT                                                          00880000
+         TMSG  ,                  MESSAGE HEADER                        00890000
+                                                                        00900000
+         EJECT                                                          00910000
+         PERAREA ,                PRJSRV ERROR RETURN AREA              00920000
+                                                                        00930000
+         EJECT                                                          00940000
+         $PRJREQ DSECT=YES        PROJECT REQUEST MESSAGE INFO          00950000
+                                                                        00960000
+         EJECT                                                          00970000
+         $ENTITY DSECT=YES        ENTITY MANAGER SERVICE PLIST          00980000
+                                                                        00990000
+         EJECT                                                          01000000
+         EQUS  ,                  GENERAL EQUATES                       01010000
+                                                                        01020000
+         EJECT                                                          01030000
+         EVCODES ,                EVENT CODES                           01040000
+                                                                        01050000
+         EJECT                                                          01060000
+         MSGCODES ,               INTER TASK COMMUNICATION MSG CODES    01070000
+                                                                        01080000
+         $MSGDFT PREFIX=ICTPID,COMPID='PRJ',TABLE=*#MSGS,              +01090000
+               PRINT=NOGEN,MF=(E,WRK256)                                01100000
+                                                                        01110000
+         EJECT ,                                                        01120000
+*---------------------------------------------------------------        01130000
+*  GENERAL WORKAREA                                                     01140000
+*---------------------------------------------------------------        01150000
+         #WORK ,                                                        01160000
+REGSAVE1 DS    16F                REGISTER SAVE AREA                    01170000
+REGSAVE2 DS    16F                REGISTER SAVE AREA                    01180000
+WRK2K    DS    XL2048             GENERAL WORKAREA                      01190000
+WRK256   DS    XL256              GENERAL WORKAREA                      01200000
+                                                                        01210000
+RCINIT   DS    F                  TASK INITIALIZATION RETCODE           01220000
+CLNPROJ  DS    A                  ADDR OF IPROJ TO FREE                 01230000
+CFLAGS   DS    X                  CONTROL FLAGS                         01240000
+$LOCKED   EQU  X'80'                LOCK ACQUIRED                       01250000
+$STOPREQ  EQU  X'40'                STOP RECEIVED                       01260000
+$NOCANCEL EQU  X'20'                CHANGED TO NON-CANCELABLE           01270000
+                                                                        01280000
+RCODES   DS    0F,0F              RETURN/REASON CODE                    01290000
+RETCD    DS    F                  RETURN CODE FROM SERVICE              01300000
+RSNCD    DS    F                  REASON CODE FROM SERVICE              01310000
+COMPNAME DS    CL8                SERVICE COMPONENT NAME                01320000
+                                                                        01330000
+RUSRNAME DS    CL8                REQUESTOR'S USER NAME                 01340000
+RTSKNAME DS    CL8                REQUESTOR'S TASK NAME (LUNAME)        01350000
+RTSKTTKN DS    XL16               REQUESTOR'S TASK TOKEN                01360000
+ENTUDATA DS    0A,XL16            ENTITY USER DATA                      01370000
+                                                                        01380000
+CURRTOD  DS    0D                 CURRENT TIME AND DATE                 01390000
+CURRDATE DS    F                  CURRENT DATE                          01400000
+CURRTIME DS    F                  CURRENT TIME                          01410000
+                                                                        01420000
+PROJERR  DS    XL(PERLEN)         PRJSRV ERROR RETURN AREA              01430000
+                                                                        01440000
+PROCRET  DS    F                  PROCESS RETURN CODE                   01450000
+PROCRSN  DS    F                  PROCESS REASON CODE                   01460000
+                                                                        01470000
+REQMSG   DS    XL(IPJXLENG+TMSGSLN) MESSAGE AREA                        01480000
+                                                                        01490000
+         ICATALOG PROJDIR,DSECT=NO   PROJECT DIRECTORY TABLE ROW        01500000
+                                                                        01510000
+$TASKMFL $TASK    MF=L            PLIST AREA FOR $TASK                  01520000
+$PRJPL   $PROJECT MF=L            PLIST AREA FOR PRJSRV                 01530000
+$PJTBPL  $PRJTBLS MF=L            PLIST AREA FOR PRJTBLS                01540000
+$ENTPL   $ENTITY  MF=L            PLIST AREA FOR $ENTITY                01550000
+                                                                        01560000
+         #ENDWORK ,               END OF WORKAREA                       01570000
+                                                                        01580000
+         EJECT ,                                                        01590000
+****************************************************************        01600000
+*   PERFORM DATABASE TASK ENTRY LINKAGE                                 01610000
+****************************************************************        01620000
+                                                                        01630000
+IPRJTASK #ENTER BASE=(R12,R9)     ENTRY LINKAGE                         01640000
+         USING ITASK,R10          ESTABLISH ADDRESSABILITY              01650000
+                                                                        01660000
+         EJECT ,                                                        01670000
+****************************************************************        01680000
+*                                                                       01690000
+*  PROJECT TASK INITIALIZATION                                          01700000
+*                                                                       01710000
+****************************************************************        01720000
+                                                                        01730000
+         $RCVRY CREATE,RECOVRTN,PARM=(R13),MF=(E,WRK256)                01740000
+                                                                        01750000
+         @CALL IPRJINIT           INITIALIZE PROJECT TASK               01760000
+         ST    R15,RCINIT         SAVE INITIALIZATION RETCODE           01770000
+         LTR   R15,R15            INITIALIZATION SUCCESSFUL             01780000
+         BNZ   PROCSHUT           NO, SHUTDOWN PROJECT TASK             01790000
+                                                                        01800000
+****************************************************************        01810000
+*                                                                       01820000
+*  INITIALIZE/RESET MESSAGE EVENT                                       01830000
+*                                                                       01840000
+****************************************************************        01850000
+PROCMSG  DS    0H                                                       01860000
+         $TASK SETEPB,            INITIALIZE MESSAGE EPB               +01870000
+               EPB=TSKMEPB,                                            +01880000
+               ECODE=EC$MSG,                                           +01890000
+               MF=(E,$TASKMFL)                                          01900000
+                                                                        01910000
+         B     PROCWORK           PROCESS WORK                          01920000
+                                                                        01930000
+         EJECT ,                                                        01940000
+****************************************************************        01950000
+*                                                                       01960000
+*  THE PROJECT TASK WILL WAIT FOR NOTIFICATION FROM                     01970000
+*  A USER TASK TO PROCESS A PROJECT REQUEST MSG OR STOP/CANCEL          01980000
+*  EVENT.                                                               01990000
+*                                                                       02000000
+****************************************************************        02010000
+PROCWAIT DS    0H                                                       02020000
+         $TASK WAIT,              WAIT FOR PROJ REQ MESSAGE            +02030000
+               MESSAGE=PROCMSG,   PROCESS MESSAGE                      +02040000
+               CANCEL=PROCCNCL,   POSTED FOR CANCEL                    +02050000
+               STOP=PROCSTOP,     POSTED FOR SHUTDOWN                  +02060000
+               MF=(E,$TASKMFL)                                          02070000
+                                                                        02080000
+         B     PROCWAIT                                                 02090000
+                                                                        02100000
+PROCSTOP DS    0H                                                       02110000
+         OI    CFLAGS,$STOPREQ    INDICATE STOP RECEIVED                02120000
+         B     PROCWAIT           WAIT FOR STOP MESSAGE                 02130000
+                                                                        02140000
+         EJECT ,                                                        02150000
+****************************************************************        02160000
+*                                                                       02170000
+*  A DATABASE PROJECT REQUEST HAS BEEN ISSUED TO THE DATABASE           02180000
+*  TASK.  PROCESS THIS REQUEST AND POST THE COMPLETION                  02190000
+*  STATUS TO THE USER.                                                  02200000
+*                                                                       02210000
+****************************************************************        02220000
+PROCWORK DS    0H                                                       02230000
+         BAS   R14,GETWORK        RECEIVE PROJ REQ MSG                  02240000
+         LTR   R15,R15            MESSAGE AVAILABLE                     02250000
+         BNZ   PROCWAIT           ALL DONE, WAIT FOR NEXT REQ           02260000
+                                                                        02270000
+         USING TMSGSTD,R1         MESSAGE ADDRESSABILITY                02280000
+         L     R0,TMSGTYPE        GET MESSAGE TYPE                      02290000
+                                                                        02300000
+         C     R0,=A(ITM_PRJ_STOP)  PROJECT TASK STOP REQUEST           02310000
+         BE    PROCSHUT           YES,  TERMINATE PROJECT TASK          02320000
+                                                                        02330000
+         C     R0,=A(ITM_PRJ_REQ) PROJECT REQUEST                       02340000
+         BE    PROC_REQ           YES,  PROCESS NEXT MESSAGE            02350000
+                                                                        02360000
+         $TMSGDFT (R1)            DEFAULT MESSAGE PROCESSING            02370000
+                                                                        02380000
+         B     PROCWORK           RECEIVE NEXT MESSAGE                  02390000
+                                                                        02400000
+*-----------------------------------------------------------------      02410000
+*  Process Project request                                              02420000
+*-----------------------------------------------------------------      02430000
+PROC_REQ DS    0H                                                       02440000
+         LA    R8,TMSGINFO        ADD OF PROJECT REQUEST MSG            02450000
+         USING IPRJXMSG,R8        ADDRESSABILITY                        02460000
+         DROP  R1                 TMSGSTD                               02470000
+                                                                        02480000
+         TIME  ,                  GET CURRENT TIME/DATE                 02490000
+         ST    R0,CURRTIME        SAVE CURRENT TIME                     02500000
+         ST    R1,CURRDATE        SAVE CURRENT DATE                     02510000
+                                                                        02520000
+         XC    IPRJDIR(IPDIRLEN),IPRJDIR    CLEAR SYSPROJ_DIR ROW       02530000
+                                                                        02540000
+         L     R1,IPJXTASK        ADDR OF REQUESTOR ITASK               02550000
+R        USING ITASK,R1           ADDRESSABILITY                        02560000
+         MVC   RTSKNAME,R.TSKNAME SAVE REQUESTOR'S TASK NAME            02570000
+         MVC   RTSKTTKN,R.TSKTTOKN                                      02580000
+         DROP  R                  ITASK                                 02590000
+                                                                        02600000
+         MVC   RUSRNAME,IPJXUSRN  COPY NAME OF REQUESTING USER          02610000
+                                                                        02620000
+         SR    R2,R2              PREPARE FOR INSERT                    02630000
+         IC    R2,IPJXFUNC        GET REQUESTED FUNC                    02640000
+         BCTR  R2,0               DECREMENT FOR INDEX                   02650000
+         SLL   R2,2               OFFSET INTO BRANCH TABLE              02660000
+                                                                        02670000
+         B     *+4(R2)            BRANCH ON FUNCTION CODE               02680000
+         B     OPEN               OPEN   PROJECT                        02690000
+         B     NEW                CREATE PROJECT                        02700000
+         B     SAVE               SAVE   PROJECT                        02710000
+         B     SAVEAS             SAVEAS PROJECT                        02720000
+         B     CLOSE              CLOSE  PROJECT                        02730000
+         B     DELETE             DELETE PROJECT                        02740000
+         B     SAVEALL            SAVEALL PROJECT                       02750000
+         EX    R0,*               UNSUPPORTED FUNCTION                  02760000
+         EX    R0,*               UNSUPPORTED FUNCTION                  02770000
+         EX    R0,*               UNSUPPORTED FUNCTION                  02780000
+                                                                        02790000
+         EJECT ,                                                        02800000
+****************************************************************        02810000
+*                                                                       02820000
+*  RTN: OPEN - OPEN PROJECT                                             02830000
+*                                                                       02840000
+*  PROCESS WORK REQUEST TO OPEN A PROJECT.  CALL THE $PROJECT           02850000
+*  SERVICE ROUTINE TO CREATE THE PROJECT SPACE AND READ THE             02860000
+*  PROJECT FROM THE PROJECT DATABASE INTO THE SPACE.  IF PROJECT        02870000
+*  SUCCESSFULLY OPENED, THE PROJECT CONTROL BLOCK WILL BE               02880000
+*  CREATED AND ADDED TO THE GLOBAL PROJECT ENTITY STRUCTURE.            02890000
+*                                                                       02900000
+****************************************************************        02910000
+OPEN     DS    0H                                                       02920000
+         BAS   R14,TBEXIST        CHECK IF PROJECT EXISTS IN DB         02930000
+         BNZ   STD_RETN           PROJECT NOT FOUND IN DB               02940000
+                                                                        02950000
+*---------------------------------------------------------------        02960000
+*  ATTEMPT TO LOCATE THE IPROJ BLOCK FOR THE APPROPRIATE                02970000
+*  ACCESS TYPE (RUNTIME/WORKBENCH).  IF ACCESS IS WORKBENCH             02980000
+*  FAIL OPEN REQUEST FOR AN EXISTING OPEN PROJECT,  IF ACCESS           02990000
+*  IS RUNTIME AND PROJECT ALREADY OPEN, INCREMENT THE USE COUNT.        03000000
+*---------------------------------------------------------------        03010000
+         BAS   R14,PRJLOCK        OBTAIN PROJECT LOCK                   03020000
+         BNZ   ERR_LOCK           ERROR ACQUIRING LOCK                  03030000
+         LA    R1,IPJXNAME        PROJECT NAME                          03040000
+         BAS   R14,PRJGET         LOCATE OPEN PROJECT                   03050000
+         BNZ   OPEN_PNO           PROJECT NOT OPEN                      03060000
+                                                                        03070000
+         LR    R7,R1              ADDR OF IPROJ CB                      03080000
+         USING IPROJ,R7           ESTABLISH ADDRESSABILITY              03090000
+                                                                        03100000
+         CLI   IPJXACCS,IPJXA_WB  WORKBENCH ACCESS                      03110000
+         BE    ERR_USE            EXCLUSIVE WORKBENCH CNTL REQ          03120000
+                                                                        03130000
+         L     R1,PRJUSE          OBTAIN PROJECT USE COUNT              03140000
+         LA    R1,1(,R1)          INCREMENT USE COUNT                   03150000
+         ST    R1,PRJUSE          RESTORE PROJECT USE COUNT             03160000
+         BAS   R14,PRJUNLK        RELEASE PROJECT LOCK                  03170000
+         B     OPEN_OK            OPEN COMPLETED OK                     03180000
+                                                                        03190000
+*---------------------------------------------------------------        03200000
+*  PROJECT NOT CURRENTLY OPEN,  ISSUE PROJSERV REQUEST TO               03210000
+*  READ PROJECT FROM DATABASE.                                          03220000
+*---------------------------------------------------------------        03230000
+OPEN_PNO DS    0H                 PROJECT NOT OPEN                      03240000
+         BAS   R14,PRJUNLK        RELEASE PROJECT LOCK                  03250000
+         MVC   COMPNAME,$PROJECT  COMPONENT NAME                        03260000
+                                                                        03270000
+         BAS   R14,PRJINIT        INITIALIZE PROJECT CB                 03280000
+         BNZ   ERR_STG                                                  03290000
+         LR    R7,R1              ADDRESS OF PROJECT CB                 03300000
+         USING IPROJ,R7           ESTABLISH ADDRESSABILITY              03310000
+         ST    R7,CLNPROJ         SAVE ADDR OF CLEANUP PROCESS          03320000
+                                                                        03330000
+         L     R2,ICTTBCRT        ASSUME RUNTIME ACCESS                 03340000
+         LA    R4,ICTJSTKN        WITH JOB STEP TASK AS SPACE OWNER     03350000
+         CLI   IPJXACCS,IPJXA_RT  IS IT RUNTIME ACCESS                  03360000
+         BE    OPEN_$P            YES, CONTINUE                         03370000
+         L     R2,ICTTBCWB        NO,  USE WORKBENCH TBSV OPTIONS       03380000
+         LA    R4,ICTJSTKN        ASSOC SPACE WITH APPROP OWNER         03390000
+******** LA    R4,RTSKTTKN        NOT SUPPORTED PROBLEM STATE           03400000
+                                                                        03410000
+OPEN_$P  DS    0H                                                       03420000
+         $PROJECT OPEN,           OPEN PROJECT                         +03430000
+               NAME=IPJXNAME,                                          +03440000
+               TOKEN=PRJTOKEN,                                         +03450000
+               USER=RUSRNAME,                                          +03460000
+               SOURCE=RTSKNAME,                                        +03470000
+               SPCLOCK=0,                                              +03480000
+               SPCSIZE=*ICTPSIZE,                                      +03490000
+               OIECOUNT=0,                                             +03500000
+               TBSVCFG=(R2),                                           +03510000
+               TTOKEN=(R4),                                            +03520000
+               WORKA=WRK2K,                                            +03530000
+               ERRAREA=PROJERR,                                        +03540000
+               MF=(E,$PRJPL)                                            03550000
+                                                                        03560000
+         LTR   R15,R15            PROJECT OPEN SUCESSFUL                03570000
+         BNZ   PRJ_RET            NO, LOG ERROR, SET RETURN INFO        03580000
+                                                                        03590000
+*---------------------------------------------------------------        03600000
+*  IF OPEN SUCCESSFULL, ADD PROJECT CONTROL BLOCK ENTITY                03610000
+*---------------------------------------------------------------        03620000
+         BAS   R14,PRJLOCK        OBTAIN PROJECT LOCK                   03630000
+         BNZ   ERR_LOCK           ERROR ACQUIRING LOCK                  03640000
+         LA    R1,IPROJ           IPROJ ADDRESS                         03650000
+         BAS   R14,PRJADD         ADD PROJ TO DATABASE                  03660000
+         BNZ   ERR_ENTY           ERROR, ENTITY MANAGER                 03670000
+         BAS   R14,PRJUNLK        RELEASE PROJECT LOCK                  03680000
+         XC    CLNPROJ,CLNPROJ    RESET PROJECT STORAGE CLEANUP         03690000
+         B     OPEN_OK            OPEN COMPLETED SUCESSFULLY            03700000
+                                                                        03710000
+*---------------------------------------------------------------        03720000
+*  OPEN EXIT                                                            03730000
+*---------------------------------------------------------------        03740000
+OPEN_OK  DS    0H                                                       03750000
+         LA    R15,RC00           SET RETURN CODE                       03760000
+         LA    R0,RSN00           SET REASON CODE                       03770000
+         B     STD_RETN           RETURN                                03780000
+                                                                        03790000
+         EJECT ,                                                        03800000
+****************************************************************        03810000
+*                                                                       03820000
+*   RTN: NEW - CREATE NEW PROJECT (WORKBENCH REQUEST)                   03830000
+*                                                                       03840000
+*   PROCESS REQUEST TO INITIALIZE NEW PROJECT.  CALL $PROJECT           03850000
+*   SERVICE ROUTINE TO CREATE THE NEW PROJECT SPACE.  IF PROJECT        03860000
+*   SUCCESSFULLY CREATED, THEN ADD PROJECT ENTRY TO ENTITY              03870000
+*   STRUCTURE.                                                          03880000
+*                                                                       03890000
+****************************************************************        03900000
+NEW      DS    0H                                                       03910000
+*---------------------------------------------------------------        03920000
+*   VERIFY PROJECT NOT IN USE                                           03930000
+*---------------------------------------------------------------        03940000
+         BAS   R14,PRJLOCK        OBTAIN PROJECT LOCK                   03950000
+         BNZ   ERR_LOCK           ERROR OBTAINING PROJECT LOCK          03960000
+         LA    R1,IPJXNAME        PROJECT NAME                          03970000
+         BAS   R14,PRJGET         LOCATE PROJECT CONTROL BLOCK          03980000
+         BZ    ERR_USE            IPROJ FOUND, PROJECT IN USE           03990000
+         BAS   R14,PRJINIT        INITIALIZE NEW PROJECT CB             04000000
+         BNZ   ERR_STG            ERROR ALLOCATING IPROJ                04010000
+         LR    R7,R1              ADDR OF NEW IPROJ                     04020000
+         USING IPROJ,R7           ADDRESSABILITY                        04030000
+         ST    R7,CLNPROJ         SAVE FOR PROJECT CLEANUP              04040000
+         BAS   R14,PRJUNLK        RELEASE PROJECT LOCK                  04050000
+                                                                        04060000
+*---------------------------------------------------------------        04070000
+*   CHECK IF PROJECT EXIST IN DATABASE, IF SO VERIFY THAT               04080000
+*   REPLACE CONFIRM HAS BEEN ISSUED.                                    04090000
+*---------------------------------------------------------------        04100000
+         BAS   R14,INITDIR        INITIALIZE DIRECTORY ROW              04110000
+         BAS   R14,TBEXIST        CHECK IF PROJECT EXISTS               04120000
+         BNZ   NEW_CREA           NO,  CREATE PROJECT                   04130000
+                                                                        04140000
+         TM    IPJXFLAG,IPJX$CON  REPLACE CONFIRMED?                    04150000
+         BZ    NEW_CONF           NO,  CONFIRM REPLACE                  04160000
+         OI    PRJFLAG1,PRJF1REP  INDICATE REPLACE REQ ON SAVE          04170000
+                                                                        04180000
+NEW_CREA DS    0H                                                       04190000
+         MVC   COMPNAME,$PROJECT  COMPONENT NAME                        04200000
+                                                                        04210000
+         L     R2,ICTTBCRT        ASSUME RUNTIME ACCESS                 04220000
+         LA    R4,ICTJSTKN        with JOB STEP TASK AS SPACE OWNER     04230000
+         CLI   IPJXACCS,IPJXA_RT  IS IT RUNTIME ACCESS                  04240000
+         BE    NEW_$P             YES, CONTINUE                         04250000
+         L     R2,ICTTBCWB        NO,  USE WORKBENCH TBSV OPTIONS       04260000
+         LA    R4,ICTJSTKN        ASSOC SPACE WITH APPROP OWNER         04270000
+******** LA    R4,RTSKTTKN        not supported problem state           04280000
+                                                                        04290000
+NEW_$P   DS    0H                                                       04300000
+         $PROJECT NEW,            CREATE NEW PROJECT                   +04310000
+               NAME=IPJXNAME,                                          +04320000
+               TOKEN=PRJTOKEN,                                         +04330000
+               USER=RUSRNAME,                                          +04340000
+               SOURCE=RTSKNAME,                                        +04350000
+               SPCLOCK=0,                                              +04360000
+               SPCSIZE=*ICTPSIZE,                                      +04370000
+               OIECOUNT=0,                                             +04380000
+               USING=*IPJXALU@,                                        +04390000
+               TBSVCFG=(R2),                                           +04400000
+               TTOKEN=(R4),                                            +04410000
+               WORKA=WRK2K,                                            +04420000
+               ERRAREA=PROJERR,                                        +04430000
+               MF=(E,$PRJPL)                                            04440000
+                                                                        04450000
+         LTR   R15,R15            PROJECT CREATE OK                     04460000
+         BNZ   PRJ_RET            NO, LOG ERROR, SET RETURN INFO        04470000
+                                                                        04480000
+*---------------------------------------------------------------        04490000
+*  ADD PROJECT CONTROL BLOCK TO ENTITY STRUCTURE                        04500000
+*---------------------------------------------------------------        04510000
+         BAS   R14,PRJLOCK        OBTAIN PROJECT LOCK                   04520000
+         BNZ   ERR_LOCK           LOCK REQUEST FAILED                   04530000
+         LA    R1,IPROJ           IPROJ ADDRESS                         04540000
+         BAS   R14,PRJADD         ADD IPROJ TO ENTITY MGR               04550000
+         BNZ   ERR_ENTY           ERROR, ENTITY MANAGER                 04560000
+         BAS   R14,PRJUNLK        RELEASE PROJECT LOCK                  04570000
+         XC    CLNPROJ,CLNPROJ    RESET PROJECT STORAGE CLEANUP         04580000
+                                                                        04590000
+*---------------------------------------------------------------        04600000
+*  NEW EXIT                                                             04610000
+*---------------------------------------------------------------        04620000
+NEW_OK   DS    0H                                                       04630000
+         LA    R15,RC00           SET RETURN CODE                       04640000
+         LA    R0,RSN00           SET REASON CODE                       04650000
+         B     STD_RETN           RETURN                                04660000
+                                                                        04670000
+*---------------------------------------------------------------        04680000
+*  PROJECT ALREADY EXISTS,  CONFIRM PROJECT CREATE.                     04690000
+*---------------------------------------------------------------        04700000
+NEW_CONF DS    0H                                                       04710000
+         MVC   COMPNAME,$MAINLNE  SET MAINLINE COMPONENT MSG            04720000
+         LA    R15,RC04           SET RETURN CODE - CONFIRM             04730000
+         LA    R0,RSN04           VERIFY PROJECT REPLACE                04740000
+         B     STD_RETN           RETURN                                04750000
+                                                                        04760000
+         EJECT ,                                                        04770000
+****************************************************************        04780000
+*                                                                       04790000
+*  RTN: SAVEALL - SAVE PROJECT TO DATABASE                              04800000
+*                                                                       04810000
+****************************************************************        04820000
+SAVEALL  DS    0H                                                       04830000
+         OI    PRJFLAG1,PRJF1REP  REPLACE REQUIRED                      04840000
+         B     SAVE                                                     04850000
+         EJECT ,                                                        04860000
+****************************************************************        04870000
+*                                                                       04880000
+*  RTN: SAVE - SAVE PROJECT TO DATABASE                                 04890000
+*                                                                       04900000
+*  PROCESS REQUEST TO SAVE A PROJECT TO THE PROJECT DATABASE.           04910000
+*  IF PROJECT EXISTS,  UPDATE THE PROJECT DIRECTORY TABLE ROW,          04920000
+*  ELSE CREATE A NEW DIRECTORY ENTRY.                                   04930000
+*                                                                       04940000
+****************************************************************        04950000
+SAVE     DS    0H                                                       04960000
+         BAS   R14,PUSHCAN        MAKE NON-CANCELABLE                   04970000
+         CLC   IPJXNAME,SYSCATLG  SAVE CATLG REQUEST?                   04980000
+         BNE   SAVE_LOC           NO, INITIALIZE DIR TBL ENTRY          04990000
+         BAS   R14,SAVESYSP       SAVE SYSCATLG PROJECT                 05000000
+         B     PRJ_RET            RETURN                                05010000
+                                                                        05020000
+*---------------------------------------------------------------        05030000
+*  LOCATE PROJECT CONTROL BLOCK                                         05040000
+*---------------------------------------------------------------        05050000
+SAVE_LOC DS    0H                                                       05060000
+         BAS   R14,PRJLOCK        OBTAIN PROJECT LOCK                   05070000
+         BNZ   ERR_LOCK           ERROR, LOCK REQ FAILED                05080000
+         LA    R1,IPJXNAME        PROJECT NAME                          05090000
+         BAS   R14,PRJGET         LOCATE IPROJ CB                       05100000
+         BNZ   ERR_PNO            PROJECT NOT OPEN                      05110000
+         LR    R7,R1              ADDR OF IPROJ                         05120000
+         USING IPROJ,R7           ADDRESSABILITY                        05130000
+         BAS   R14,PRJUNLK        RELEASE PROJECT LOCK                  05140000
+                                                                        05150000
+*---------------------------------------------------------------        05160000
+*  DETERMINE IF PROJECT EXIST OR SAVE OF A NEW PROJECT                  05170000
+*---------------------------------------------------------------        05180000
+         BAS   R14,TBEXIST        CHECK IF PROJECT EXISTS               05190000
+         BZ    *+8                YES, SKIP INIT                        05200000
+         BAS   R14,INITDIR        INITIAL PROJ DIR TBL ENTRY            05210000
+                                                                        05220000
+*---------------------------------------------------------------        05230000
+*  ISSUE REPLACE OR SAVE AS REQUIRED                                    05240000
+*---------------------------------------------------------------        05250000
+         MVC   COMPNAME,$PROJECT  COMPONENT NAME                        05260000
+         TM    PRJFLAG1,PRJF1REP  REPLACE REQUIRED?                     05270000
+         BZ    SAV_CONT           NO, CONTINUE WITH SAVE                05280000
+                                                                        05290000
+         $PROJECT REPLACE,        REPLACE PROJECT                      +05300000
+               NAME=IPJXNAME,                                          +05310000
+               TOKEN=PRJTOKEN,                                         +05320000
+               USER=RUSRNAME,                                          +05330000
+               SOURCE=RTSKNAME,                                        +05340000
+               WORKA=WRK2K,                                            +05350000
+               ERRAREA=PROJERR,                                        +05360000
+               MF=(E,$PRJPL)                                            05370000
+         B     SAVE_RC                                                  05380000
+                                                                        05390000
+SAV_CONT DS    0H                                                       05400000
+         $PROJECT SAVE,           SAVE PROJECT                         +05410000
+               NAME=IPJXNAME,                                          +05420000
+               TOKEN=PRJTOKEN,                                         +05430000
+               USER=RUSRNAME,                                          +05440000
+               SOURCE=RTSKNAME,                                        +05450000
+               WORKA=WRK2K,                                            +05460000
+               ERRAREA=PROJERR,                                        +05470000
+               MF=(E,$PRJPL)                                            05480000
+                                                                        05490000
+SAVE_RC  DS    0H                                                       05500000
+         LTR   R15,R15            SAVE SUCCESSFULL?                     05510000
+         BNZ   PRJ_RET            NO, LOG ERROR, SET RETURN INFO        05520000
+         NI    PRJFLAG1,FF-PRJF1REP RESET REPLACE FLAG                  05530000
+                                                                        05540000
+*---------------------------------------------------------------        05550000
+*  UPDATE PROJECT DIRECTORY TABLE ENTRY                                 05560000
+*---------------------------------------------------------------        05570000
+         MVC   COMPNAME,$PRJTBLS  COMPONENT NAME                        05580000
+         MVC   IPDCHANG,CURRTOD   SET CHANGED DATE/TIME                 05590000
+         MVC   IPDCHUSR,RUSRNAME  SET UPDATING USER                     05600000
+         MVC   IPDCH$LU,RTSKNAME SET UPDATING TASK                      05610000
+                                                                        05620000
+         $PRJTBLS MOD,            MODIFY/ADD TABLE ROW                 +05630000
+               TABLE='PROJDIR',                                        +05640000
+               BUFADDR=IPRJDIR,                                        +05650000
+               WORKA=WRK2K,                                            +05660000
+               MF=(E,$PJTBPL)                                           05670000
+         LTR   R15,R15            MODIFY SUCCESSFULL?                   05680000
+         BNZ   PTBL_RET           NO, SET RETURN INFO                   05690000
+                                                                        05700000
+         BAS   R14,SAVESYSP       SAVE SYSTEM PROJECT                   05710000
+         B     PRJ_RET            RETURN                                05720000
+                                                                        05730000
+         EJECT ,                                                        05740000
+****************************************************************        05750000
+*                                                                       05760000
+*  RTN: SAVEAS - SAVE PROJECT AS NEW NAME                               05770000
+*                                                                       05780000
+*  PROCESS REQUEST TO SAVE PROJECT AS NEWNAME.  IF NEW NAME             05790000
+*  ALREADY EXIST, THEN FORCE USER TO CONFIRM SAVEAS PROCESS.            05800000
+*  IF SAVEAS IS SUCCESSFULL, THEN UPDATE PROJECT DIRECTORY              05810000
+*  TABLE AND DELETE OLD IPROJ AND CREATE NEW IPROJ ENTITY.              05820000
+*                                                                       05830000
+****************************************************************        05840000
+SAVEAS   DS    0H                                                       05850000
+         BAS   R14,PRJLOCK        OBTAIN PROJECT LOCK                   05860000
+         BNZ   ERR_LOCK           ERROR, LOCK REQUEST FAILED            05870000
+         LA    R1,IPJXONAM        ADDR OF ORIGINAL PROJECT NAME         05880000
+         BAS   R14,PRJGET         LOCATE IPROJ CB                       05890000
+         BNZ   ERR_PNO            PROJECT NOT OPEN                      05900000
+         LR    R7,R1              ADDR OF IPROJ                         05910000
+         USING IPROJ,R7           ADDRESSABILITY                        05920000
+                                                                        05930000
+*---------------------------------------------------------------        05940000
+*  DETERMINE IF NEW PROJECT NAME IS ALREADY OPEN FROM ANOTHER           05950000
+*  WORKBENCH SESSION.                                                   05960000
+*---------------------------------------------------------------        05970000
+         CLC   IPJXNAME,IPJXONAM  PROJECT BEING RENAMED?                05980000
+         BE    SAS_UNLK           NO, RELEASE PROJECT LOCK              05990000
+         LA    R1,IPJXNAME        NEW PROJECT NAME                      06000000
+         BAS   R14,PRJGET         PROJECT ALREADY OPENED                06010000
+         BZ    ERR_USE            PROJECT IN USE                        06020000
+                                                                        06030000
+SAS_UNLK DS    0H                                                       06040000
+         BAS   R14,PRJUNLK        RELEASE PROJECT LOCK                  06050000
+                                                                        06060000
+*---------------------------------------------------------------        06070000
+*  LOCATE PROJECT DIRECTORY TABLE ENTRY.  IF PROJECT EXISTS             06080000
+*  ENSURE PROJECT SAVEAS HAS BEEN CONFIRMED BY WORKBENCH USER.          06090000
+*---------------------------------------------------------------        06100000
+         BAS   R14,INITDIR        INITIALIZE DIRECTORY ROW              06110000
+         BAS   R14,TBEXIST        CHECK IF PROJECT EXISTS               06120000
+         BNZ   SAS_SAVE           NO, SAVE PROJECT                      06130000
+         TM    IPJXFLAG,IPJX$CON  SAVEAS CONFIRMED?                     06140000
+         BZ    SAS_CONF           NO, CONFIRM SAVEAS                    06150000
+                                                                        06160000
+*---------------------------------------------------------------        06170000
+*  SAVE PROJECT TO DATABASE,  IF REPLACE REQUIRED AND SAVING            06180000
+*  UNDER SAME NAME, THEN ISSUE PROJECT REPLACE.                         06190000
+*---------------------------------------------------------------        06200000
+SAS_SAVE DS    0H                                                       06210000
+         BAS   R14,PUSHCAN        MAKE NON-CANCELABLE                   06220000
+         MVC   COMPNAME,$PROJECT  COMPONENT NAME                        06230000
+         TM    PRJFLAG1,PRJF1REP  REPLACE PROJECT REQUIRED              06240000
+         BZ    SAS_CONT           NO, CONTINUE WITH SAVEAS              06250000
+         CLC   IPJXNAME,IPJXONAM  SAVEING UNDER NEW NAME?               06260000
+         BNE   SAS_CONT           YES, CONTINUE WITH SAVEAS             06270000
+                                                                        06280000
+         $PROJECT REPLACE,        REPLACE EXISTING PROJECT             +06290000
+               NAME=IPJXNAME,                                          +06300000
+               TOKEN=PRJTOKEN,                                         +06310000
+               USER=RUSRNAME,                                          +06320000
+               SOURCE=RTSKNAME,                                        +06330000
+               WORKA=WRK2K,                                            +06340000
+               ERRAREA=PROJERR,                                        +06350000
+               MF=(E,$PRJPL)                                            06360000
+         B     SAS_RC             GO CHECK RETURN CODE                  06370000
+                                                                        06380000
+SAS_CONT DS    0H                                                       06390000
+         $PROJECT SAVEAS,         SAVEAS PROJECT                       +06400000
+               NAME=IPJXNAME,                                          +06410000
+               TOKEN=PRJTOKEN,                                         +06420000
+               USER=RUSRNAME,                                          +06430000
+               SOURCE=RTSKNAME,                                        +06440000
+               WORKA=WRK2K,                                            +06450000
+               ERRAREA=PROJERR,                                        +06460000
+               MF=(E,$PRJPL)                                            06470000
+                                                                        06480000
+SAS_RC   DS    0H                                                       06490000
+         LTR   R15,R15            SAVEAS SUCCESSFULL?                   06500000
+         BNZ   STD_RETN           NO, LOG ERROR, SET RETURN INFO        06510000
+         NI    PRJFLAG1,FF-PRJF1REP RESET REPLACE FLAG                  06520000
+                                                                        06530000
+*---------------------------------------------------------------        06540000
+*  UPDATE PROJECT DIRECTORY TABLE ENTRY                                 06550000
+*---------------------------------------------------------------        06560000
+         MVC   COMPNAME,$PRJTBLS  COMPONENT NAME                        06570000
+         MVC   IPDCHANG,CURRTOD   SET CHANGED DATE/TIME                 06580000
+         MVC   IPDCHUSR,RUSRNAME  SET UPDATING USER                     06590000
+         MVC   IPDCH$LU,RTSKNAME  SET UPDATING TASK (TERM)              06600000
+                                                                        06610000
+         $PRJTBLS MOD,            MODIFY/ADD TABLE ROW                 +06620000
+               TABLE='PROJDIR',                                        +06630000
+               BUFADDR=IPRJDIR,                                        +06640000
+               WORKA=WRK2K,                                            +06650000
+               MF=(E,$PJTBPL)                                           06660000
+         LTR   R15,R15            MODIFY SUCCESSFULL?                   06670000
+         BNZ   PTBL_RET           NO, SET RETURN INFO                   06680000
+                                                                        06690000
+         BAS   R14,SAVESYSP       SAVE SYSTEM PROJECT                   06700000
+         BNZ   PRJ_RET            RETURN                                06710000
+                                                                        06720000
+*---------------------------------------------------------------        06730000
+*  IF PROJECT RENAMED,  DELETE EXISTING PROJECT ENTITY AND              06740000
+*  REPLACE WITH NEW NAME.                                               06750000
+*---------------------------------------------------------------        06760000
+         CLC   IPJXNAME,IPJXONAM  PROJECT RENAMED?                      06770000
+         BE    SAS_OK             NO, NORMAL COMPLETION                 06780000
+                                                                        06790000
+         BAS   R14,PRJLOCK        OBTAIN PROJECT LOCK                   06800000
+         BNZ   ERR_LOCK           ERROR, LOCK REQ FAILED                06810000
+                                                                        06820000
+         LA    R1,IPROJ           ADDR OF IPROJ TO DELETE               06830000
+         BAS   R14,PRJDEL         DELETE IPROJ ENTITY                   06840000
+         BNZ   ERR_ENTY           ENTITY FAILURE                        06850000
+                                                                        06860000
+         MVC   PRJNAME,IPJXNAME   NEW PROJECT NAME                      06870000
+         LA    R1,IPROJ           ADDR OF IPROJ TO ADD                  06880000
+         BAS   R14,PRJADD         ADD PROJECT TO ENTITY STRUCT          06890000
+         BNZ   ERR_ENTY           ENTITY FAILURE                        06900000
+                                                                        06910000
+         BAS   R14,PRJUNLK        RELEASE PROJECT LOCK                  06920000
+                                                                        06930000
+SAS_OK   DS    0H                                                       06940000
+         LA    R15,RC00           NORMAL COMPLETION                     06950000
+         LA    R0,RSN00                                                 06960000
+         B     STD_RETN           RETURN                                06970000
+                                                                        06980000
+*---------------------------------------------------------------        06990000
+*  SET CONFIRM PROJECT SAVEAS RET/RSN                                   07000000
+*---------------------------------------------------------------        07010000
+SAS_CONF DS    0H                                                       07020000
+         MVC   COMPNAME,$MAINLNE  INDICATE MAINLINE MSG                 07030000
+         LA    R15,RC04           SET RETURN CODE - CONFIRM             07040000
+         LA    R0,RSN04           SET REASON CODE - VERF SAVEAS         07050000
+         B     STD_RETN           RETURN                                07060000
+                                                                        07070000
+         EJECT ,                                                        07080000
+****************************************************************        07090000
+*                                                                       07100000
+*  RTN: CLOSE - CLOSE PROJECT                                           07110000
+*                                                                       07120000
+*  OBTAIN PROJECT CONTROL BLOCK AND DETERMINE IF USE COUNT              07130000
+*  WILL RETURN TO ZERO.  IF SO, REMOVE IPROJ FROM ENTITY                07140000
+*  STRUCT AND CALL PROJECT SERVICES TO CLOSE PROJECT AND                07150000
+*  DELETE PROJECT SPACE.  IF USE COUNT GREATER THAN ONE THEN            07160000
+*  DECREMENT USE COUNT AND RETURN.                                      07170000
+*                                                                       07180000
+****************************************************************        07190000
+CLOSE    DS    0H                                                       07200000
+         BAS   R14,PRJLOCK        OBTAIN PROJECT LOCK                   07210000
+         BNZ   ERR_LOCK           ERROR, LOCK REQUEST FAILED            07220000
+         LA    R1,IPJXNAME        ADDRESS OF PROJECT NAME               07230000
+         BAS   R14,PRJGET         LOCATE IPROJ CB                       07240000
+         BNZ   ERR_PNO            ERROR, PROJECT NOT OPEN               07250000
+                                                                        07260000
+         LR    R7,R1              ADDR OF IPROJ                         07270000
+         USING IPROJ,R7           ADDRESSABILITY                        07280000
+                                                                        07290000
+         L     R1,PRJUSE          GET PROJECT USE COUNT                 07300000
+         C     R1,=A(1)           LAST/ONLY USER OF PROJECT?            07310000
+         BNH   CLS_PDEL           YES, DELETE PROJECT ENTITY            07320000
+         BCTR  R1,0               DECREMENT USE COUNT                   07330000
+         ST    R1,PRJUSE          STORE USE COUNT                       07340000
+         BAS   R14,PRJUNLK        RELEASE PROJECT LOCK                  07350000
+         B     STD_RETN           RETURN                                07360000
+                                                                        07370000
+CLS_PDEL DS    0H                                                       07380000
+         LA    R1,IPROJ           ADDRESS OF IPROJ                      07390000
+         BAS   R14,PRJDEL         DELETE PROJECT ENTITY ENTRY           07400000
+         BNZ   ERR_ENTY           ERROR, ENTITY                         07410000
+         BAS   R14,PRJUNLK        RELEASE PROJECT LOCK                  07420000
+                                                                        07430000
+         NI    PRJFLAG1,FF-PRJF1REP RESET REPLACE REQUIRED FLAG         07440000
+         MVC   COMPNAME,$PROJECT  COMPONENT NAME                        07450000
+                                                                        07460000
+         $PROJECT CLOSE,          CLOSE PROJECT                        +07470000
+               NAME=IPJXNAME,                                          +07480000
+               TOKEN=PRJTOKEN,                                         +07490000
+               USER=RUSRNAME,                                          +07500000
+               SOURCE=RTSKNAME,                                        +07510000
+               WORKA=WRK2K,                                            +07520000
+               ERRAREA=PROJERR,                                        +07530000
+               MF=(E,$PRJPL)                                            07540000
+                                                                        07550000
+         LA    R1,IPROJ           ADDRESS OF IPROJ                      07560000
+         BAS   R14,PRJFREE        RETURN IPROJ STORAGE                  07570000
+         B     PRJ_RET            RETURN                                07580000
+                                                                        07590000
+         EJECT ,                                                        07600000
+****************************************************************        07610000
+*                                                                       07620000
+*  RTN: DELETE - DELETE PROJECT                                         07630000
+*                                                                       07640000
+*  PROCESS REQUEST TO DELETE THE SPECIFIED PROJECT.  CALL               07650000
+*  $PROJECT TO DELETE THE PROJECT FROM VSAM.  IF SUCCESSFULL            07660000
+*  DELETE THE PROJECT DIRECTORY ROW.                                    07670000
+*                                                                       07680000
+****************************************************************        07690000
+DELETE   DS    0H                                                       07700000
+         BAS   R14,TBEXIST        PROJECT EXISTS IN DATABASE?           07710000
+         BNZ   STD_RETN           NO, PROJECT NOT FOUND                 07720000
+                                                                        07730000
+*---------------------------------------------------------------        07740000
+*  CHECK IF PROJECT IS ALREADY BY ANOTHER USER                          07750000
+*---------------------------------------------------------------        07760000
+         BAS   R14,PRJLOCK        OBTAIN PROJECT LOCK                   07770000
+         BNZ   ERR_LOCK           ERROR, LOCK REQ FAILED                07780000
+         LA    R1,IPJXNAME        PROJECT NAME                          07790000
+         BAS   R14,PRJGET         PROJECT OPENED BY ANOTHER USER        07800000
+         BZ    ERR_USE            YES, PROJECT IN USE                   07810000
+         BAS   R14,PRJUNLK        RELEASE PROJECT LOCK                  07820000
+                                                                        07830000
+*---------------------------------------------------------------        07840000
+* VERIFY THAT THE REQUEST HAS BEEN CONFIRMED AND ISSUE PROJECT          07850000
+* DATABASE DELETE REQUEST.                                              07860000
+*---------------------------------------------------------------        07870000
+         TM    IPJXFLAG,IPJX$CON  DELETE CONFIRMED?                     07880000
+         BZ    DEL_CONF           NO, CONFIRM DELETE                    07890000
+         BAS   R14,PUSHCAN        MAKE NON-CANCELABLE                   07900000
+         MVC   COMPNAME,$PROJECT  COMPONENT NAME                        07910000
+                                                                        07920000
+         $PROJECT DELETE,         DELETE PROJECT                       +07930000
+               NAME=IPJXNAME,                                          +07940000
+               USER=RUSRNAME,                                          +07950000
+               SOURCE=RTSKNAME,                                        +07960000
+               WORKA=WRK2K,                                            +07970000
+               ERRAREA=PROJERR,                                        +07980000
+               MF=(E,$PRJPL)                                            07990000
+         LTR   R15,R15            DELETE SUCCESSFULL?                   08000000
+         BNZ   PRJ_RET            NO, LOG ERROR, SET RET/RSN/MSG        08010000
+                                                                        08020000
+*---------------------------------------------------------------        08030000
+*  DELETE PROJECT DIRECTORY TABLE ROW                                   08040000
+*---------------------------------------------------------------        08050000
+         MVC   COMPNAME,$PRJTBLS  COMPONENT NAME                        08060000
+         BAS   R14,INITDIR        INITIALIZE DIRECTORY ROW              08070000
+                                                                        08080000
+         $PRJTBLS DELETE,         DEL PROJECT DIR ROW                  +08090000
+               TABLE='PROJDIR',                                        +08100000
+               KEYADDR=IPRJDIR,                                        +08110000
+               WORKA=WRK2K,                                            +08120000
+               MF=(E,$PJTBPL)                                           08130000
+         LTR   R15,R15            DELETE SUCCESSFULL?                   08140000
+         BNZ   PTBL_RET           NO, SET RETURN INFO                   08150000
+                                                                        08160000
+         BAS   R14,SAVESYSP       SAVE SYSTEM PROJECT                   08170000
+         B     PRJ_RET            RETURN                                08180000
+                                                                        08190000
+*---------------------------------------------------------------        08200000
+*  CONFIRM DELETE REQUEST.                                              08210000
+*---------------------------------------------------------------        08220000
+DEL_CONF DS    0H                                                       08230000
+         MVC   COMPNAME,$MAINLNE  MAINLINE COMPONENT                    08240000
+         LA    R15,RC04           RETURN CODE - CONFIRM                 08250000
+         LA    R0,RSN08           REASON CODE - DELETE REQUEST          08260000
+         B     STD_RETN           RETURN                                08270000
+                                                                        08280000
+         EJECT ,                                                        08290000
+****************************************************************        08300000
+*                                                                       08310000
+*  ERRORS                                                               08320000
+*                                                                       08330000
+****************************************************************        08340000
+                                                                        08350000
+ERR_PNO  DS    0H                 PROJECT NOT OPEN                      08360000
+         MVC   COMPNAME,$MAINLNE  MAIN COMPONENT ERROR                  08370000
+         LA    R15,RC08           REQUEST ERROR                         08380000
+         LA    R0,RSN04           PROJECT NOT OPEN                      08390000
+         B     STD_RETN           STANDARD RETURN PROCESSING            08400000
+                                                                        08410000
+ERR_USE  DS    0H                 PROJECT IN USE                        08420000
+         MVC   COMPNAME,$MAINLNE  MAIN COMPONENT ERROR                  08430000
+         LA    R15,RC08           REQUEST ERROR                         08440000
+         LA    R0,RSN08           PROJECT ALREADY IN USE                08450000
+         B     STD_RETN           STANDARD RETURN PROCESSING            08460000
+                                                                        08470000
+ERR_LOCK DS    0H                 PROJ LOCK REQUEST FAILURE             08480000
+         MVC   COMPNAME,$MAINLNE  MAIN COMPONENT ERROR                  08490000
+         LA    R15,RC12           SERVICE ERROR                         08500000
+         LA    R0,RSN04           LOCK MANAGER FAILURE                  08510000
+         B     STD_RETN           STANDARD RETURN PROCESSING            08520000
+                                                                        08530000
+ERR_STG  DS    0H                 STORAGE ALLOCATION ERROR              08540000
+         MVC   COMPNAME,$MAINLNE  MAIN COMPONENT ERROR                  08550000
+         LA    R15,RC12           SERVICE ERROR                         08560000
+         LA    R0,RSN08           STORAGE MANAGER FAILURE               08570000
+         B     STD_RETN           STANDARD RETURN PROCESSING            08580000
+                                                                        08590000
+ERR_ENTY DS    0H                 ENTITY MANAGER REQUEST FAILURE        08600000
+         MVC   COMPNAME,$MAINLNE  MAIN COMPONENT ERROR                  08610000
+         LA    R15,RC12           SERVICE ERROR                         08620000
+         LA    R0,RSN12           ENTITY MANAGER FAILURE                08630000
+         B     STD_RETN           STANDARD RETURN PROCESSING            08640000
+                                                                        08650000
+         EJECT ,                                                        08660000
+****************************************************************        08670000
+*                                                                       08680000
+*  STANDARD PROCESSING RETURN                                           08690000
+*                                                                       08700000
+****************************************************************        08710000
+                                                                        08720000
+PTBL_RET DS    0H                                                       08730000
+         LA    R2,PROJERR         ADDRESS OF PRJSRV ERROR AREA          08740000
+         USING PERAREA,R2         ADDRESSABILITY                        08750000
+         MVC   PERSRVC,=CL8'PRJTBLS'  PROJECT SERVICE COMPONENT         08760000
+         ST    R15,PERRC              RETURN CODE                       08770000
+         ST    R0,PERSYSRC            REASON CODE                       08780000
+         ST    R1,PERSYSRS            INFO   CODE                       08790000
+                                                                        08800000
+PRJ_RET  DS    0H                                                       08810000
+         ST    R15,PROCRET        SAVE RETURN CODE                      08820000
+         ST    R0,PROCRSN         SAVE REASON CODE                      08830000
+                                                                        08840000
+         LA    R2,PROJERR         ADDRESS OF PRJSRV ERROR AREA          08850000
+         USING PERAREA,R2         ADDRESSABILITY                        08860000
+         ICM   R1,B'1111',PERRC   ERROR ?                               08870000
+         BZ    STD_RLSE           NO, BYPASS LOGGING                    08880000
+                                                                        08890000
+         $MSG  279,               LOG MESSAGE                          +08900000
+               FIELDS=(PERSRVC,PERRC,PERSYSRC,PERSYSRS),               +08910000
+               MSGID=YES                                                08920000
+         XC    PERRC,PERRC        RESET PRJSRV ERROR                    08930000
+         DROP  R2                 PERAREA                               08940000
+         B     STD_RLSE                                                 08950000
+                                                                        08960000
+STD_RETN DS    0H                                                       08970000
+         ST    R15,PROCRET        SAVE RETURN CODE                      08980000
+         ST    R0,PROCRSN         SAVE REASON CODE                      08990000
+                                                                        09000000
+*---------------------------------------------------------------        09010000
+*  RELEASE ANY HELD RESOURCES                                           09020000
+*---------------------------------------------------------------        09030000
+STD_RLSE DS    0H                                                       09040000
+         BAS   R14,POPCAN         MAKE CANCELABLE                       09050000
+         BAS   R14,PRJUNLK        RELEASE LOCK IF HELD                  09060000
+                                                                        09070000
+         ICM   R1,15,CLNPROJ      IPROJ TO CLEAN UP?                    09080000
+         BZ    *+8                NO, CONTINUE                          09090000
+         BAS   R14,PRJFREE        FREE PROJECT CB                       09100000
+         XC    CLNPROJ,CLNPROJ    RESET IPROJ CLEANUP ADDR              09110000
+                                                                        09120000
+*---------------------------------------------------------------        09130000
+*  SET RETURN INFORMATION                                               09140000
+*---------------------------------------------------------------        09150000
+         ICM   R3,15,IPJXRET@     ADDRESS OF RETURN INFO                09160000
+         BZ    PROC_PST           NO RETURN AREA, JUST POST CALLER      09170000
+         USING IPRJXRET,R3        ADDRESSABILITY                        09180000
+                                                                        09190000
+         LA    R1,IPROJ           ADDRESS OF IPROJ BLOCK                09200000
+         ST    R1,IPJRPROJ        RETURN ADDRESS OF IPROJ               09210000
+         MVC   IPJRRET,PROCRET    SET RETURN CODE                       09220000
+         MVC   IPJRRSN,PROCRSN    SET REASON CODE                       09230000
+                                                                        09240000
+         MVI   IPJRMSG,C' '       CLEAR MESSAGE AREA                    09250000
+         MVC   IPJRMSG+1(L'IPJRMSG-1),IPJRMSG                           09260000
+                                                                        09270000
+         BAS   R14,BLDMSG         BUILD MESSAGE                         09280000
+         ST    R0,IPJRMSGL        SET LENGTH OF MESSAGE                 09290000
+         LTR   R2,R0              COPY MESSAGE LENGTH                   09300000
+         BZ    PROC_PST           NO MESSAGE RETURNED                   09310000
+         BCTR  R2,0               PREPARE FOR EXECUTE                   09320000
+         EX    R2,*+4             COPY MESSAGE TO RETURN AREA           09330000
+         MVC   IPJRMSG(*-*),0(R1) *** EX OBJECT ***                     09340000
+                                                                        09350000
+*---------------------------------------------------------------        09360000
+*  NOTIFY REQUESTOR OF COMPLETION                                       09370000
+*---------------------------------------------------------------        09380000
+PROC_PST DS    0H                                                       09390000
+         LA    R1,REQMSG          ADDRESS OF MESSAGE AREA               09400000
+         USING TMSGSTD,R1         ADDRESSABILITY                        09410000
+         ICM   R2,15,TMSGEPB      NOTIFY REQUESTOR?                     09420000
+         BZ    PROCWORK           NO, CONTINUE                          09430000
+         DROP  R1                 TMSGSTD                               09440000
+                                                                        09450000
+         $TASK POST,              NOTIFY REQUESTOR                     +09460000
+               EPB=(R2),                                               +09470000
+               PCODE=*PROCRET,                                         +09480000
+               MF=(E,$TASKMFL)                                          09490000
+                                                                        09500000
+         B     PROCWORK           CHECK FOR MORE WORK                   09510000
+                                                                        09520000
+         EJECT ,                                                        09530000
+****************************************************************        09540000
+*                                                                       09550000
+*  TASK TERMINATION.                                                    09560000
+*                                                                       09570000
+****************************************************************        09580000
+PROCSHUT DS    0H                                                       09590000
+         LA    R1,=A(RC00)        NORMAL SHUTDOWN REQUEST               09600000
+         B     PROCTERM           CALL PROJECT TERMINATE                09610000
+                                                                        09620000
+PROCCNCL DS    0H                                                       09630000
+         LA    R1,=A(RC04)        FAST (CANCEL) SHUTDOWN REQUEST        09640000
+         B     PROCTERM           CALL PROJECT TERMINATE                09650000
+                                                                        09660000
+PROCTERM DS    0H                                                       09670000
+         BAS   R14,POPCAN         RESTORE CANCELABLE STATE              09680000
+         @CALL IPRJTERM           PROJECT TASK TERMINATION              09690000
+                                                                        09700000
+         $RCVRY DELETE,RECOVRTN,MF=(E,WRK256)                           09710000
+                                                                        09720000
+         L     R15,RCINIT         RESTORE INITIALIZATION RETURN CODE    09730000
+         #EXIT ,                  RETURN                                09740000
+                                                                        09750000
+         EJECT ,                                                        09760000
+****************************************************************        09770000
+*                                                                       09780000
+*  ROUTINE: GETWORK - RECEIVE A TMSG FROM MESSAGE QUEUE                 09790000
+*                                                                       09800000
+*  DESCRIPTION:                                                         09810000
+*                                                                       09820000
+*    THIS ROUTINE WILL ISSUE A TASK RECEIVE REQUEST TO                  09830000
+*    GET A MESSAGE FROM THE MESSAGE QUEUE.                              09840000
+*                                                                       09850000
+*  ENTRY:  N/A                                                          09860000
+*                                                                       09870000
+*  EXIT:                                                                09880000
+*          R15 CONTAINS RETURN CODE FROM $TRECV SERVICE                 09890000
+*          R1  CONTAINS ADDRESS OF MESSAGE                              09900000
+*                                                                       09910000
+****************************************************************        09920000
+                                                                        09930000
+GETWORK  DS    0H                                                       09940000
+         STM   R0,R15,REGSAVE1    SAVE CALLER'S REGISTERS               09950000
+                                                                        09960000
+         $TRECV REQMSG,           RECEIVE MESSAGE                      +09970000
+               MF=(E,MFE_LIST)                                          09980000
+                                                                        09990000
+         LA    R1,REQMSG          ADDRESS OF MESSAGE                    10000000
+         LM    R2,R14,REGSAVE1+8  RESTORE CALLER'S REGISTERS            10010000
+         BR    R14                AND RETURN                            10020000
+                                                                        10030000
+         EJECT ,                                                        10040000
+****************************************************************        10050000
+*                                                                       10060000
+*  ROUTINE: TBEXIST - OBTAIN PROJECT DIRECTORY RECORD (ROW)             10070000
+*                                                                       10080000
+*  DESCRIPTION:                                                         10090000
+*                                                                       10100000
+*    THIS ROUTINE WILL CALL TABLE SERVICES TO ISSUE A KEYED             10110000
+*    RETRIEVAL OF THE PROJECT DIRECTORY TABLE ENTRY.                    10120000
+*                                                                       10130000
+*  ENTRY:  N/A                                                          10140000
+*                                                                       10150000
+*  EXIT:   R15/R0 - RETURN/REASON CODES FROM $PRJTBLS REQ               10160000
+*                                                                       10170000
+****************************************************************        10180000
+                                                                        10190000
+TBEXIST  DS    0H                                                       10200000
+         STM   R0,R15,REGSAVE1    SAVE CALLER'S REGISTERS               10210000
+                                                                        10220000
+         MVC   COMPNAME,$PRJTBLS  SET COMPONENT NAME                    10230000
+         BAS   R14,INITDIR        INITIALIZE DIRECTORY KEY              10240000
+                                                                        10250000
+         $PRJTBLS EXIST,                                               +10260000
+               TABLE='PROJDIR',                                        +10270000
+               BUFADDR=IPRJDIR,                                        +10280000
+               KEYADDR=IPRJDIR,                                        +10290000
+               WORKA=WRK2K,                                            +10300000
+               MF=(E,$PJTBPL)                                           10310000
+                                                                        10320000
+         LM    R1,R14,REGSAVE1+4       RESTORE CALLER'S REGISTERS       10330000
+         LTR   R15,R15                 SET CONDITION CODE               10340000
+         BR    R14                     RETURN                           10350000
+                                                                        10360000
+         EJECT ,                                                        10370000
+****************************************************************        10380000
+*                                                                       10390000
+*  ROUTINE: INITDIR - INITIALIZE PROJECT DIRECTORY RECORD               10400000
+*                                                                       10410000
+*  DESCRIPTION:                                                         10420000
+*                                                                       10430000
+*    THIS ROUTINE WILL INITIALIZE THE IPRJDIR (SYSPROJ_DIR)             10440000
+*    TABLE ROW.                                                         10450000
+*                                                                       10460000
+*  ENTRY:  N/A                                                          10470000
+*                                                                       10480000
+*  EXIT:   N/A                                                          10490000
+*                                                                       10500000
+****************************************************************        10510000
+                                                                        10520000
+INITDIR  DS    0H                                                       10530000
+         STM   R0,R15,REGSAVE2    SAVE CALLER'S REGISTERS               10540000
+                                                                        10550000
+         MVC   IPDNAME,IPJXNAME   PROJECT NAME                          10560000
+         MVC   IPDOWNER,RUSRNAME  PROJECT OWNER                         10570000
+         MVC   IPDRLSE,ICTRLSE    PRODUCT VERSION/RELEASE               10580000
+         MVC   IPDCREAT,CURRTOD   CURRENT TIME/DATE                     10590000
+         MVC   IPDCRUSR,RUSRNAME  CREATE  USER                          10600000
+         MVC   IPDCR$LU,RTSKNAME  CREATE   TASK                         10610000
+         MVC   IPDCHANG,CURRTOD   CHANGED TIME/DATE                     10620000
+         MVC   IPDCHUSR,RUSRNAME  CHANGER USER                          10630000
+         MVC   IPDCH$LU,RTSKNAME  CHANGER TASK                          10640000
+                                                                        10650000
+         LM    R0,R15,REGSAVE2    RESTORE CALLER'S REGISTERS            10660000
+         BR    R14                RETURN                                10670000
+                                                                        10680000
+         EJECT ,                                                        10690000
+****************************************************************        10700000
+*                                                                       10710000
+*  ROUTINE: PRJLOCK  - OBTAIN PROJECT LOCK                              10720000
+*                                                                       10730000
+*  DESCRIPTION:                                                         10740000
+*                                                                       10750000
+*    THIS ROUTINE WILL OBTAIN THE PROJECT CONTROL LOCK.                 10760000
+*                                                                       10770000
+*  ENTRY:  N/A                                                          10780000
+*                                                                       10790000
+*  EXIT:   R15 CONTAINS RETURN CODE AS FOLLOWS                          10800000
+*                                                                       10810000
+*              RC00 - LOCK ACQUIRED                                     10820000
+*              RC08 - LOCK ERROR                                        10830000
+*                                                                       10840000
+****************************************************************        10850000
+PRJLOCK  DS    0H                                                       10860000
+         STM   R0,R15,REGSAVE2    SAVE CALLER'S REGISTERS               10870000
+                                                                        10880000
+         $SER  OBTAIN,PROJ        OBTAIN PROJECT LOCK                   10890000
+         B     *+4(R15)           BRANCH ON RETURN CODE                 10900000
+         B     LOCK_OBT           LOCK SUCCESSFULLY OBTAINED            10910000
+         B     LOCK_HAV           LOCK ALREADY OWNED                    10920000
+         B     LOCK_RET           ERROR OBTAINING PROJECT LOCK          10930000
+                                                                        10940000
+LOCK_OBT DS    0H                                                       10950000
+         OI    CFLAGS,$LOCKED     INDICATE LOCK ACQUIRED                10960000
+                                                                        10970000
+LOCK_HAV DS    0H                                                       10980000
+         LA    R15,RC00           PROJECT CONTROL LOCKED                10990000
+                                                                        11000000
+LOCK_RET DS    0H                                                       11010000
+         LM    R0,R14,REGSAVE2    RESTORE CALLER'S REGISTERS            11020000
+         LTR   R15,R15            SET CONDITION CODE                    11030000
+         BR    R14                RETURN                                11040000
+                                                                        11050000
+         EJECT ,                                                        11060000
+****************************************************************        11070000
+*                                                                       11080000
+*  ROUTINE: PRJUNLK  - RELEASE PROJECT LOCK                             11090000
+*                                                                       11100000
+*  DESCRIPTION:                                                         11110000
+*                                                                       11120000
+*    THIS ROUTINE WILL RELEASE THE PROJECT CONTROL LOCK.                11130000
+*                                                                       11140000
+*  ENTRY:  N/A                                                          11150000
+*                                                                       11160000
+*  EXIT:   R15 CONTAINS RETURN CODE AS FOLLOWS                          11170000
+*                                                                       11180000
+*              RC00 - LOCK ACQUIRED                                     11190000
+*              RC08 - LOCK ERROR                                        11200000
+*                                                                       11210000
+****************************************************************        11220000
+PRJUNLK  DS    0H                                                       11230000
+         STM   R0,R15,REGSAVE2    SAVE CALLER'S REGISTERS               11240000
+                                                                        11250000
+         TM    CFLAGS,$LOCKED     LOCK OWNED                            11260000
+         BZ    UNLK_OK            NO, RETURN NORMAL                     11270000
+                                                                        11280000
+         $SER  RELEASE,PROJ       OBTAIN PROJECT LOCK                   11290000
+         LTR   R15,R15            TEST COMPLETION STATUS                11300000
+         BNZ   UNLK_RET           HANDLE ERROR                          11310000
+                                                                        11320000
+UNLK_OK  DS    0H                                                       11330000
+         NI    CFLAGS,FF-$LOCKED INDICATE LOCK RELEASED                 11340000
+         LA    R15,RC00           PROJECT CONTROL LOCKED                11350000
+                                                                        11360000
+UNLK_RET DS    0H                                                       11370000
+         LM    R0,R14,REGSAVE2    RESTORE CALLER'S REGISTERS            11380000
+         LTR   R15,R15            SET CONDITION CODE                    11390000
+         BR    R14                RETURN                                11400000
+                                                                        11410000
+         EJECT ,                                                        11420000
+****************************************************************        11430000
+*                                                                       11440000
+*  ROUTINE: PRJINIT  - ALLOCATE / INITIALIZE IPROJ CB                   11450000
+*                                                                       11460000
+*  DESCRIPTION:                                                         11470000
+*                                                                       11480000
+*     THIS ROUTINE WILL ALLOCATE AN IPROJ CB FROM THE ICVT              11490000
+*     GLOBAL STORAGE POOL.  THE NEW IPROJ WILL BE INITIALIZED           11500000
+*     WITH THE CURRENT REQUEST TIME/DATE AND ACCESS INFORMATION         11510000
+*     ALONG WITH AN INITIAL USE COUNT.                                  11520000
+*                                                                       11530000
+*  ENTRY:  N/A                                                          11540000
+*                                                                       11550000
+*  EXIT:   R15 CONTAINS RETURN CODE AS FOLLOWS                          11560000
+*                                                                       11570000
+*              RC00 - INITIALIZE SUCCESSFULLY                           11580000
+*                     R1 = ADDR OF IPROJ                                11590000
+*                                                                       11600000
+*              RC04 - INITIALIZE ERROR (STG)                            11610000
+*                                                                       11620000
+****************************************************************        11630000
+PRJINIT  DS    0H                                                       11640000
+         STM   R0,R15,REGSAVE2    SAVE CALLER'S REGISTERS               11650000
+                                                                        11660000
+         STGGET PRJLENG,QH=ICTSTG ALLOCATE IPROJ                        11670000
+         BNZ   INIT_ERR           INITIALIZATION ERROR                  11680000
+         LR    R7,R1              ADDRESS OF IPROJ                      11690000
+         USING IPROJ,R7           ADDRESSABILITY                        11700000
+                                                                        11710000
+         MVC   PRJID,=CL8'IPROJ'  CONTROL BLOCK ID                      11720000
+         MVC   PRJLEN,=A(PRJLENG) CONTROL BLOCK LENGTH                  11730000
+                                                                        11740000
+         MVC   PRJNAME,IPJXNAME   PROJECT NAME                          11750000
+         MVC   PRJACCES,IPJXACCS  ACCESS TYPE (WORKBENCH/RUNTIME)       11760000
+         MVC   PRJTOD,CURRTOD     CURRENT TIME/DATE (OPENED)            11770000
+         MVC   PRJUSE,=A(1)       INITIAL USE COUNT                     11780000
+                                                                        11790000
+         $LOCK INIT,LOCK=PRJMILK,NAME='IPROJ'                           11800000
+                                                                        11810000
+         MVC   PRJUSER,RUSRNAME   PROJECT OWNER                         11820000
+         MVC   PRJTERM,RTSKNAME   PROJECT OWNER TERM                    11830000
+         MVC   PRJCSVDB,ICTCSVDB  VDBCACHE() APPLIES TO PROJECT         11840000
+         MVC   PRJCSPLN,ICTCSPLN  PLANCACHE() APPLIES TO PROJECT        11850000
+                                                                        11860000
+         CLI   IPJXACCS,IPJXA_WB  WORKBENCH ACCESS?                     11870000
+         BE    INIT_OK            YES, INITIALIZATION DONE              11880000
+                                                                        11890000
+         MVC   PRJUSER,$NA        USERID N/A                            11900000
+         MVC   PRJTERM,$NA        TERM   N/A                            11910000
+                                                                        11920000
+INIT_OK  DS    0H                                                       11930000
+         LA    R15,RC00           INITIALIZATION COMPLETE               11940000
+         LA    R1,IPROJ           RETURN IPROJ ADDRESS                  11950000
+         B     INIT_RET           RETURN                                11960000
+                                                                        11970000
+INIT_ERR DS    0H                                                       11980000
+         LA    R15,RC04           STORAGE ERROR                         11990000
+                                                                        12000000
+INIT_RET DS    0H                                                       12010000
+         LM    R2,R14,REGSAVE2+8  RESTORE CALLER'S REGISTERS            12020000
+         LTR   R15,R15            SET CONDITION CODE                    12030000
+         BR    R14                RETURN                                12040000
+         DROP  R7                 IPROJ                                 12050000
+                                                                        12060000
+         EJECT ,                                                        12070000
+****************************************************************        12080000
+*                                                                       12090000
+*  ROUTINE: PRJFREE - RETURN IPROJ STORAGE                              12100000
+*                                                                       12110000
+*  DESCRIPTION:                                                         12120000
+*                                                                       12130000
+*     THIS ROUTINE WILL RETURN THE STORAGE ASSOCIATED WITH              12140000
+*     AN IPROJ CONTROL BLOCK TO THE GLOBAL STORAGE POOL.                12150000
+*                                                                       12160000
+*  ENTRY:  R1 - ADDRESS OF IPROJ BLOCK                                  12170000
+*                                                                       12180000
+*  EXIT:   R15 CONTAINS RETURN CODE AS FOLLOWS                          12190000
+*                                                                       12200000
+*              RC00 - FREE SUCCESSFUL                                   12210000
+*              RC08 - STORAGE RETURN ERROR                              12220000
+*                                                                       12230000
+****************************************************************        12240000
+PRJFREE  DS    0H                                                       12250000
+         STM   R0,R15,REGSAVE2    SAVE CALLER'S REGISTERS               12260000
+         LR    R7,R1              ADDR OF IPROJ                         12270000
+                                                                        12280000
+         STGRETN ADDR=(R7),LEN=PRJLENG,QH=ICTSTG                        12290000
+                                                                        12300000
+         LM    R0,R14,REGSAVE2    RESTORE CALLER'S REGISTERS            12310000
+         LTR   R15,R15            SET CONDITION CODE                    12320000
+         BR    R14                RETURN                                12330000
+                                                                        12340000
+         EJECT ,                                                        12350000
+****************************************************************        12360000
+*                                                                       12370000
+*  ROUTINE: PRJGET - LOCATE IPROJ CONTROL BLOCK                         12380000
+*                                                                       12390000
+*  DESCRIPTION:                                                         12400000
+*                                                                       12410000
+*    THIS ROUTINE WILL RETURN THE ADDRESS OF THE IPROJ CONTROL          12420000
+*    BLOCK ASSOCIATED WITH A PROJECT.  THE IPROJ CB IS ANCHORED         12430000
+*    IN THE USERDATA ASSOCIATED WITH ITS PROJECT ENTITY ENTRY.          12440000
+*                                                                       12450000
+*  ENTRY:  R1 - ADDRESS OF PROJECT NAME                                 12460000
+*                                                                       12470000
+*  EXIT:   R15 CONTAINS RETURN CODE AS FOLLOWS                          12480000
+*                                                                       12490000
+*              RC00 - IPROJ SUCCESSFULLY LOCATED                        12500000
+*                     R1 = ADDR OF IPROJ                                12510000
+*                                                                       12520000
+*              RC04 - IPROJ NOT FOUND                                   12530000
+*                                                                       12540000
+****************************************************************        12550000
+PRJGET   DS    0H                                                       12560000
+         STM   R0,R15,REGSAVE1    SAVE CALLER'S REGISTERS               12570000
+         LR    R3,R1              ADDR OF PROJECT NAME                  12580000
+                                                                        12590000
+         LA    R2,QNAME_WB        ASSUME WORKBENCH ACCESS               12600000
+         CLI   IPJXACCS,IPJXA_WB  WORKBENCH ACCESS                      12610000
+         BE    *+8                YES, CONTINUE                         12620000
+         LA    R2,QNAME_RT        RUNTIME ACCESS                        12630000
+                                                                        12640000
+         $ENTITY EXTR,            OBTAIN PROJECT ENTITY                +12650000
+               QNAME=((R2),L'QNAME_WB),                                +12660000
+               ENTITY=((R3),L'IPJXNAME),                               +12670000
+               USERDATA=ENTUDATA,                                      +12680000
+               ANCHOR=ICTIPRJ,                                         +12690000
+               MF=(E,$ENTPL)                                            12700000
+                                                                        12710000
+         BNZ   GET_NF             ENTITY NOT AVAILABLE                  12720000
+                                                                        12730000
+         L     R1,ENTUDATA        ADDRESS OF IPROJ                      12740000
+         LA    R15,RC00           NORMAL COMPLETION                     12750000
+         B     GET_RET            RETURN                                12760000
+                                                                        12770000
+GET_NF   DS    0H                                                       12780000
+         LA    R15,RC04           IPROJ NOT FOUND                       12790000
+                                                                        12800000
+GET_RET  DS    0H                                                       12810000
+         LM    R2,R14,REGSAVE1+8  RESTORE CALLER'S REGISTERS            12820000
+         LTR   R15,R15            SET CONDITION CODE                    12830000
+         BR    R14                RETURN                                12840000
+                                                                        12850000
+         EJECT ,                                                        12860000
+****************************************************************        12870000
+*                                                                       12880000
+*  ROUTINE: PRJADD - ADD PROJECT ENTITY                                 12890000
+*                                                                       12900000
+*  DESCRIPTION:                                                         12910000
+*                                                                       12920000
+*    THIS ROUTINE WILL ADD A ENTITY ENTRY TO THE PROJECT                12930000
+*    ENTITY STRUCTURE.  THE FIRST WORD OF THE USER DATA                 12940000
+*    CONTAINS THE ADDRESS OF THE IPROJ CONTROL BLOCK.                   12950000
+*                                                                       12960000
+*  ENTRY:  R1 - ADDRESS OF IPROJ BLOCK                                  12970000
+*                                                                       12980000
+*  EXIT:   R15 CONTAINS RETURN CODE AS FOLLOWS                          12990000
+*                                                                       13000000
+*              RC00 - PROJECT ENTITY SUCCESSFULLY ADDED                 13010000
+*              RCXX - PROJECT ENTITY ADD FAILED                         13020000
+*                     (RETURN CODE FROM $ENTITY)                        13030000
+*                                                                       13040000
+****************************************************************        13050000
+PRJADD   DS    0H                                                       13060000
+         STM   R0,R15,REGSAVE1    SAVE CALLER'S REGISTERS               13070000
+         LR    R7,R1              ADDR OF IPROJ                         13080000
+         USING IPROJ,R7           ADDRESSABILITY                        13090000
+                                                                        13100000
+         XC    ENTUDATA,ENTUDATA  CLEAR USERDATE AREA                   13110000
+         ST    R7,ENTUDATA        SAVE ADDR OF IPROJ                    13120000
+                                                                        13130000
+         LA    R2,QNAME_WB        ASSUME WORKBENCH ACCESS               13140000
+         LA    R4,ICTPJ#WB        ADDRESS OF WORKBENCH PRJ COUNT        13150000
+         CLI   PRJACCES,PRJAC_WB  WORKBENCH ACCESS                      13160000
+         BE    ADD_ENTY           YES, CONTINUE                         13170000
+         LA    R2,QNAME_RT        RUNTIME ACCESS                        13180000
+         LA    R4,ICTPJ#RT        ADDRESS OF RUNTIME   PRJ COUNT        13190000
+                                                                        13200000
+ADD_ENTY DS    0H                                                       13210000
+         $ENTITY ADD,             ADD PROJECT ENTITY                   +13220000
+               QNAME=((R2),L'QNAME_WB),                                +13230000
+               ENTITY=PRJNAME,                                         +13240000
+               TOKEN=PRJENTKN,                                         +13250000
+               USERDATA=ENTUDATA,                                      +13260000
+               ANCHOR=ICTIPRJ,                                         +13270000
+               MF=(E,$ENTPL)                                            13280000
+                                                                        13290000
+         LTR   R15,R15            ENTITY ADD SUCCESSFUL?                13300000
+         BNZ   ADD_EXIT           NO,RETURN                             13310000
+                                                                        13320000
+         L     R1,0(,R4)          GET CURRENT PROJECT COUNT             13330000
+         LA    R1,1(,R1)          INCREMENT PROJECT COUNT               13340000
+         ST    R1,0(,R4)          SAVE NEW PROJECT COUNT                13350000
+                                                                        13360000
+ADD_EXIT DS    0H                                                       13370000
+         LM    R0,R14,REGSAVE1    RESTORE CALLER'S REGISTERS            13380000
+         LTR   R15,R15            SET CONDITION CODE                    13390000
+         BR    R14                RETURN                                13400000
+         DROP  R7                 IPROJ                                 13410000
+                                                                        13420000
+         EJECT ,                                                        13430000
+****************************************************************        13440000
+*                                                                       13450000
+*  ROUTINE: PRJDEL - DELETE PROJECT ENTITY                              13460000
+*                                                                       13470000
+*  DESCRIPTION:                                                         13480000
+*                                                                       13490000
+*    THIS ROUTINE WILL DELETE AN ENTITY ENTRY FROM THE PROJECT          13500000
+*    ENTITY STRUCTURE.                                                  13510000
+*                                                                       13520000
+*  ENTRY:  R1 - ADDRESS OF IPROJ BLOCK                                  13530000
+*                                                                       13540000
+*  EXIT:   R15 CONTAINS RETURN CODE AS FOLLOWS                          13550000
+*                                                                       13560000
+*              RC00 - PROJECT ENTITY SUCCESSFULLY DELETED               13570000
+*              RCXX - PROJECT ENTITY DELETE FAILED                      13580000
+*                     (RETURN CODE FROM $ENTITY)                        13590000
+*                                                                       13600000
+****************************************************************        13610000
+PRJDEL   DS    0H                                                       13620000
+         STM   R0,R15,REGSAVE1    SAVE CALLER'S REGISTERS               13630000
+         LR    R7,R1              ADDR OF IPROJ                         13640000
+         USING IPROJ,R7           ADDRESSABILITY                        13650000
+                                                                        13660000
+         LA    R2,QNAME_WB        ASSUME WORKBENCH ACCESS               13670000
+         LA    R4,ICTPJ#WB        ADDRESS OF WORKBENCH PRJ COUNT        13680000
+         CLI   PRJACCES,PRJAC_WB  WORKBENCH ACCESS                      13690000
+         BE    DEL_ENTY           YES, CONTINUE                         13700000
+         LA    R2,QNAME_RT        RUNTIME ACCESS                        13710000
+         LA    R4,ICTPJ#RT        ADDRESS OF runtime   PRJ COUNT        13720000
+                                                                        13730000
+DEL_ENTY DS    0H                                                       13740000
+         $ENTITY DEL,             DELETE PROJECT ENTITY                +13750000
+               QNAME=((R2),L'QNAME_WB),                                +13760000
+               ENTITY=PRJNAME,                                         +13770000
+               ANCHOR=ICTIPRJ,                                         +13780000
+               MF=(E,$ENTPL)                                            13790000
+                                                                        13800000
+         LTR   R15,R15            ENTITY DELETE SUCESSFUL?              13810000
+         BNZ   DEL_EXIT           NO, RETURN                            13820000
+                                                                        13830000
+         L     R1,0(,R4)          GET CURRENT PROJECT COUNT             13840000
+         BCTR  R1,0               DECREMENT COUNT                       13850000
+         ST    R1,0(,R4)          SAVE NEW PROJECT COUNT                13860000
+                                                                        13870000
+DEL_EXIT DS    0H                                                       13880000
+         LM    R0,R14,REGSAVE1    RESTORE CALLER'S REGISTERS            13890000
+         LTR   R15,R15            SET CONDITION CODE                    13900000
+         BR    R14                RETURN                                13910000
+         DROP  R7                 IPROJ                                 13920000
+                                                                        13930000
+         EJECT ,                                                        13940000
+****************************************************************        13950000
+*                                                                       13960000
+*  ROUTINE: SAVESYSP - SAVE SYSCATLG PROJECT                            13970000
+*                                                                       13980000
+*  DESCRIPTION:                                                         13990000
+*                                                                       14000000
+*    THIS ROUTINE WILL SAVE THE CURRENT SYSTEM CATALOG PROJECT          14010000
+*                                                                       14020000
+*  ENTRY:  N/A                                                          14030000
+*                                                                       14040000
+*  EXIT:   R0/R15 CONTAIN RETURN/REASON CODES FROM $PROJECT REQ         14050000
+*                                                                       14060000
+****************************************************************        14070000
+SAVESYSP DS    0H                                                       14080000
+         STM   R0,R15,REGSAVE2    SAVE CALLER'S REGISTERS               14090000
+         MVC   COMPNAME,$PROJECT  SET COMPONENT NAME                    14100000
+                                                                        14110000
+         $PROJECT SAVE,           SAVE SYSTEM PROJECT                  +14120000
+               NAME='SYSCATLG',                                        +14130000
+               TOKEN=*ICTSYSP@,                                        +14140000
+               USER='INFOSESS',                                        +14150000
+               SOURCE=TSKNAME,                                         +14160000
+               WORKA=WRK2K,                                            +14170000
+               ERRAREA=PROJERR,                                        +14180000
+               MF=(E,$PRJPL)                                            14190000
+                                                                        14200000
+         LM    R1,R14,REGSAVE2+4  RESTORE CALLER'S REGISTERS            14210000
+         LTR   R15,R15            SET CONDITION CODE                    14220000
+         BR    R14                RETURN                                14230000
+                                                                        14240000
+         EJECT ,                                                        14250000
+****************************************************************        14260000
+*                                                                       14270000
+*  ROUTINE: BLDMSG - BUILD RETURN MESSAGE                               14280000
+*                                                                       14290000
+*  DESCRIPTION:                                                         14300000
+*                                                                       14310000
+*    THIS ROUTINE WILL LOCATE THE APPROPRIATE MSGID IN THE              14320000
+*    MSG TABLE BASED UPON RETURN/REASON CODE AND BUILD MESSAGE          14330000
+*    FOR RETURN.                                                        14340000
+*                                                                       14350000
+*                                                                       14360000
+*  ENTRY:  PROCRET AND PROCRSN CONTAIN RETURN AND REASON                14370000
+*          CODES ASSOCIATED WITH FAILING COMPONENT (COMPNAME).          14380000
+*                                                                       14390000
+*  EXIT:   R1 ADDRESS OF MESSAGE BUFFER                                 14400000
+*          R0 LENGTH  OF MESSAGE BUFFER                                 14410000
+*                                                                       14420000
+****************************************************************        14430000
+BLDMSG   DS    0H                                                       14440000
+         STM   R0,R15,REGSAVE1    SAVE CALLER'S REGISTERS               14450000
+                                                                        14460000
+         LA    R4,MSGTBL          ADDR OF MESSAGE TABLE                 14470000
+                                                                        14480000
+BMSGCMP  DS    0H                                                       14490000
+         L     R1,0(,R4)          ADDR OF COMPONENT NAME                14500000
+         CLC   COMPNAME,0(R1)     COMPONENT REQUESTED?                  14510000
+         BE    BMSGLKUP           YES, SEARCH FOR MESSAGE               14520000
+         ICM   R4,15,4(R4)        ADDR OF NEXT COMPONENT                14530000
+         BZ    BMSGNONE           NONE, RETURN                          14540000
+         B     BMSGCMP            CHECK NEXT COMPONENT                  14550000
+                                                                        14560000
+BMSGLKUP DS    0H                                                       14570000
+         L     R3,8(R4)           COUNT OF MESSAGE IN COMPONENT         14580000
+         LA    R4,12(R4)          ADDR OF FIRST MESSAGE                 14590000
+                                                                        14600000
+BMSGSRCH DS    0H                                                       14610000
+         L     R1,0(,R4)          RETURN CODE IN MSGTBL                 14620000
+         C     R1,PROCRET         RETURN CODE MATCH?                    14630000
+         BNE   BMSGNEXT           NO, CHECK NEXT MESSAGE                14640000
+         ICM   R1,15,4(R4)        REASON CODE SPECIFIED IN TABLE        14650000
+         BZ    BMSGBLD            NO, GO BUILD MESSAGE TEXT             14660000
+         C     R1,PROCRSN         REASON CODE MATCH?                    14670000
+         BE    BMSGBLD            YES, GO BUILD MESSAGE TEXT            14680000
+                                                                        14690000
+BMSGNEXT DS    0H                                                       14700000
+         LA    R4,12(,R4)         ADDRESS OF NEXT ENTRY                 14710000
+         BCT   R3,BMSGSRCH        CHECK NEXT MESSAGE                    14720000
+         B     BMSGNONE           NO MESSAGE RETURNED                   14730000
+                                                                        14740000
+*---------------------------------------------------------------        14750000
+* BUILD MESSAGE BUFFER                                                  14760000
+*---------------------------------------------------------------        14770000
+BMSGBLD  DS    0H                                                       14780000
+         LA    R3,WRK2K           ADDRESS OF MESSAGE RETURN AREA        14790000
+         USING $MSGBUF,R3         ADDRESSABILITY                        14800000
+         XC    $MSGBUF($MSBPFXL),$MSGBUF                                14810000
+         L     R2,8(,R4)          GET MESSAGE ID                        14820000
+                                                                        14830000
+         $MSG  (R2),              BUILD MESSAGE TEXT IN BUFFER         +14840000
+               FIELDS=(IPJXNAME),                                      +14850000
+               BUFR=WRK2K,                                             +14860000
+               BUFL=L'WRK2K,                                           +14870000
+               MSGID=NO,                                               +14880000
+               DEST=$BUFFER                                             14890000
+                                                                        14900000
+         LH    R0,$MSBLEN         LENGTH  OF MESSAGE                    14910000
+         LA    R1,$MSBTEXT        ADDRESS OF MESSAGE TEXT               14920000
+         B     BMSGEXIT           RETURN                                14930000
+         DROP  R3                 $MSGBUF                               14940000
+                                                                        14950000
+*---------------------------------------------------------------        14960000
+* BUILD MESSAGE RETURN                                                  14970000
+*---------------------------------------------------------------        14980000
+BMSGNONE DS    0H                                                       14990000
+         LA    R1,0               NO MESSAGE TO RETURN                  15000000
+         LA    R1,0                                                     15010000
+                                                                        15020000
+BMSGEXIT DS    0H                                                       15030000
+         LM    R2,R14,REGSAVE1+8  RESTORE CALLER'S REGISTERS            15040000
+         BR    R14                AND RETURN                            15050000
+                                                                        15060000
+         EJECT ,                                                        15070000
+*********************************************************************** 15080000
+*                                                                       15090000
+* ROUTINE: PUSHCAN - PUSH OS CANCELABLE STATE (MARK NON-CANCELABLE)     15100000
+*                                                                       15110000
+* DESCRIPTION:                                                          15120000
+*   IF APF AUTHORIZED AND CURRENTLY MARKED CANCELABLE THEN CHANGE TO    15130000
+*   NON-CANCELABLE.                                                     15140000
+*                                                                       15150000
+* ENTRY:                                                                15160000
+*   N/A                                                                 15170000
+*                                                                       15180000
+* EXIT:                                                                 15190000
+*   N/A                                                                 15200000
+*                                                                       15210000
+*********************************************************************** 15220000
+PUSHCAN  DS    0H                                                       15230000
+         PUSH  USING                                                    15240000
+         STM   R0,R15,REGSAVE2    SAVE CALLER'S REGISTERS               15250000
+                                                                        15260000
+         TM    ICTSTAT2,ICT2$APF  APF AUTHORIZED ?                      15270000
+         BZ    PUCEXIT              NO, CANNOT MARK NON-CANCELABLE      15280000
+                                                                        15290000
+         L     R3,ICTASCB         ASCB                                  15300000
+         USING ASCB,R3            R3 --> ASCB                           15310000
+         L     R3,ASCBCSCB        CSCB                                  15320000
+         USING CHAIN,R3           R3 --> CSCB                           15330000
+         TM    CHACT,CHCL         CAN-ABLE ?                            15340000
+         BZ    PUCEXIT              NO, STILL NOT                       15350000
+                                                                        15360000
+         MODESET EXTKEY=ZERO,SAVEKEY=(2)                                15370000
+         NI    CHACT,FF-CHCL      STICK AROUND                          15380000
+         MODESET KEYADDR=(2)                                            15390000
+         OI    CFLAGS,$NOCANCEL   REMEMBER CHANGED TO NON-CANCELABLE    15400000
+                                                                        15410000
+PUCEXIT  DS    0H                                                       15420000
+         LM    R0,R15,REGSAVE2    RESTORE CALLER'S REGISTERS            15430000
+         BR    R14                RETURN                                15440000
+         DROP  R3                                                       15450000
+         POP   USING                                                    15460000
+                                                                        15470000
+         EJECT ,                                                        15480000
+*********************************************************************** 15490000
+*                                                                       15500000
+* ROUTINE: POPCAN - POP OS CANCELABLE STATE (RESTORE PRIOR              15510000
+*   CANCELABILITY STATE)                                                15520000
+*                                                                       15530000
+* DESCRIPTION:                                                          15540000
+*   IF CHANGED TO NON-CANCELABLE EARLIER THEN CHANGE BACK TO CANCELABLE 15550000
+*                                                                       15560000
+* ENTRY:                                                                15570000
+*   N/A                                                                 15580000
+*                                                                       15590000
+* EXIT:                                                                 15600000
+*   N/A                                                                 15610000
+*                                                                       15620000
+*********************************************************************** 15630000
+POPCAN   DS    0H                                                       15640000
+         PUSH  USING                                                    15650000
+         STM   R0,R15,REGSAVE2    PROTECT CALLER'S REGISTERS            15660000
+                                                                        15670000
+         TM    CFLAGS,$NOCANCEL   CHANGED TO NON-CANCELABLE ?           15680000
+         BZ    POCEXIT              NO, DONE                            15690000
+                                                                        15700000
+         L     R3,ICTASCB         ASCB                                  15710000
+         USING ASCB,R3            R3 --> ASCB                           15720000
+         L     R3,ASCBCSCB        CSCB                                  15730000
+         USING CHAIN,R3           R3 --> CSCB                           15740000
+         MODESET EXTKEY=ZERO,SAVEKEY=(2)                                15750000
+         OI    CHACT,CHCL         CANCELABLE                            15760000
+         MODESET KEYADDR=(2)                                            15770000
+         NI    CFLAGS,FF-$NOCANCEL RESET                                15780000
+                                                                        15790000
+POCEXIT  DS    0H                                                       15800000
+         LM    R0,R15,REGSAVE2    RESTORE CALLER'S REGISTERS            15810000
+         BR    R14                RETURN TO CALLER                      15820000
+         DROP  R3                                                       15830000
+         POP   USING                                                    15840000
+                                                                        15850000
+         EJECT ,                                                        15860000
+*********************************************************************** 15870000
+*                                                                       15880000
+*********************************************************************** 15890000
+RECOVRTN DS    0H                                                       15900000
+         PUSH  USING                                                    15910000
+         STM   R14,R12,12(R13)    SAVE RECOVRTN REGISTERS               15920000
+         LR    R4,R1                                                    15930000
+X        USING ##WORKA,R4         R4 --> ##WORKA                        15940000
+         TM    X.CFLAGS,$NOCANCEL CHANGED TO NON-CANCELABLE ?           15950000
+         BZ    REC_RET              NO, DONE                            15960000
+                                                                        15970000
+         L     R3,ICTASCB         ASCB                                  15980000
+         USING ASCB,R3            R3 --> ASCB                           15990000
+         L     R3,ASCBCSCB        CSCB                                  16000000
+         USING CHAIN,R3           R3 --> CSCB                           16010000
+         MODESET EXTKEY=ZERO,SAVEKEY=(2)                                16020000
+         OI    CHACT,CHCL         CANCELABLE                            16030000
+         MODESET KEYADDR=(2)                                            16040000
+         NI    X.CFLAGS,FF-$NOCANCEL RESET                              16050000
+REC_RET  DS    0H                                                       16060000
+         SR    R15,R15            NO RETRY. PERCOLATE                   16070000
+         L     R14,12(,R13)       RESTORE RETURN ADDRESS                16080000
+         LM    R0,R12,20(R13)     RESTORE REGISTERS                     16090000
+         BR    R14                RETURN                                16100000
+         DROP  R3                                                       16110000
+         DROP  X                                                        16120000
+         POP   USING                                                    16130000
+                                                                        16140000
+         EJECT ,                                                        16150000
+*---------------------------------------------------------------        16160000
+*  LITERALS, CONSTANTS, AND DSECTS                                      16170000
+*---------------------------------------------------------------        16180000
+                                                                        16190000
+BLANKS   DC    CL8' '             HANDY BLANKS                          16200000
+SYSCATLG DC    CL8'SYSCATLG'      CATALG SPACE NAME                     16210000
+$NA      DC    CL8'N/A'           NOT AVAILABLE                         16220000
+QNAME_RT DC    CL8'PRJ_RTQ'       RUNTIME   QUEUE NAME                  16230000
+QNAME_WB DC    CL8'PRJ_WBQ'       WORKBENCH QUEUE NAME                  16240000
+                                                                        16250000
+         LTORG ,                  LITERAL POOL                          16260000
+                                                                        16270000
+*---------------------------------------------------------------        16280000
+*  RETURN/REASON CODE / MESSAGE ID LOOKUP TABLE                         16290000
+*---------------------------------------------------------------        16300000
+$MAINLNE DC    CL8'$MAINLNE'      MAINLINE COMPONENT                    16310000
+$PROJECT DC    CL8'$PROJECT'      $PROJECT COMPONENT                    16320000
+$PRJTBLS DC    CL8'$PRJTBLS'      $PRJTBLS COMPONENT                    16330000
+                                                                        16340000
+MSGTBL   DS    0F                                                       16350000
+@MAINLNE DC    A($MAINLNE,@PROJECT,@MAINCNT)                            16360000
+         DC    A(RC04,RSN04,201)  CONFIRM PROJECT REPLACE               16370000
+         DC    A(RC04,RSN08,202)  CONFIRM PROJECT DELETION              16380000
+         DC    A(RC08,RSN04,203)  PROJECT NOT CURRENTLY OPEN            16390000
+         DC    A(RC08,RSN08,204)  PROJECT CURRENT IN USE                16400000
+         DC    A(RC12,RSN04,205)  PROJ LOCK REQUEST FAILURE             16410000
+         DC    A(RC12,RSN04,206)  STORAGE ALLOCATION ERROR              16420000
+         DC    A(RC12,RSN12,207)  ENTITY MANAGER FAILURE                16430000
+@MAINCNT EQU   (*-@MAINLNE)/12                                          16440000
+                                                                        16450000
+@PROJECT DC    A($PROJECT,@PRJTBLS,@PROJCNT)                            16460000
+         DC    A(RC08,RSN04,221)  PROJECT NOT FOUND                     16470000
+         DC    A(RC08,RSN08,222)  PROJECT SPACE CREATE FAILED           16480000
+         DC    A(RC08,RSN12,223)  PROJECT SPACE IMPORT FAILED           16490000
+         DC    A(RC08,RSN16,224)  PROJECT SPACE DESTROY FAILED          16500000
+         DC    A(RC08,RSN20,225)  PROJECT SPACE EXPORT FAILED           16510000
+         DC    A(RC08,RSN24,226)  PROJECT SPACE CONFIG FAILED           16520000
+         DC    A(RC12,RSN00,227)  DATABASE REQUEST FAILURE              16530000
+@PROJCNT EQU   (*-@PROJECT)/12                                          16540000
+                                                                        16550000
+@PRJTBLS DC    A($PRJTBLS,0,@PRJTCNT)                                   16560000
+         DC    A(RC08,RSN04,241)  PROJECT NOT FOUND                     16570000
+         DC    A(RC08,RSN08,242)  TABLE CREATE FAILED                   16580000
+         DC    A(RC08,RSN12,243)  TABLE DROP FAILED                     16590000
+         DC    A(RC08,RSN16,244)  TABLE OPEN FAILED                     16600000
+         DC    A(RC08,RSN20,245)  TABLE CLOSE FAILED                    16610000
+         DC    A(RC08,RSN24,246)  ADD ROW TO PROJECT TABLE FAILED       16620000
+         DC    A(RC08,RSN28,247)  DELETE ROW FROM PROJECT TABLE FAILED  16630000
+         DC    A(RC08,RSN32,248)  MODIFY ROW IN PROJECT TABLE FAILED    16640000
+         DC    A(RC12,RSN04,249)  INVALID TABLE REQUESTED               16650000
+@PRJTCNT EQU   (*-@PRJTBLS)/12                                          16660000
+                                                                        16670000
+         EJECT ,                                                        16680000
+         PRINT NOGEN                                                    16690000
+         ICVT  ,                                                        16700000
+         ITASK ,                                                        16710000
+         IUSER ,                                                        16720000
+         IPROJ ,                                                        16730000
+         $TOKEN ,                                                       16740000
+         IEECHAIN                                                       16750000
+         IHAASCB                                                        16760000
+         PRINT GEN                                                      16770000
+                                                                        16780000
+         END   ,                                                        16790000

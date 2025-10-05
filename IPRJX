@@ -1,0 +1,1192 @@
+IPRJX    TITLE '- PROJECT SERVICES COMMON INTERFACE'                    00010000
+***************************************************************         00020000
+*                                                                       00030000
+* ROUTINE: IPRJX - Project services common interface                    00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This routine provides access to the project task to OPEN,          00080000
+*    CLOSE, CREATE, DELETE and SAVE projects.  Projects are             00090000
+*    associated with either workbench users or runtime users.           00100000
+*    Workbench projects are single user entities and require            00110000
+*    no serialization in this interface.  Runtime users are             00120000
+*    multiuser entities, inspected and modified only under              00130000
+*    the PROJ lock.                                                     00140000
+*                                                                       00150000
+*    The input to this routine is the XPRJREQ parameter block           00160000
+*    which includes the standard @XH header section containing          00170000
+*    the project (sub)function code.  Completion status is              00180000
+*    returned in an information area provided by the caller and         00190000
+*    mapped by PRJINFO.  Return and reason codes summarize the          00200000
+*    more detailed information contained in that return area.           00210000
+*                                                                       00220000
+*    Project OPEN, CLOSE, and NEW functions involve catalog             00230000
+*    processing.  All project functions drain into a $PRJREQ            00240000
+*    macro, often incurring a task switch to and from the               00250000
+*    database task.                                                     00260000
+*                                                                       00270000
+*                                                                       00280000
+* FUTURES:                                                              00290000
+*                                                                       00300000
+*    Accept stop and cancel notifications from $PRJREQ                  00310000
+*                                                                       00320000
+*    TBALTER at open time                                               00330000
+*                                                                       00340000
+*                                                                       00350000
+* ON ENTRY:                                                             00360000
+*                                                                       00370000
+*    R1  contains the address of a parameter list mapped by             00380000
+*        the XPRJREQ macro.  (transaction-format plist)                 00390000
+*                                                                       00400000
+*                                                                       00410000
+* ON EXIT:                                                              00420000
+*                                                                       00430000
+*    The PRJINFO area passed to this routine via XPRJREQ.XPJRETA        00440000
+*    contains return, reason, and info codes for all major              00450000
+*    components visited during project processing.                      00460000
+*                                                                       00470000
+*                                                                       00480000
+*    R15 contains one of the following return codes which are           00490000
+*        generally accompanied by a reason code in R0.                  00500000
+*                                                                       00510000
+*        RC00 - project request complete                                00520000
+*                                                                       00530000
+*        RC04 - ref $PRJREQ                                             00540000
+*                                                                       00550000
+*        RC08 - ref $PRJREQ                                             00560000
+*                                                                       00570000
+*        RC12 - ref $PRJREQ                                             00580000
+*                                                                       00590000
+*        RC16 - Table services failure encountered while                00600000
+*               processing a catalog table. R0 contains the             00610000
+*               table service return code.                              00620000
+*                                                                       00630000
+*        RC20 - Programming or environmental error. R0 contains         00640000
+*               one of the following reason codes:                      00650000
+*                                                                       00660000
+*               RSN04 - invalid request (programming error)             00670000
+*                                                                       00680000
+*               RSN08 - run-time project has been marked unusable       00690000
+*                                                                       00700000
+*               RSN12 - IPROJ/IUSER control block error. A NEW          00710000
+*                       or OPEN request was issued, but an IPROJ        00720000
+*                       is already active.  Similarly, a SAVE,          00730000
+*                       SAVE AS, or CLOSE was issued, but no            00740000
+*                       IPROJ is active.                                00750000
+*                                                                       00760000
+*               RSN16 - The project name specified in a SAVE,           00770000
+*                       SAVE AS, or CLOSE request does not match        00780000
+*                       the name of the currently active project.       00790000
+*                                                                       00800000
+*        RC24  - Storage failure. R0 contains the return code           00810000
+*                provided by the storage manager.                       00820000
+*                                                                       00830000
+*        RC28  - Project access security violation. R0 contains         00840000
+*                the return code provided by $SAF.                      00850000
+*                                                                       00860000
+***************************************************************         00870000
+                                                                        00880000
+         EJECT                                                          00890000
+***************************************************************         00900000
+*                                                                       00910000
+* MAINTENANCE:                                                          00920000
+*                                                                       00930000
+*    1994     R. Turgeon                                                00940000
+*             Initial version                                           00950000
+*                                                                       00960000
+*    01/25/95 R. Turgeon     virtual catalog support                    00970000
+*             Replaced inline project table definitions with            00980000
+*             SPACETYP interface.                                       00990000
+*                                                                       01000000
+*    08/31/95 R. Turgeon                                                01010000
+*             Implement VDB table definition cache.  Ensure             01020000
+*             that VDB tables and reference entries are deleted         01030000
+*             during project close.                                     01040000
+*                                                                       01050000
+*    11/07/95 R. Colmone                                                01060000
+*             Added support to create newly added catalog tables        01070000
+*             to existing projects.                                     01080000
+*                                                                       01090000
+*    03/08/96 R. Colmone       PAR# 251261                              01100000
+*             Corrected errant CLOSE logic to clear PRJBLDF1            01110000
+*                                                                       01120000
+***************************************************************         01130000
+                                                                        01140000
+         EJECT                                                          01150000
+WORKAREA #WORK ,                                                        01160000
+                                                                        01170000
+CFLAGS   DS    X                  MISC FLAGS                            01180000
+CPROJLK  EQU   X'80'                 PROJ LOCK ACQUIRED                 01190000
+CCATOPEN EQU   X'40'                 CAT OPEN/CREATE BY THIS REQUEST    01200000
+                                                                        01210000
+ERRFLAG  DS    X                  ERROR IDENTIFICATION FLAGS            01220000
+ERRPRJ   EQU   X'80'                 $PRJREQ ERROR                      01230000
+ERRTBSV  EQU   X'40'                 TABLE SERVICES ERROR               01240000
+ERRENV   EQU   X'20'                 ENVIRONMENTAL ERROR                01250000
+ERRSTG   EQU   X'10'                 STORAGE FAILURE                    01260000
+ERRINVRQ EQU   X'08'                 INVALID REQUEST                    01270000
+ERRSAF   EQU   X'04'                 SECURITY VIOLATION                 01280000
+                                                                        01290000
+RESERVE1 DS    XL2                RESERVED                              01300000
+FUNCTION DS    CL8                PROJECT FUNCTION                      01310000
+TBSERVIS DS    CL8                TABLE SERVICE NAME                    01320000
+TABLENAM DS    CL16               CURRENT TABLE                         01330000
+PROJNAME DS    CL8,CL8            PROJECT NAME                          01340000
+PROJONAM DS    CL8,CL8            OLD PROJECT NAME                      01350000
+CONFIRM  DS    F                  CONFIRMATION OPTION IN @ADDR FORMAT   01360000
+REQTYPE  DS    F                  WORKBENCH / RUNTIME IN @ADDR FORMAT   01370000
+                                                                        01380000
+STATREGS DS    3F                 R15-R1 RETENTION                      01390000
+                                                                        01400000
+CTABLE   DS    0A,0F,0F           DEFINITIONS OF PROJECT SPACE CATALOG  01410000
+CTABLEA  DS    A                     CATALOG SCTDEF LIST ORIGIN         01420000
+CTABLEN  DS    F                     CATALOG SCTDEF ENTRY COUNT         01430000
+CTABLEL  DS    F                     CATALOG SCTDEF ENTRY LENGTH        01440000
+                                                                        01450000
+REQRET   DS    0F                 COMPOSITE REQUEST COMPLETION STATUS   01460000
+REQRC    DS    F                     RETURN CODE                        01470000
+REQRSN   DS    F                     REASON CODE                        01480000
+REQINFO  DS    F                     INFO CODE IF APPLICABLE            01490000
+                                                                        01500000
+REGSAVE  DS    16F                LOCAL REGISTER SAVEAREA               01510000
+WK512    DS    XL512              GENERAL PURPOSE WORKAREA              01520000
+INFORET  DS    XL(IPJRLENG)       $PRJREQ INFO RETURN AREA              01530000
+                                                                        01540000
+@SAF_MFL $SAF  MF=L                                                     01550000
+                                                                        01560000
+         #ENDWORK ,                                                     01570000
+                                                                        01580000
+         EJECT                                                          01590000
+         $RESMGR DSECT=YES        RESOURCE MANAGER PLIST                01600000
+                                                                        01610000
+         EJECT                                                          01620000
+         $SAF  DSECT=YES          SECURITY SYSTEM INTERFACE             01630000
+                                                                        01640000
+         EJECT                                                          01650000
+         RUMSGS ,                 MSG RETURN AREA - RU FORMAT           01660000
+                                                                        01670000
+         EJECT                                                          01680000
+         SPACETYP DSECT=YES       OBJECT SPACE DEFINITION BLOCK         01690000
+                                                                        01700000
+         EJECT                                                          01710000
+         SCTDEF DSECT=YES         SPACE COMPONENT TABLE / ENTRIES       01720000
+                                                                        01730000
+         EJECT                                                          01740000
+         TBSERVIS CREATE,OPEN,DELETE,CLOSE,PRINT=NOGEN                  01750000
+                                                                        01760000
+         EJECT                                                          01770000
+         XPRJREQ ,                PROJECT SERVICE TRANSACTION           01780000
+                                                                        01790000
+         EJECT                                                          01800000
+         IUSER ,                  USER CONTROL BLOCK                    01810000
+                                                                        01820000
+         EJECT                                                          01830000
+         IPROJ ,                  PROJECT CONTROL BLOCK                 01840000
+                                                                        01850000
+         EJECT                                                          01860000
+         $TOKEN ,                 SPACE TOKEN                           01870000
+                                                                        01880000
+         EJECT                                                          01890000
+         CATINFO ,                CATALOG COMPONENT DEF MODULE HDR      01900000
+                                                                        01910000
+         EJECT                                                          01920000
+         PRJINFO ,                PROJECT INFORMATION RETURN AREA       01930000
+                                                                        01940000
+         EJECT                                                          01950000
+         $PRJREQ DSECT=YES        PROJECT REQUEST COMMUNICATION AREA    01960000
+                                                                        01970000
+         EJECT                                                          01980000
+         ABCODES ,                                                      01990000
+                                                                        02000000
+         EQUS  ,                                                        02010000
+                                                                        02020000
+         $MSGDFT PREFIX=ICTPID,COMPID='PRJ',TABLE=*#MSGS,              X02030000
+               CONID=*ICTCONID,CONNAME=ICTCONNM,                       X02040000
+               PRINT=NOGEN,MF=(E,WK512)                                 02050000
+                                                                        02060000
+         EJECT                                                          02070000
+IPRJX    #ENTER PREG=R8                                                 02080000
+                                                                        02090000
+         USING ITASK,R10                                                02100000
+                                                                        02110000
+         EJECT                                                          02120000
+***************************************************************         02130000
+*                                                                       02140000
+*   analyze request - entry validation                                  02150000
+*                                                                       02160000
+***************************************************************         02170000
+                                                                        02180000
+         USING XPRJREQ,R8         PROJECT FUNCTIONS                     02190000
+         OC    XPJNAME,=CL16' '   UPPER CASE PROJECT NAME               02200000
+                                                                        02210000
+         IC    R0,XPJOPTS         OPTION FLAGS                          02220000
+         STC   R0,CONFIRM         AMONG WHICH IS 'CONFIRMED'            02230000
+         NI    CONFIRM,XPJOCNFM   ISOLATE OPTION IN TRUE/FALSE FORM     02240000
+                                                                        02250000
+         LA    R0,IPJXA_RT        ASSUME RUN-TIME REQUEST               02260000
+         CLI   XPJTYPE,XPJTRT     CORRECT?                              02270000
+         BE    *+8                SKIP IF SO                            02280000
+         LA    R0,IPJXA_WB        WORKBENCH REQUEST                     02290000
+         ST    R0,REQTYPE         GENERIC ACCESS IDENTIFICATION         02300000
+                                                                        02310000
+         ICM   R0,15,XPJRETA      COMPLETION STATUS RETURN AREA         02320000
+         BZ    ERR_REQ            REQUIRED                              02330000
+                                                                        02340000
+         L     R9,TSKPCBC         OUR PCB                               02350000
+         USING IPCB,R9            IPCB  ADDRESSABILITY                  02360000
+         L     R6,PCBUSER         USER BLOCK                            02370000
+         USING IUSER,R6           IUSER ADDRESSABILITY                  02380000
+                                                                        02390000
+*--------------------------------------------------------------         02400000
+*   validate request type - loc catalog SCTDEFs if needed               02410000
+*--------------------------------------------------------------         02420000
+                                                                        02430000
+         ICM   R2,15,XPJSFNC      FETCH SUBFUNCTION CODE                02440000
+         BNP   ERR_REQ            INVALID REQUEST                       02450000
+         C     R2,=A(XPJS$$$)     VS HIGHEST ASSIGNED SFUNC             02460000
+         BNL   ERR_REQ            INVALID REQUEST                       02470000
+                                                                        02480000
+         SLL   R2,2               PREPARE FOR WATERFALL BRANCH          02490000
+         B     *(R2)              SUBFUNC DEPENDENT CONTINUATION        02500000
+         B     GET_OSC     OPEN      OPEN CATALOG TABLES                02510000
+         B     GET_OSC     NEW       CREATE CATALOG TABLES              02520000
+         B     FIN_VALD    SAVE                                         02530000
+         B     FIN_VALD    SAVEAS                                       02540000
+         B     GET_OSC     CLOSE     CLOSE CATALOG TABLES               02550000
+         B     FIN_VALD    DELETE                                       02560000
+                                                                        02570000
+GET_OSC  DS    0H                                                       02580000
+         SPACETYP LOCATE,ID=SPACE_TYPE_PRJ                              02590000
+                                                                        02600000
+         LTR   R15,R15            ASSERT SUCCESSFUL COMPLETION          02610000
+         BZ    *+8                SHOULD NEVER FAIL                     02620000
+         EX    R0,*                                                     02630000
+                                                                        02640000
+         USING OSC,R1             OBJECT SPACE CONTENT BLOCK            02650000
+         MVC   CTABLEA,OSCSCTA        SCTDEF LIST ORIGIN                02660000
+         MVC   CTABLEN+2(2),OSCSCTN   SCTDEF ENTRY COUNT                02670000
+         MVC   CTABLEL,OSCSCTL        SCTDEF ENTRY LENGTH               02680000
+         DROP  R1                 OSC                                   02690000
+                                                                        02700000
+FIN_VALD DS    0H                                                       02710000
+                                                                        02720000
+*--------------------------------------------------------------         02730000
+*   process request by request type                                     02740000
+*--------------------------------------------------------------         02750000
+                                                                        02760000
+         L     R2,XPJSFNC         FETCH SUBFUNCTION                     02770000
+         SLL   R2,2               PREPARE FOR WATERFALL BRANCH          02780000
+         B     *(R2)              SUBFUNC DEPENDENT CONTINUATION        02790000
+         B     OPEN                  WORKBENCH / RUNTIME                02800000
+         B     NEW                   WORKBENCH                          02810000
+         B     SAVE                  WORKBENCH                          02820000
+         B     SAVEAS                WORKBENCH                          02830000
+         B     CLOSE                 WORKBENCH / RUNTIME                02840000
+         B     DELETE                WORKBENCH                          02850000
+                                                                        02860000
+         EJECT                                                          02870000
+***************************************************************         02880000
+*                                                                       02890000
+*   OPEN:  load and establish access to a stored project                02900000
+*                                                                       02910000
+***************************************************************         02920000
+                                                                        02930000
+OPEN     DS    0H                 LOAD PROJECT FROM DATABASE            02940000
+         MVC   FUNCTION,=CL8'OPEN'                                      02950000
+         MVC   PROJNAME,XPJNAME   PROJECT NAME                          02960000
+                                                                        02970000
+         ICM   R7,15,USRPROJ      NO ACTIVE IPROJ PERMITTED             02980000
+         BNZ   ERR_PROJ           LOGIC OR SEQUENCE ERROR OTHERWISE     02990000
+                                                                        03000000
+         LA    R0,ISAFA$RD        READ ACCESS                           03010000
+         LA    R1,PROJNAME        PROJECT NAME (EXTENDED FORMAT)        03020000
+         BAS   R14,SECTEST        ACCESS VALIDATION                     03030000
+         BNZ   VIO                VIOLATION                             03040000
+                                                                        03050000
+*--------------------------------------------------------------         03060000
+*   perform requested function                                          03070000
+*--------------------------------------------------------------         03080000
+                                                                        03090000
+         $PRJREQ OPEN,                                                 X03100000
+               NAME=XPJNAME,                                           X03110000
+               RETINFO=INFORET,                                        X03120000
+               ACCESS=*REQTYPE,                                        X03130000
+               CONF=*CONFIRM,                                          X03140000
+               ERROR=PREQERR,                                          X03150000
+               MF=(E,WK512)                                             03160000
+                                                                        03170000
+         ICM   R7,15,USRPROJ      IPROJ NOW AVAILABLE                   03180000
+         BZ    ERR_PROJ           LOGIC FAILURE OTHERWISE               03190000
+         USING IPROJ,R7           CONVENTION                            03200000
+                                                                        03210000
+*--------------------------------------------------------------         03220000
+*   catalog may have been previously opened if run-time request         03230000
+*--------------------------------------------------------------         03240000
+                                                                        03250000
+         L     R0,REQTYPE         REQUEST TYPE: WORKBENCH OR RUNTIME    03260000
+         CH    R0,=AL2(IPJXA_WB)  WORKBENCH REQUEST?                    03270000
+         BE    OPENCAT            SINGLE USER ACCESS TO CATALOG IF SO   03280000
+                                                                        03290000
+         BAS   R14,LOCKPROJ       ACQUIRE PROJECT LOCK                  03300000
+         BNZ   ABE_LOCK           LOCK FAILURE                          03310000
+                                                                        03320000
+         TM    PRJFLAG1,PRJF1ACT  CATALOG ALREADY OPENED?               03330000
+         BO    OPENTERM           DONE IF SO                            03340000
+         TM    PRJFLAG1,PRJF1ERR  OPEN PREVIOUSLY ATTEMPTED FAILED?     03350000
+         BO    ERR_OPEN           AVOID DIAGNOSTIC FLOOD                03360000
+                                                                        03370000
+*--------------------------------------------------------------         03380000
+*   open all catalog component tables                                   03390000
+*--------------------------------------------------------------         03400000
+                                                                        03410000
+OPENCAT  DS    0H                                                       03420000
+         OI    CFLAGS,CCATOPEN    CATALOG OPENED BY THIS REQUEST        03430000
+                                                                        03440000
+         L     R3,CTABLEA         CATALOG TABLE ENTRIES                 03450000
+         USING SCTDEF,R3          OBJECT SPACE COMPONENT TABLE ENTRY    03460000
+         L     R4,CTABLEN         NUMBER OF CATALOG TABLES / ENTRIES    03470000
+                                                                        03480000
+OPENNEXT DS    0H                 OPEN NEXT COMPONENT TABLE             03490000
+         MVC   TABLENAM,SCT_TABLE_NAME   RETAIN FOR DIAGNOSTICS         03500000
+         L     R1,SCT_HANDLE_OFF  IPROJ OFFSET TO TABLE TOKEN           03510000
+         LA    R1,IPROJ(R1)       CONVERT TO ADDRESS                    03520000
+         ST    R1,FWORD           RETRIEVED SHORTLY                     03530000
+         MVC   TBSERVIS,=CL8'OPEN'                                      03540000
+                                                                        03550000
+         TBOPEN TABLENAM,         TABLE NAME                           X03560000
+               STOKEN=PRJTOKEN,   SPACE TOKEN                          X03570000
+               TTOKEN=*FWORD,     TABLE TOKEN (OUTPUT)                 X03580000
+               MF=(E,WK512)                                             03590000
+                                                                        03600000
+         C     R15,=A(RC16)       OBJECT ERROR? (ASSUME TBL NOT DEF)    03610000
+         BE    OPENCREA           RETRY WITH CREATE                     03620000
+         LTR   R15,R15                                                  03630000
+         BNZ   TBSRVERR                                                 03640000
+         B     OPENADV                                                  03650000
+                                                                        03660000
+*--------------------------------------------------------------         03670000
+*   create new table                                                    03680000
+*--------------------------------------------------------------         03690000
+OPENCREA DS    0H                                                       03700000
+         ICM   R2,15,SCT_TABLE_INFO  LOCATE TABLE DEFINITION INFO       03710000
+         BZ    OPENADV            TABLE CREATED OUTSIDE OF THIS INTFCE  03720000
+         USING CATINFO,R2         DEFINITION FORMAT                     03730000
+                                                                        03740000
+         MVC   TBSERVIS,=CL8'CREATE'                                    03750000
+                                                                        03760000
+         TBCREATE TABLENAM,       TABLE NAME IS REMOTE                 X03770000
+               STOKEN=PRJTOKEN,   SPACE TOKEN                          X03780000
+               TTOKEN=*FWORD,     TABLE TOKEN (OUTPUT)                 X03790000
+               COLCNT=*CAT#COLS,  COLUMN COUNT                         X03800000
+               COLLST=*CATCOLS,   COLUMN LIST                          X03810000
+               KEYCNT=*CAT#KEYS,  KEY COUNT                            X03820000
+               KEYLST=*CATKEYS,   KEY LIST                             X03830000
+               MF=(E,WK512)                                             03840000
+                                                                        03850000
+         LTR   R15,R15                                                  03860000
+         BNZ   TBSRVERR                                                 03870000
+         DROP  R2                 CATINFO                               03880000
+                                                                        03890000
+OPENADV  DS    0H                                                       03900000
+         A     R3,CTABLEL         ADVANCE TO NEXT SCTDEF ENTRY          03910000
+         BCT   R4,OPENNEXT        OPEN ALL COMPONENT TABLES             03920000
+         OI    PRJFLAG1,PRJF1ACT  CATALOG READY                         03930000
+         DROP  R3                 SCTDEF                                03940000
+                                                                        03950000
+*--------------------------------------------------------------         03960000
+*   delete all residual temporary tables                                03970000
+*--------------------------------------------------------------         03980000
+                                                                        03990000
+         @CALL IPRJCLN,CTYPE=STD                                        04000000
+                                                                        04010000
+*--------------------------------------------------------------         04020000
+*   open complete, relinquish PROJ lock                                 04030000
+*--------------------------------------------------------------         04040000
+                                                                        04050000
+OPENTERM DS    0H                                                       04060000
+         BAS   R14,UNLKPROJ       RELEASE ACQUIRED LOCKS                04070000
+         B     POSTCPT                                                  04080000
+                                                                        04090000
+         EJECT                                                          04100000
+***************************************************************         04110000
+*                                                                       04120000
+*   NEW:  define and initialize a new project                           04130000
+*                                                                       04140000
+***************************************************************         04150000
+                                                                        04160000
+NEW      DS    0H                 LOAD PROJECT FROM DATABASE            04170000
+         MVC   FUNCTION,=CL8'NEW'                                       04180000
+         MVC   PROJNAME,XPJNAME   PROJECT NAME                          04190000
+                                                                        04200000
+         ICM   R7,15,USRPROJ      NO ACTIVE IPROJ ALLOWED               04210000
+         BNZ   ERR_PROJ           LOGIC OR SEQUENCE ERROR OTHERWISE     04220000
+                                                                        04230000
+         LA    R0,ISAFA$CN        OBJECT CREATION IS CONTROL ACCESS     04240000
+         LA    R1,PROJNAME        PROJECT NAME (EXTENDED FORMAT)        04250000
+         BAS   R14,SECTEST        ACCESS VALIDATION                     04260000
+         BNZ   VIO                VIOLATION                             04270000
+                                                                        04280000
+*--------------------------------------------------------------         04290000
+*   perform requested function                                          04300000
+*--------------------------------------------------------------         04310000
+                                                                        04320000
+         $PRJREQ NEW,                                                  X04330000
+               NAME=XPJNAME,                                           X04340000
+               ACCESS=WORKBENCH,                                       X04350000
+               RETINFO=INFORET,                                        X04360000
+               CONF=*CONFIRM,                                          X04370000
+               ERROR=PREQERR,                                          X04380000
+               MF=(E,WK512)                                             04390000
+                                                                        04400000
+         ICM   R7,15,USRPROJ      IPROJ NOW AVAILABLE                   04410000
+         BZ    ERR_PROJ           LOGIC FAILURE OTHERWISE               04420000
+         USING IPROJ,R7           CONVENTION                            04430000
+                                                                        04440000
+*--------------------------------------------------------------         04450000
+*   create / open all catalog component tables                          04460000
+*--------------------------------------------------------------         04470000
+                                                                        04480000
+         OI    CFLAGS,CCATOPEN    CATALOG OPENED BY THIS REQUEST        04490000
+                                                                        04500000
+         L     R3,CTABLEA         CATALOG TABLE ENTRIES                 04510000
+         USING SCTDEF,R3          OBJECT SPACE COMPONENT TABLE ENTRY    04520000
+         L     R4,CTABLEN         NUMBER OF CATALOG TABLES / ENTRIES    04530000
+                                                                        04540000
+NEWNEXT  DS    0H                                                       04550000
+         MVC   TABLENAM,SCT_TABLE_NAME   RETAIN FOR DIAGNOSTICS         04560000
+         L     R1,SCT_HANDLE_OFF  IPROJ OFFSET TO TABLE TOKEN           04570000
+         LA    R1,IPROJ(R1)       CONVERT TO ADDRESS                    04580000
+         ST    R1,FWORD           RETRIEVED SHORTLY                     04590000
+                                                                        04600000
+         ICM   R2,15,SCT_TABLE_INFO  LOCATE TABLE DEFINITION INFO       04610000
+         BZ    NEWOPEN            TABLE CREATED OUTSIDE OF THIS INTFCE  04620000
+         USING CATINFO,R2         DEFINITION FORMAT                     04630000
+                                                                        04640000
+*--------------------------------------------------------------         04650000
+*   create new table                                                    04660000
+*--------------------------------------------------------------         04670000
+                                                                        04680000
+         MVC   TBSERVIS,=CL8'CREATE'                                    04690000
+                                                                        04700000
+         TBCREATE TABLENAM,       TABLE NAME IS REMOTE                 X04710000
+               STOKEN=PRJTOKEN,   SPACE TOKEN                          X04720000
+               TTOKEN=*FWORD,     TABLE TOKEN (OUTPUT)                 X04730000
+               COLCNT=*CAT#COLS,  COLUMN COUNT                         X04740000
+               COLLST=*CATCOLS,   COLUMN LIST                          X04750000
+               KEYCNT=*CAT#KEYS,  KEY COUNT                            X04760000
+               KEYLST=*CATKEYS,   KEY LIST                             X04770000
+               MF=(E,WK512)                                             04780000
+                                                                        04790000
+         B     NEWADV                                                   04800000
+         DROP  R2                 CATINFO                               04810000
+                                                                        04820000
+*--------------------------------------------------------------         04830000
+*   open existing table (created internally by table services)          04840000
+*--------------------------------------------------------------         04850000
+                                                                        04860000
+NEWOPEN  DS    0H                                                       04870000
+         MVC   TBSERVIS,=CL8'OPEN'                                      04880000
+                                                                        04890000
+         TBOPEN TABLENAM,         TABLE NAME                           X04900000
+               STOKEN=PRJTOKEN,   SPACE TOKEN                          X04910000
+               TTOKEN=FWORD,      TABLE TOKEN (OUTPUT)                 X04920000
+               MF=(E,WK512)                                             04930000
+                                                                        04940000
+*--------------------------------------------------------------         04950000
+*   analyze tbservis completion, advance to next table def              04960000
+*--------------------------------------------------------------         04970000
+                                                                        04980000
+NEWADV   DS    0H                                                       04990000
+         LTR   R15,R15            TABLE FUNCTION COMPLETE?              05000000
+         BNZ   TBSRVERR           TABLE SERVICES ERROR                  05010000
+                                                                        05020000
+         A     R3,CTABLEL         ADVANCE TO NEXT SCTDEF ENTRY          05030000
+         BCT   R4,NEWNEXT         BUILD ALL COMPONENT TABLES            05040000
+         OI    PRJFLAG1,PRJF1ACT  CATALOG READY                         05050000
+         B     POSTCPT            DONE                                  05060000
+         DROP  R3                 SCTDEF                                05070000
+                                                                        05080000
+         EJECT                                                          05090000
+***************************************************************         05100000
+*                                                                       05110000
+*   CLOSE:  release project currently in open state                     05120000
+*                                                                       05130000
+***************************************************************         05140000
+                                                                        05150000
+CLOSE    DS    0H                                                       05160000
+         MVC   FUNCTION,=CL8'CLOSE'                                     05170000
+                                                                        05180000
+         ICM   R7,15,USRPROJ      IPROJ NOW AVAILABLE                   05190000
+         BZ    ERR_PROJ           LOGIC FAILURE OTHERWISE               05200000
+         USING IPROJ,R7           CONVENTION                            05210000
+                                                                        05220000
+         MVC   PROJNAME,PRJNAME   PROJECT NAME                          05230000
+         CLC   PRJNAME,XPJNAME    PROJECT NAMES AGREE?                  05240000
+         BNE   ERR_NAME           SYNCHRONIZATION ERROR OTHERWISE       05250000
+                                                                        05260000
+*--------------------------------------------------------------         05270000
+*   delete all residual tables charged to this project & user           05280000
+*--------------------------------------------------------------         05290000
+                                                                        05300000
+         @CALL IRMXTCLN,(IPCB,IUSER,PRJNAME),                          X05310000
+               CTYPE=CVT,MF=(E,MFE_LIST)                                05320000
+                                                                        05330000
+         @CALL IRMXTCLN,(IPCB,IUSER,=CL8'INTEXSPC'),                   X05340000
+               CTYPE=CVT,MF=(E,MFE_LIST)                                05350000
+                                                                        05360000
+*--------------------------------------------------------------         05370000
+*   close all private access handles to catalog tables                  05380000
+*--------------------------------------------------------------         05390000
+                                                                        05400000
+         ICM   R0,15,USRTKTAB                                           05410000
+         BZ    CLOSETAB                                                 05420000
+                                                                        05430000
+         TBCLOSE TTOKEN=USRTKTAB,MF=(E,WK512)                           05440000
+CLOSETAB DS    0H                                                       05450000
+                                                                        05460000
+         ICM   R0,15,USRTKCOL                                           05470000
+         BZ    CLOSECOL                                                 05480000
+                                                                        05490000
+         TBCLOSE TTOKEN=USRTKCOL,MF=(E,WK512)                           05500000
+CLOSECOL DS    0H                                                       05510000
+                                                                        05520000
+         ICM   R0,15,USRTKVAR                                           05530000
+         BZ    CLOSEVAR                                                 05540000
+                                                                        05550000
+         TBCLOSE TTOKEN=USRTKVAR,MF=(E,WK512)                           05560000
+CLOSEVAR DS    0H                                                       05570000
+                                                                        05580000
+*--------------------------------------------------------------         05590000
+*   catalog cleanup - serialzation for run-time projects                05600000
+*--------------------------------------------------------------         05610000
+                                                                        05620000
+         L     R0,REQTYPE         REQUEST TYPE: WORKBENCH OR RUNTIME    05630000
+         CH    R0,=AL2(IPJXA_RT)  RUN-TIME REQUEST?                     05640000
+         BE    CLOSRT             ACCESS SERIALIZATION REQUIRED IF SO   05650000
+                                                                        05660000
+         @CALL IPRJCLN,CTYPE=STD  REMOVE RESIDUAL TEMPORARY TABLES      05670000
+         B     CLOSCAT                                                  05680000
+                                                                        05690000
+CLOSRT   DS    0H                 RUN-TIME TABLE ACCESS PROTOCOL        05700000
+         BAS   R14,LOCKPROJ       ACQUIRE PROJECT LOCK                  05710000
+         BNZ   ABE_LOCK           LOCK FAILURE                          05720000
+                                                                        05730000
+         TM    PRJFLAG1,PRJF1ACT  CATALOG ALREADY CLOSED?               05740000
+         BNO   CLOSTERM           DONE IF SO                            05750000
+         CLC   PRJUSE,=F'1'       ARE WE THE LAST USER?                 05760000
+         BNE   CLOSTERM           LEAVE FOR SURVIVORS                   05770000
+                                                                        05780000
+*--------------------------------------------------------------         05790000
+*   delete all structures derived from project catalog                  05800000
+*--------------------------------------------------------------         05810000
+                                                                        05820000
+CLOSCAT  DS    0H                                                       05830000
+         LA    R1,IPROJ           PROJECT BLOCK AS PARM                 05840000
+         @CALL IVDBPURG,CTYPE=CVT DELETE VDB TABLES AND REF ENTRIES     05850000
+                                                                        05860000
+         LA    R1,IPROJ           PROJECT BLOCK AS PARM                 05870000
+         @CALL IPLNCLN,CTYPE=CVT  DELETE NAV PLANS AND REF ENTRIES      05880000
+                                                                        05890000
+         STGTERM QH=PRJEXSTG      FREE NAVIGATION STG POOL              05900000
+                                                                        05910000
+         MVI   PRJERRF1,0         RESET NAV STRUCTURE STATUS            05920000
+         MVI   PRJBLDF1,0         RESET NAV STRUCTURE STATUS     251261 05930000
+                                                                        05940000
+         XC    PRJEXNAV(PRJEXLN),PRJEXNAV CLEAN ASSOCIATED FIELD        05950000
+                                                                        05960000
+         BAS   R14,CATCLOSE       CLOSE THE CATALOG                     05970000
+         NI    PRJFLAG1,FF-PRJF1ACT                                     05980000
+                                                                        05990000
+         BAS   R14,UNLKPROJ       RELEASE THE PROJECT LOCK              06000000
+                                                                        06010000
+*--------------------------------------------------------------         06020000
+*   disassociate our workunit from this project                         06030000
+*--------------------------------------------------------------         06040000
+                                                                        06050000
+CLOSTERM DS    0H                                                       06060000
+         $PRJREQ CLOSE,                                                X06070000
+               NAME=PRJNAME,                                           X06080000
+               RETINFO=INFORET,                                        X06090000
+               ACCESS=*REQTYPE,                                        X06100000
+               CONF=*CONFIRM,                                          X06110000
+               ERROR=PREQERR,                                          X06120000
+               MF=(E,WK512)                                             06130000
+                                                                        06140000
+         B     POSTCPT                                                  06150000
+                                                                        06160000
+         EJECT                                                          06170000
+***************************************************************         06180000
+*                                                                       06190000
+*   SAVE:  save project                                                 06200000
+*                                                                       06210000
+***************************************************************         06220000
+                                                                        06230000
+SAVE     DS    0H                                                       06240000
+         MVC   FUNCTION,=CL8'SAVE'                                      06250000
+                                                                        06260000
+         ICM   R7,15,USRPROJ      IPROJ NOW AVAILABLE                   06270000
+         BZ    ERR_PROJ           LOGIC FAILURE OTHERWISE               06280000
+         USING IPROJ,R7           CONVENTION                            06290000
+                                                                        06300000
+         MVC   PROJNAME,PRJNAME   PROJECT NAME                          06310000
+         CLC   PRJNAME,XPJNAME    PROJECT NAMES AGREE?                  06320000
+         BNE   ERR_NAME           SYNCHRONIZATION ERROR OTHERWISE       06330000
+                                                                        06340000
+         LA    R0,ISAFA$WT        (OVER)WRITE ACCESS                    06350000
+         LA    R1,PROJNAME        PROJECT NAME (EXTENDED FORMAT)        06360000
+         BAS   R14,SECTEST        ACCESS VALIDATION                     06370000
+         BNZ   VIO                VIOLATION                             06380000
+                                                                        06390000
+*--------------------------------------------------------------         06400000
+*   perform requested function                                          06410000
+*--------------------------------------------------------------         06420000
+                                                                        06430000
+         $PRJREQ SAVE,                                                 X06440000
+               NAME=PRJNAME,                                           X06450000
+               ACCESS=WORKBENCH,                                       X06460000
+               RETINFO=INFORET,                                        X06470000
+               CONF=*CONFIRM,                                          X06480000
+               ERROR=PREQERR,                                          X06490000
+               MF=(E,WK512)                                             06500000
+         B     POSTCPT                                                  06510000
+                                                                        06520000
+         EJECT                                                          06530000
+***************************************************************         06540000
+*                                                                       06550000
+*   SAVE AS:  save project after rename                                 06560000
+*                                                                       06570000
+***************************************************************         06580000
+                                                                        06590000
+SAVEAS   DS    0H                                                       06600000
+         MVC   FUNCTION,=CL8'SAVE-AS'                                   06610000
+                                                                        06620000
+         ICM   R7,15,USRPROJ      IPROJ NOW AVAILABLE                   06630000
+         BZ    ERR_PROJ           LOGIC FAILURE OTHERWISE               06640000
+         USING IPROJ,R7           CONVENTION                            06650000
+                                                                        06660000
+         MVC   PROJONAM,PRJNAME   OLD PROJECT NAME                      06670000
+         MVC   PROJNAME,XPJNAME   NEW PROJECT NAME                      06680000
+                                                                        06690000
+         LA    R0,ISAFA$CN        NEW/OVERWRITE ACCESS AS CONTROL       06700000
+         LA    R1,PROJNAME        PROJECT NAME (EXTENDED FORMAT)        06710000
+         BAS   R14,SECTEST        ACCESS VALIDATION                     06720000
+         BNZ   VIO                VIOLATION                             06730000
+                                                                        06740000
+*--------------------------------------------------------------         06750000
+*   perform requested function                                          06760000
+*--------------------------------------------------------------         06770000
+                                                                        06780000
+         $PRJREQ SAVEAS,                                               X06790000
+               NAME=XPJNAME,OLDNAME=PRJNAME,                           X06800000
+               ACCESS=WORKBENCH,                                       X06810000
+               RETINFO=INFORET,                                        X06820000
+               CONF=*CONFIRM,                                          X06830000
+               ERROR=PREQERR,                                          X06840000
+               MF=(E,WK512)                                             06850000
+                                                                        06860000
+*--------------------------------------------------------------         06870000
+*   associate active tables (TIBs) with new project                     06880000
+*--------------------------------------------------------------         06890000
+                                                                        06900000
+         @CALL ITITIBRN,(PROJONAM,XPJNAME),                            X06910000
+               CTYPE=CVT,                                              X06920000
+               MF=(E,MFE_LIST)                                          06930000
+                                                                        06940000
+         B     POSTCPT                                                  06950000
+                                                                        06960000
+         EJECT                                                          06970000
+***************************************************************         06980000
+*                                                                       06990000
+*   DELETE:  remove project definition from database                    07000000
+*                                                                       07010000
+***************************************************************         07020000
+                                                                        07030000
+DELETE   DS    0H                                                       07040000
+         MVC   FUNCTION,=CL8'DELETE'                                    07050000
+         MVC   PROJNAME,XPJNAME   PROJECT NAME                          07060000
+                                                                        07070000
+         LA    R0,ISAFA$CN        DELETE OBJECT IS CONTROL              07080000
+         LA    R1,PROJNAME        PROJECT NAME (EXTENDED FORMAT)        07090000
+         BAS   R14,SECTEST        ACCESS VALIDATION                     07100000
+         BNZ   VIO                VIOLATION                             07110000
+                                                                        07120000
+*--------------------------------------------------------------         07130000
+*   perform requested function                                          07140000
+*--------------------------------------------------------------         07150000
+                                                                        07160000
+         $PRJREQ DELETE,                                               X07170000
+               NAME=XPJNAME,                                           X07180000
+               ACCESS=WORKBENCH,                                       X07190000
+               RETINFO=INFORET,                                        X07200000
+               CONF=*CONFIRM,                                          X07210000
+               ERROR=PREQERR,                                          X07220000
+               MF=(E,WK512)                                             07230000
+         B     POSTCPT                                                  07240000
+                                                                        07250000
+         EJECT                                                          07260000
+***************************************************************         07270000
+*                                                                       07280000
+*   success - construct response summary info for requestor             07290000
+*                                                                       07300000
+***************************************************************         07310000
+                                                                        07320000
+POSTCPT  DS    0H                                                       07330000
+         LA    R4,INFORET         $PRJREQ INFO RETURN AREA              07340000
+         USING IPRJXRET,R4        MAPPED                                07350000
+                                                                        07360000
+         L     R5,XPJRETA         RESPONSE AREA                         07370000
+         USING PRJINFO,R5         FORMATTED RETURN AREA                 07380000
+                                                                        07390000
+         MVC   PIPRJP,IPJRPROJ    IPROJ ADDRESS                         07400000
+         MVC   PICOPRC,IPJRRET    COOP RETCODE                          07410000
+         MVC   PICOPRSN,IPJRRSN   COOP RSNCODE                          07420000
+                                                                        07430000
+         $RUMSG *IPJRMSG,*IPJRMSGL,ANCHOR=PICOPMSG,                    X07440000
+               WK256=WK512,                                            X07450000
+               MF=(E,MFE_LIST)                                          07460000
+                                                                        07470000
+         B     RETURN             DONE                                  07480000
+         DROP  R4,R5              PRJINFO, IPRJXRET                     07490000
+                                                                        07500000
+         EJECT                                                          07510000
+***************************************************************         07520000
+*                                                                       07530000
+*   A $PRJREQ function failed, possibly providing return and            07540000
+*   reason codes and a message intended for the cooperative             07550000
+*   process, if any.                                                    07560000
+*                                                                       07570000
+***************************************************************         07580000
+                                                                        07590000
+PREQERR  DS    0H                                                       07600000
+         L     R5,XPJRETA         RESPONSE AREA                         07610000
+         USING PRJINFO,R5         FORMATTED RETURN AREA                 07620000
+         STM   R15,R0,PIPRJRET    PRESERVE ERROR STATUS                 07630000
+         STM   R15,R0,REQRET      SERVES AS REQUEST COMPLETION ALSO     07640000
+                                                                        07650000
+         OI    ERRFLAG,ERRPRJ     INDICATE $PRJREQ PROBLEM              07660000
+                                                                        07670000
+         LA    R4,INFORET         $PRJREQ RETURN AREA                   07680000
+         USING IPRJXRET,R4        MAPPED                                07690000
+         MVC   PIPRJP,IPJRPROJ    IPROJ ADDRESS                         07700000
+         MVC   PICOPRC,IPJRRET    COOP RETCODE                          07710000
+         MVC   PICOPRSN,IPJRRSN   COOP RSNCODE                          07720000
+                                                                        07730000
+         LA    R2,IPJRMSG         COOP MSG                              07740000
+         ICM   R3,15,IPJRMSGL     MSG LENGTH                            07750000
+         BNZ   *+12               COPY IF PROVIDED                      07760000
+         LA    R2,MSGPROJ         ELSE USE A GENERIC FAILURE MSG        07770000
+         LA    R3,L'MSGPROJ       MSG LENGTH                            07780000
+                                                                        07790000
+         $RUMSG (R2),(R3),ANCHOR=PICOPMSG,                             X07800000
+               WK256=WK512,                                            X07810000
+               MF=(E,MFE_LIST)                                          07820000
+                                                                        07830000
+         B     RETURN             JOURNAL RESULTS                       07840000
+         DROP  R4,R5              PRJINFO, IPRJXRET                     07850000
+                                                                        07860000
+         EJECT                                                          07870000
+***************************************************************         07880000
+*                                                                       07890000
+*   A failure occurred in table services function directed              07900000
+*   against a catalog component table.  Indicate function               07910000
+*   failure and collect appropriate diagnostic information.             07920000
+*                                                                       07930000
+***************************************************************         07940000
+                                                                        07950000
+TBSRVERR DS    0H                                                       07960000
+         USING IPROJ,R7           BY CONVENTION                         07970000
+         L     R5,XPJRETA         RESPONSE AREA                         07980000
+         USING PRJINFO,R5         FORMATTED RETURN AREA                 07990000
+         STM   R15,R1,PITBCRET    PRESERVE ERROR STATUS                 08000000
+                                                                        08010000
+         OI    ERRFLAG,ERRTBSV    INDICATE TABLE SERVICES PROBLEM       08020000
+         OI    PRJFLAG1,PRJF1ERR  PROJECT IN ERROR                      08030000
+                                                                        08040000
+         ST    R15,REQRSN         RC IS GENERIC FAILURE RSN             08050000
+         LA    R2,RC16            CATALOG/TABLESERV FAILURE             08060000
+         ST    R2,REQRC           COMPOSITE COMPLETION STATUS           08070000
+         MVC   PICOPRC,REQRC      COOP RETCODE                          08080000
+         MVC   PICOPRSN,REQRSN    COOP RSNCODE                          08090000
+                                                                        08100000
+         $RUMSG MSGTBSV,L'MSGTBSV,ANCHOR=PICOPMSG,                     X08110000
+               WK256=WK512,                                            X08120000
+               MF=(E,MFE_LIST)                                          08130000
+                                                                        08140000
+         B     RETURN             POST COMPLETION STATUS                08150000
+         DROP  R7,R5              IPROJ, PRJINFO                        08160000
+                                                                        08170000
+         EJECT                                                          08180000
+***************************************************************         08190000
+*                                                                       08200000
+*   $SAF reported a security violation after testing the                08210000
+*   requestor's access to the designated project. Messages              08220000
+*   and completion status produced by the security system are           08230000
+*   passed back to the requester.                                       08240000
+*                                                                       08250000
+***************************************************************         08260000
+                                                                        08270000
+VIO      DS    0H                                                       08280000
+         L     R5,XPJRETA         RESPONSE AREA                         08290000
+         USING PRJINFO,R5         FORMATTED RETURN AREA                 08300000
+         STM   R15,R1,PISAFRET    PRESERVE $SAF COMPLETION STATUS       08310000
+                                                                        08320000
+         OI    ERRFLAG,ERRSAF     INDICATE $SAF REJECT                  08330000
+                                                                        08340000
+         ST    R15,REQRSN         RC IS GENERIC FAILURE RSN             08350000
+         LA    R2,RC28            $SAF SECURITY REJECT                  08360000
+         ST    R2,REQRC           COMPOSITE COMPLETION STATUS           08370000
+         MVC   PICOPRC,REQRC      COOP RETCODE                          08380000
+         MVC   PICOPRSN,REQRSN    COOP RSNCODE                          08390000
+                                                                        08400000
+*--------------------------------------------------------------         08410000
+*   extract first SAF generated msg as primary msg return               08420000
+*--------------------------------------------------------------         08430000
+                                                                        08440000
+         LA    R3,WK512           MSG RETURN AREA USED BY SECTEST       08450000
+         USING $MSGBUF,R3         IN $MSGBUF FORMAT                     08460000
+         ICM   R2,15,$MSGQF       MESSAGES RETURNED?                    08470000
+         BZ    VIOFIN             DONE IF NOT                           08480000
+         USING $MSBHDR,R2         MESSAGE FORMAT                        08490000
+                                                                        08500000
+VIONEXT  DS    0H                                                       08510000
+         SR    R4,R4              PREPARE FOR INSERT                    08520000
+         ICM   R4,3,$MSBLEN       ACQUIRE TEXT LENGTH                   08530000
+         BNP   VIOADV             SKIP IF NULL                          08540000
+                                                                        08550000
+         $RUMSG $MSBTEXT,(R4),ANCHOR=PICOPMSG,                         X08560000
+               MF=(E,MFE_LIST)    STANDARD WK256 NOT AVAILABLE          08570000
+                                                                        08580000
+VIOADV   DS    0H                                                       08590000
+         ICM   R2,15,$MSBLINK     ADVANCE TO NEXT MESSAGE               08600000
+         BNZ   VIONEXT            PROCESS ALL MSGS                      08610000
+                                                                        08620000
+VIOFIN   DS    0H                                                       08630000
+         B     RETURN             POST COMPLETION STATUS                08640000
+         DROP  R5,R3,R2           PRJINFO, $MSGBUF, $MSBHDR             08650000
+                                                                        08660000
+         EJECT                                                          08670000
+***************************************************************         08680000
+*                                                                       08690000
+*   error handlers                                                      08700000
+*                                                                       08710000
+***************************************************************         08720000
+                                                                        08730000
+ERR_REQ  DS    0H                 INVALID SERVICE REQUEST CODE          08740000
+         OI    ERRFLAG,ERRINVRQ                                         08750000
+         LA    R15,RC20                                                 08760000
+         LA    R0,RSN04                                                 08770000
+         B     ERR_COMN                                                 08780000
+                                                                        08790000
+ERR_OPEN DS    0H                 PROJECT MARKED UNUSABLE               08800000
+         OI    ERRFLAG,ERRENV                                           08810000
+         LA    R15,RC20                                                 08820000
+         LA    R0,RSN08                                                 08830000
+         B     ERR_COMN                                                 08840000
+                                                                        08850000
+ERR_PROJ DS    0H                 IPROJ CONTROL BLOCK MISSING           08860000
+         OI    ERRFLAG,ERRENV                                           08870000
+         LA    R15,RC20                                                 08880000
+         LA    R0,RSN12                                                 08890000
+         B     ERR_COMN                                                 08900000
+                                                                        08910000
+ERR_NAME DS    0H                 IPROJ NAME DOES NOT MATCH REQ NAME    08920000
+         OI    ERRFLAG,ERRENV                                           08930000
+         LA    R15,RC20                                                 08940000
+         LA    R0,RSN16                                                 08950000
+         B     ERR_COMN                                                 08960000
+                                                                        08970000
+ERR_STG  DS    0H                 STORAGE FAILURE                       08980000
+         OI    ERRFLAG,ERRSTG                                           08990000
+         LA    R15,RC24                                                 09000000
+         LR    R0,R15                                                   09010000
+         B     ERR_COMN                                                 09020000
+                                                                        09030000
+*--------------------------------------------------------------         09040000
+*   post common error diagnostic info and messages                      09050000
+*--------------------------------------------------------------         09060000
+                                                                        09070000
+ERR_COMN DS    0H                 ENVIRONMENTAL / REQUEST RC, RSN       09080000
+         ST    R0,REQRSN                                                09090000
+         ST    R15,REQRC                                                09100000
+                                                                        09110000
+         L     R5,XPJRETA         RESPONSE AREA                         09120000
+         USING PRJINFO,R5         FORMATTED RETURN AREA                 09130000
+         MVC   PICOPRC,REQRC      COOP RETCODE                          09140000
+         MVC   PICOPRSN,REQRSN    COOP RSNCODE                          09150000
+                                                                        09160000
+         $RUMSG MSGENVE,L'MSGENVE,ANCHOR=PICOPMSG,                     X09170000
+               WK256=WK512,                                            X09180000
+               MF=(E,MFE_LIST)                                          09190000
+                                                                        09200000
+         B     RETURN             POST COMPLETION STATUS                09210000
+         DROP  R5                 PRJINFO                               09220000
+                                                                        09230000
+         EJECT                                                          09240000
+***************************************************************         09250000
+*                                                                       09260000
+*   termination - journal error responses                               09270000
+*                                                                       09280000
+***************************************************************         09290000
+                                                                        09300000
+RETURN   DS    0H                                                       09310000
+         L     R5,XPJRETA         RESPONSE AREA                         09320000
+         USING PRJINFO,R5         FORMATTED RETURN AREA                 09330000
+                                                                        09340000
+         BAS   R14,UNLKPROJ       RELEASE ACQUIRED LOCKS                09350000
+                                                                        09360000
+         L     R0,REQRC           COMPOSITE COMPLETION STATUS           09370000
+         C     R0,=A(RC12)        SYSTEM FAILURE POSSIBLE?              09380000
+         BNL   PJOURNAL           ALWAYS JOURNAL CRITICAL FAILURES      09390000
+         B     PJRNFIN            ... ROOM FOR JOURNALING OPTIONS       09400000
+                                                                        09410000
+*--------------------------------------------------------------         09420000
+*   journal failing request(s)                                          09430000
+*--------------------------------------------------------------         09440000
+                                                                        09450000
+PJOURNAL DS    0H                 JOURNAL COMPLETION                    09460000
+         $MSG  275,FIELDS=(PROJNAME,FUNCTION,REQRC,REQRSN)              09470000
+                                                                        09480000
+         TM    ERRFLAG,ERRPRJ     $PRJREQ ERROR?                        09490000
+         BNO   PRJNPRJ                                                  09500000
+                                                                        09510000
+         $MSG  276,FIELDS=(PIPRJRC,PIPRJRSN)                            09520000
+                                                                        09530000
+PRJNPRJ  DS    0H                                                       09540000
+         TM    ERRFLAG,ERRTBSV    TABLE SERVICES ERROR?                 09550000
+         BNO   PRJNTAB            SKIP IF NOT                           09560000
+                                                                        09570000
+         $MSG  278,FIELDS=(TBSERVIS,TABLENAM,PITBCRC,PITBCRSN,PITBCINF) 09580000
+                                                                        09590000
+PRJNTAB  DS    0H                                                       09600000
+         TM    ERRFLAG,ERRSAF     SAF (SECURITY) VIOLATIONS?            09610000
+         BO    PJRNFIN            SKIP REDUNDANT MSGING IF SO           09620000
+                                                                        09630000
+         ICM   R1,15,PICOPMSG     RU MESSAGE BUFFER PRESENT             09640000
+         BZ    *+8                SKIP IF NOT                           09650000
+         BAS   R14,JRNRUMSG       JOURNAL (R1) RUMSGS                   09660000
+                                                                        09670000
+PJRNFIN  DS    0H                                                       09680000
+         DROP  R5                 PRJINFO                               09690000
+                                                                        09700000
+         EJECT                                                          09710000
+***************************************************************         09720000
+*                                                                       09730000
+*   cleanup and transaction termination                                 09740000
+*                                                                       09750000
+***************************************************************         09760000
+                                                                        09770000
+         CLI   ERRFLAG,0          ERRORS ENCOUNTERED?                   09780000
+         BE    PNOERR             SKIP IF NOT                           09790000
+         TM    CFLAGS,CCATOPEN    ATTEMPTING TO OPEN OR CREATE?         09800000
+         BZ    PNOERR             SKIP IF NOT                           09810000
+                                                                        09820000
+         BAS   R14,CATCLOSE       ELSE ATTEMPT TO CLOSE                 09830000
+                                                                        09840000
+         $PRJREQ CLOSE,                                                X09850000
+               NAME=XPJNAME,                                           X09860000
+               ACCESS=WORKBENCH,                                       X09870000
+               RETINFO=INFORET,                                        X09880000
+               CONF=TRUE,                                              X09890000
+               MF=(E,WK512)                                             09900000
+                                                                        09910000
+PNOERR   DS    0H                                                       09920000
+                                                                        09930000
+*--------------------------------------------------------------         09940000
+*   return to caller                                                    09950000
+*--------------------------------------------------------------         09960000
+                                                                        09970000
+         L     R15,REQRC          RETURN CODE                           09980000
+         L     R0,REQRSN          REASON CODE                           09990000
+                                                                        10000000
+         #EXIT ,                                                        10010000
+                                                                        10020000
+         EJECT                                                          10030000
+***************************************************************         10040000
+*                                                                       10050000
+*   catastropic errors                                                  10060000
+*                                                                       10070000
+***************************************************************         10080000
+                                                                        10090000
+ABE_LOCK DS    0H                                                       10100000
+         $ABEND ABE_PROJLOCK,DUMP=YES,                                 X10110000
+               TITLE='UNABLE TO ACQUIRE PROJECT LOCK'                   10120000
+                                                                        10130000
+         EJECT                                                          10140000
+***************************************************************         10150000
+*                                                                       10160000
+* ROUTINE: JRNRUMSG - issue bufferred RU format messages                10170000
+*                                                                       10180000
+* ON ENTRY:                                                             10190000
+*                                                                       10200000
+*    R1 - addr of RUMSGS structure                                      10210000
+*                                                                       10220000
+***************************************************************         10230000
+                                                                        10240000
+JRNRUMSG DS    0H                                                       10250000
+         STM   R0,R15,REGSAVE     PRESERVE MAINLINE REGS                10260000
+         LR    R4,R1              RUMSGS ADDRESSABILITY                 10270000
+         USING RUMSGS,R4                                                10280000
+                                                                        10290000
+         SR    R5,R5              PREPARE FOR INSERT                    10300000
+         ICM   R5,3,RUMSGCT       MESSAGE COUNT                         10310000
+         BZ    JRNRUXIT           DONE                                  10320000
+         LA    R2,RUMTEXT         ORIGIN OF MSG ENTRY AREA              10330000
+                                                                        10340000
+JRNRUNXT DS    0H                                                       10350000
+         LH    R3,0(,R2)          LENGTH OF MSG                         10360000
+                                                                        10370000
+         $MSG  277,FIELDS=((2(R2),(R3)))                                10380000
+                                                                        10390000
+         LA    R2,2(,R3)          ADVANCE TO NEXT MESSAGE               10400000
+         BCT   R5,JRNRUNXT        PROCESS ALL MESSAGES                  10410000
+                                                                        10420000
+JRNRUXIT DS    0H                                                       10430000
+         LM    R0,R14,REGSAVE     RESTORE MAINLINE REGS                 10440000
+         SR    R15,R15            RETCODE NOT DEFINED                   10450000
+         BR    R14                RETURN                                10460000
+         DROP  R4                 RUMSGS                                10470000
+                                                                        10480000
+         EJECT                                                          10490000
+***************************************************************         10500000
+*                                                                       10510000
+* ROUTINE: SECTEST - validate access to project                         10520000
+*                                                                       10530000
+* ON ENTRY:                                                             10540000
+*                                                                       10550000
+*    R1 - entity name is a CL16 project name                            10560000
+*    R0 - $SAF-ready resource access type code                          10570000
+*                                                                       10580000
+* ON RETURN:                                                            10590000
+*                                                                       10600000
+*    R15 contains one of the following return codes                     10610000
+*                                                                       10620000
+*        RC00 - access allowed                                          10630000
+*        RC04 - access denied (as presented by $SAF)                    10640000
+*                                                                       10650000
+***************************************************************         10660000
+                                                                        10670000
+SECTEST  DS    0H                                                       10680000
+         STM   R0,R15,REGSAVE     PRESERVE MAINLINE REGS                10690000
+                                                                        10700000
+         LR    R2,R1              PROJECT NAME                          10710000
+         LR    R3,R0              ACCESS TYPE CODE                      10720000
+                                                                        10730000
+         $SAF  RESCHK,            AUTH CHECK                           X10740000
+               CLASS='PROJECT',   PROJECT ACCESS                       X10750000
+               ENTITY=((R2),L'XPJNAME),                                X10760000
+               ACCESS=(R3),                                            X10770000
+               MSGAREA=WK512,                                          X10780000
+               MSGLEN=L'WK512,                                         X10790000
+               MF=(E,@SAF_MFL)                                          10800000
+                                                                        10810000
+         C     R15,=A(RC04)       VIOLATION LIKELY?                     10820000
+         BH    *+8                DONE IF SO                            10830000
+         LA    R15,RC00           ELSE INDICATE SUCCESS                 10840000
+                                                                        10850000
+         LM    R2,R14,REGSAVE+8   RESTORE MAINLINE REGS                 10860000
+         LTR   R15,R15            REFLECT COMPLETION STATUS VIA CC      10870000
+         BR    R14                RETURN                                10880000
+                                                                        10890000
+         EJECT                                                          10900000
+***************************************************************         10910000
+*                                                                       10920000
+* ROUTINE: CATCLOSE - close catalog component tables                    10930000
+*                                                                       10940000
+***************************************************************         10950000
+                                                                        10960000
+CATCLOSE DS    0H                                                       10970000
+         STM   R0,R15,REGSAVE     PRESERVE MAINLINE REGS                10980000
+         L     R7,USRPROJ         IPROJ NOW AVAILABLE                   10990000
+         USING IPROJ,R7           CONVENTION                            11000000
+                                                                        11010000
+         MVC   TBSERVIS,=CL8'CLOSE'                                     11020000
+                                                                        11030000
+         L     R3,CTABLEA         CATALOG TABLE ENTRIES                 11040000
+         USING SCTDEF,R3          OBJECT SPACE COMPONENT TABLE ENTRY    11050000
+         L     R4,CTABLEN         NUMBER OF CATALOG TABLES / ENTRIES    11060000
+                                                                        11070000
+CATCLNXT DS    0H                 CLOSE NEXT COMPONENT TABLE            11080000
+         MVC   TABLENAM,SCT_TABLE_NAME   RETAIN FOR DIAGNOSTICS         11090000
+         L     R2,SCT_HANDLE_OFF  IPROJ OFFSET TO TABLE TOKEN           11100000
+         LA    R2,IPROJ(R2)       CONVERT TO ADDRESS                    11110000
+         ICM   R0,15,0(R2)        TABLE OPENED?                         11120000
+         BZ    CATCLADV           SKIP IF NOT                           11130000
+                                                                        11140000
+         TBCLOSE TTOKEN=(R2),MF=(E,WK512)                               11150000
+                                                                        11160000
+CATCLADV DS    0H                                                       11170000
+         A     R3,CTABLEL         ADVANCE TO NEXT SCTDEF ENTRY          11180000
+         BCT   R4,CATCLNXT        CLOSE ALL COMPONENT TABLES            11190000
+                                                                        11200000
+         LM    R0,R14,REGSAVE     RESTORE MAINLINE REGS                 11210000
+         SR    R15,R15                                                  11220000
+         BR    R14                                                      11230000
+         DROP  R3,R7              SCTDEF, IPROJ                         11240000
+                                                                        11250000
+         EJECT                                                          11260000
+***************************************************************         11270000
+*                                                                       11280000
+* ROUTINE: LOCKPROJ - Acquire project (PROJ) lock                       11290000
+*                                                                       11300000
+***************************************************************         11310000
+                                                                        11320000
+LOCKPROJ DS    0H                                                       11330000
+         STM   R0,R15,REGSAVE                                           11340000
+                                                                        11350000
+         $SER  OBTAIN,PROJ        ACQUIRE PROJECT LOCK                  11360000
+         B     *+4(R15)           BRANCH ON RETURN CODE                 11370000
+         B     LOCKACQ            LOCK SUCCESSFULLY OBTAINED            11380000
+         B     LOCKHAVE           LOCK ALREADY OWNED                    11390000
+         B     LOCKFAIL           ERROR OBTAINING PROJECT LOCK          11400000
+                                                                        11410000
+LOCKACQ  DS    0H                 LOCK ACQUIRED                         11420000
+         OI    CFLAGS,CPROJLK     PROJECT LOCK HELD                     11430000
+                                                                        11440000
+LOCKHAVE DS    0H                 LOCK PREVIOUSLY ACQUIRED              11450000
+         LA    R15,RC00                                                 11460000
+                                                                        11470000
+LOCKFAIL DS    0H                 LOCK SUCCESS OR FAIL                  11480000
+         LM    R0,R14,REGSAVE     RESTORE CALLERS REGISTERS             11490000
+         LTR   R15,R15            SET CONDITION CODE                    11500000
+         BR    R14                RETURN                                11510000
+                                                                        11520000
+         SPACE 3                                                        11530000
+***************************************************************         11540000
+*                                                                       11550000
+* ROUTINE: UNLKPROJ - Release project (PROJ) lock                       11560000
+*                                                                       11570000
+***************************************************************         11580000
+                                                                        11590000
+UNLKPROJ DS    0H                                                       11600000
+         STM   R0,R15,REGSAVE                                           11610000
+                                                                        11620000
+         TM    CFLAGS,CPROJLK     LOCK PREVIOUSLY ACQUIRED?             11630000
+         BNO   UNLKRET            DONE IF NOT                           11640000
+         NI    CFLAGS,FF-CPROJLK  PROJECT LOCK NOT HELD                 11650000
+                                                                        11660000
+         $SER  RELEASE,PROJ       RELEASE PROJECT LOCK                  11670000
+                                                                        11680000
+UNLKRET  DS    0H                 LOCK SUCCESS OR FAIL                  11690000
+         LM    R0,R14,REGSAVE     RESTORE CALLERS REGISTERS             11700000
+         LTR   R15,R15            SET CONDITION CODE                    11710000
+         BR    R14                RETURN                                11720000
+                                                                        11730000
+         EJECT                                                          11740000
+***************************************************************         11750000
+*                                                                       11760000
+*   local read- only data areas, etc.                                   11770000
+*                                                                       11780000
+***************************************************************         11790000
+                                                                        11800000
+MSGENVE  DC    C'Environmental error, notify support staff'             11810000
+MSGTBSV  DC    C'Catalog access error, notify support staff'            11820000
+MSGPROJ  DC    C'Project services error, notify support staff'          11830000
+                                                                        11840000
+         LTORG ,                                                        11850000
+                                                                        11860000
+         EJECT                                                          11870000
+         PRINT NOGEN                                                    11880000
+         ICVT  ,                                                        11890000
+         ITASK ,                                                        11900000
+         IPCB  ,                                                        11910000
+         END   ,                                                        11920000

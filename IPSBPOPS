@@ -1,0 +1,428 @@
+IPSBPOPS TITLE ' - PREPARED STATEMENT, PLAN OPERATIONS'                 00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE: IPSBPOPS - Prepared statement, plan operations               00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This routine is used to coordinate the use and resource            00080000
+*    management of prepared statement subplans as represented           00090000
+*    by a prepared statement block, or PSB.  The functions              00100000
+*    provided include subplan IMPORT, subplan EXPORT, subplan           00110000
+*    DELETE, and PURGE each of which is described in detail             00120000
+*    below.  Note that terms IMPORT (into) and EXPORT (from)            00130000
+*    are taken from the perspective of the operation performed          00140000
+*    on the active application (AAP) block.                             00150000
+*                                                                       00160000
+*                                                                       00170000
+*    IMPORT - The designated subplan is moved from the PSB into         00180000
+*             the AAP provided.  The PSB copy is marked                 00190000
+*             inactive to ensure that resource mgrs encounter           00200000
+*             only a single copy of the plan.                           00210000
+*                                                                       00220000
+*    EXPORT - The designated subplan is moved from the AAP              00230000
+*             provided into the PSB.  The AAP copy is removed           00240000
+*             to ensure that resource mgrs encounter only a             00250000
+*             single copy of the plan.                                  00260000
+*                                                                       00270000
+*    DELETE - The designated subplan is deleted from the PSB.           00280000
+*             The AAP is used to identify the particular                00290000
+*             subplan of the indicated type in multi-appl               00300000
+*             plans.                                                    00310000
+*                                                                       00320000
+*    PURGE  - All subplans are deleted from all PSBs and each           00330000
+*             of its (multi-application) extensions.                    00340000
+*                                                                       00350000
+*                                                                       00360000
+* NOTES:                                                                00370000
+*                                                                       00380000
+*    All plans imported into a PSB must be (1) valid, and               00390000
+*    (2) acquired via IPLNGET.                                          00400000
+*                                                                       00410000
+*                                                                       00420000
+* ENTRY:                                                                00430000
+*                                                                       00440000
+*    R1 contains the address of a parameter list constructed            00450000
+*       as follows:                                                     00460000
+*                                                                       00470000
+*        +00 - request type (IMPORT, EXPORT, DELETE, PURGE)             00480000
+*        +04 - subplan identifier (run, reposition, sessterm)           00490000
+*        +08 - addr of the prepared statement block (PSB) or zero       00500000
+*        +12 - addr of the active appication block  (AAP) or zero       00510000
+*                                                                       00520000
+*                                                                       00530000
+* EXIT:                                                                 00540000
+*                                                                       00550000
+*    R15 contains one of the following return codes                     00560000
+*                                                                       00570000
+*        RC00 - complete                                                00580000
+*        RC04 - no prepared statement                                   00590000
+*        RC08 - subplan not previously exported (import)                00600000
+*        RC12 - application not previously exported                     00610000
+*                                                                       00620000
+**<DOC-OFF>****************************************************         00630000
+                                                                        00640000
+         EJECT                                                          00650000
+***************************************************************         00660000
+*                                                                       00670000
+* MAINTENANCE:                                                          00680000
+*                                                                       00690000
+*   04/25/94 R. Turgeon                                                 00700000
+*            Initial version                                            00710000
+*                                                                       00720000
+*   01/31/95 Su-Fen Wu     PAR# 168636                           168636 00730000
+*            Verify plan before marking ownership in the         168636 00740000
+*            EXPORT operation.                                          00750000
+*                                                                       00760000
+*   10/09/95 R. Turgeon                                                 00770000
+*            Replace PLNPURG() call with IPLNDET in support of          00780000
+*            the plan management layer introduced by VDBCACHE().        00790000
+*            Removed INAVOPT2 call formerly used to reorg the           00800000
+*            plan peer state chains.                                    00810000
+*                                                                       00820000
+***************************************************************         00830000
+                                                                        00840000
+         EJECT                                                          00850000
+         #WORK ,                       READ/WRITE WORKAREA              00860000
+                                                                        00870000
+@USRSTG  DS    A                       ADDR OF IUSER.USRSTG             00880000
+                                                                        00890000
+         #ENDWORK ,                                                     00900000
+                                                                        00910000
+         EJECT                                                          00920000
+         IUSER ,                       COOP INSTANCE (USER) BLOCK       00930000
+                                                                        00940000
+         EJECT                                                          00950000
+         NAV   ,                       NAVIGATION / PLAN STRUCTURES     00960000
+                                                                        00970000
+         EJECT                                                          00980000
+         PSB   ,                       TABLE INTERFACE BLOCK (TIB)      00990000
+                                                                        01000000
+         EJECT                                                          01010000
+         PREPPLAN EQUS                 REQUEST BLOCK SYMBOLICS          01020000
+                                                                        01030000
+         EJECT                                                          01040000
+         PLNXREF ,                     LOCAL AAP/PSB XREF ENTRY FORMAT  01050000
+                                                                        01060000
+         EJECT                                                          01070000
+         EQUS  ,                                                        01080000
+                                                                        01090000
+         EJECT                                                          01100000
+IPSBPOPS #ENTER BASE=R12,PREG=(R8)                                      01110000
+                                                                        01120000
+         USING ITASK,R10               ITASK ADDRESSABILITY             01130000
+                                                                        01140000
+         L     R9,TSKPCBC              LOCATE CURRENT PROCESS           01150000
+         USING IPCB,R9                 STDENV, PROCESS MODE             01160000
+                                                                        01170000
+         EJECT                                                          01180000
+***************************************************************         01190000
+*                                                                       01200000
+*   Fetch passed parameters                                             01210000
+*                                                                       01220000
+***************************************************************         01230000
+                                                                        01240000
+         LM    R4,R7,0(R8)             FETCH PASSED PARAMETERS          01250000
+*                                      R4 <== REQUEST CODE              01260000
+*                                      R5 <== PLAN IDENTIFIER OR ZERO   01270000
+                                                                        01280000
+         USING PSB,R6                  PREPARED STATEMENT BLOCK OR ZERO 01290000
+         USING AAP,R7                  ACTIVE APPLICATION BLOCK OR ZERO 01300000
+                                                                        01310000
+         L     R2,PCBUSER              USER INSTANCE                    01320000
+         USING IUSER,R2                USER ASSOCIATION                 01330000
+         LA    R0,USRSTG-IUSER(,R2)    USER STORAGE POOL                01340000
+         ST    R0,@USRSTG              RETAIN PTR FOR PLAN OPS          01350000
+         DROP  R2                      IUSER                            01360000
+                                                                        01370000
+         C     R4,=A(PREPP_PURGE)      PURGE REQUIRES NO PARMS          01380000
+         BE    PURGE                                                    01390000
+                                                                        01400000
+*--------------------------------------------------------------         01410000
+*   identify target subplan                                             01420000
+*--------------------------------------------------------------         01430000
+                                                                        01440000
+         LTR   R6,R6                   PSB AVAILABLE?                   01450000
+         BZ    WRN_NPSB                DONE IF NOT                      01460000
+                                                                        01470000
+         USING PLNXREF,R8              SUBPLAN AAP/PSB XREF ENTRY       01480000
+                                                                        01490000
+         LA    R8,CFG_POS              ASSUME REPOSITIONING PLAN        01500000
+         C     R5,=A(PREPP_POS)                                         01510000
+         BE    SEL_PLAN                                                 01520000
+                                                                        01530000
+         LA    R8,CFG_DATA             ASSUME RUN PLAN                  01540000
+         C     R5,=A(PREPP_RUN)                                         01550000
+         BE    SEL_PLAN                                                 01560000
+                                                                        01570000
+         LA    R8,CFG_TERM             ASSUME SESSTERM PLAN             01580000
+         C     R5,=A(PREPP_TERM)                                        01590000
+         BE    SEL_PLAN                                                 01600000
+                                                                        01610000
+         EX    R0,*                    VALID SUBPLAN IDENTIFIER REQ     01620000
+                                                                        01630000
+*--------------------------------------------------------------         01640000
+*   identify subplan operation                                          01650000
+*--------------------------------------------------------------         01660000
+                                                                        01670000
+SEL_PLAN DS    0H                      SUBPLAN IDENTFIED                01680000
+         C     R4,=A(PREPP_IMPORT)                                      01690000
+         BE    IMPORT                                                   01700000
+                                                                        01710000
+         C     R4,=A(PREPP_EXPORT)                                      01720000
+         BE    EXPORT                                                   01730000
+                                                                        01740000
+         C     R4,=A(PREPP_DELETE)                                      01750000
+         BE    DELETE                                                   01760000
+                                                                        01770000
+         EX    R0,*                    INVALID REQUEST                  01780000
+                                                                        01790000
+         EJECT                                                          01800000
+***************************************************************         01810000
+*                                                                       01820000
+*   PURGE - delete all owned plans                                      01830000
+*                                                                       01840000
+***************************************************************         01850000
+                                                                        01860000
+PURGE    DS    0H                                                       01870000
+         L     R2,PCBUSER              PSBS CHAINED OFF IUSER           01880000
+         ICM   R6,15,USRPSBS-IUSER(R2) PREPARED STATEMENTS PRESENT?     01890000
+         BZ    COMPLETE                DONE IF NOT                      01900000
+                                                                        01910000
+PURGEPSB DS    0H                                                       01920000
+         LA    R5,PSBPLAN              FIRST PSBPLAN SEGMENT OF PSB     01930000
+         USING PSBPLAN,R5              PLAN SEGMENT                     01940000
+                                                                        01950000
+PURGESEG DS    0H                      PROCESS ALL PLAN SEGMENTS        01960000
+         @CALL IPSBPURG,(PSBPLAN),                                     X01970000
+               CTYPE=CVT,MF=(E,MFE_LIST)                                01980000
+                                                                        01990000
+         ICM   R5,15,PSBPANXT          ADVANCE TO NEXT SEGMENT          02000000
+         BNZ   PURGESEG                AGAIN                            02010000
+                                                                        02020000
+         ICM   R6,15,PSBNEXT           ADVANCE TO NEXT PSB              02030000
+         BNZ   PURGEPSB                AGAIN                            02040000
+         B     COMPLETE                NORMAL COMPLETION                02050000
+         DROP  R5                      PSB.PSBPLAN SEGMENT / EXTENSION  02060000
+                                                                        02070000
+         EJECT                                                          02080000
+***************************************************************         02090000
+*                                                                       02100000
+*   Subplan DELETE                                                      02110000
+*                                                                       02120000
+***************************************************************         02130000
+                                                                        02140000
+DELETE   DS    0H                                                       02150000
+         BAS   R14,PPLANLOC            LOCATE PSBPLAN                   02160000
+         LTR   R5,R15                  PSBPLAN RETURNED?                02170000
+         BZ    ERR_APPL                NO SUCH SUBPLAN OR NOT AVAIL     02180000
+         USING PSBPLAN,R5              PLAN SEGMENT                     02190000
+                                                                        02200000
+         L     R3,PLNXRETF             PLAN RETENTION FLAG              02210000
+         LA    R3,PSBPLAN(R3)          CONVERT OFFSET TO ADDRESS        02220000
+         CLI   0(R3),FALSE             PREPARED, STORED SUBPLAN?        02230000
+         BE    ERR_PLAN                SUBPLAN NOT AVAILABLE            02240000
+         MVI   0(R3),FALSE             INDICATE PLAN DISCHARGED         02250000
+                                                                        02260000
+         L     R3,PLNXOWN              PLAN OWNER ID                    02270000
+         LA    R3,PSBPLAN(R3)          CONVERT OFFSET TO ADDRESS        02280000
+         OC    0(4,R3),0(R3)           PLAN OWNED BY PSB?               02290000
+         BNZ   ERR_PLAN                CANT RELEASE IT IF NOT           02300000
+                                                                        02310000
+         L     R4,PLNXPPSB             R1 <== LOCATE PSB COPY OF PLAN   02320000
+         LA    R1,PSBPLAN(R4)          CONVERT OFFSET TO ADDRESS        02330000
+                                                                        02340000
+         @CALL IPLNDET,CTYPE=CVT       DETACH PSB COPY OF PLAN          02350000
+                                                                        02360000
+         B     COMPLETE                NORMAL COMPLETION                02370000
+         DROP  R5                      PSB.PSBPLAN SEGMENT / EXTENSION  02380000
+                                                                        02390000
+         EJECT                                                          02400000
+***************************************************************         02410000
+*                                                                       02420000
+*   Prepared subplan IMPORT into AAP from PSB                           02430000
+*                                                                       02440000
+***************************************************************         02450000
+                                                                        02460000
+IMPORT   DS    0H                                                       02470000
+         BAS   R14,PPLANLOC            LOCATE PSBPLAN                   02480000
+         LTR   R5,R15                  PSBPLAN RETURNED?                02490000
+         BZ    ERR_APPL                NO SUCH SUBPLAN OR NOT AVAIL     02500000
+         USING PSBPLAN,R5              PLAN SEGMENT                     02510000
+                                                                        02520000
+         L     R3,PLNXRETF             PLAN RETENTION FLAG              02530000
+         LA    R3,PSBPLAN(R3)          CONVERT OFFSET TO ADDRESS        02540000
+         CLI   0(R3),FALSE             PREPARED, STORED SUBPLAN?        02550000
+         BE    ERR_PLAN                SUBPLAN NOT AVAILABLE            02560000
+                                                                        02570000
+         L     R3,PLNXOWN              PLAN OWNER ID                    02580000
+         LA    R3,PSBPLAN(R3)          CONVERT OFFSET TO ADDRESS        02590000
+         OC    0(4,R3),0(R3)           PLAN OWNED BY PSB?               02600000
+         BNZ   ERR_PLAN                CANT ASSIGN OWNERSHIP IF NOT     02610000
+         ST    R7,0(,R3)               TRANSFER OWNERSHIP TO AAP        02620000
+                                                                        02630000
+         L     R4,PLNXPPSB             PLAN LOCATION IN PSB             02640000
+         LA    R4,PSBPLAN(R4)          CONVERT OFFSET TO ADDRESS        02650000
+         USING PLAN,R4                 PLAN FORMAT                      02660000
+                                                                        02670000
+IMPORTGO DS    0H                                                       02680000
+         L     R3,PLNXPAAP             PLAN LOCATION IN AAP             02690000
+         LA    R3,AAP(R3)              CONVERT OFFSET TO ADDRESS        02700000
+         MVC   0(PLANLN,R3),0(R4)      TRANSFER PLAN OWNERSHIP TO AAP   02710000
+         B     COMPLETE                                                 02720000
+         DROP  R5                      PSB.PSBPLAN SEGMENT / EXTENSION  02730000
+                                                                        02740000
+***************************************************************         02750000
+*                                                                       02760000
+*   Prepared subplan EXPORT from AAP into PSB                           02770000
+*                                                                       02780000
+***************************************************************         02790000
+                                                                        02800000
+EXPORT   DS    0H                                                       02810000
+         BAS   R14,PPLANLOC            LOCATE PSBPLAN                   02820000
+         LTR   R5,R15                  PSBPLAN RETURNED?                02830000
+         BNZ   EXPRDY                  APPL'S PSBPLAN SEGMENT FOUND     02840000
+                                                                        02850000
+*--------------------------------------------------------------         02860000
+*   Claim PSB-resident plan segment if not already used                 02870000
+*--------------------------------------------------------------         02880000
+                                                                        02890000
+         LA    R5,PSBPLAN              SELECT PSB-RESIDENT PLAN SEGMENT 02900000
+         ICM   R0,15,PSBNPLNS          FIRST SEGMENT IN USE?            02910000
+         BZ    EXPSINIT                CLAIM IT OTHERWISE               02920000
+                                                                        02930000
+         USING PSBPLAN,R5                                               02940000
+         L     R2,@USRSTG              USER ORIENTED STORAGE            02950000
+                                                                        02960000
+         STGGET PSBPLN,QH=(R2)         ACQUIRE PSB PLAN EXTENSION       02970000
+         BZ    *+8                     ASSERT SUCCESSFUL ACQUISITION    02980000
+         EX    R0,*                    DENIED                           02990000
+                                                                        03000000
+         LR    R5,R1                   STANDARD PSBPLAN ADDRESSABILITY  03010000
+         MVC   PSBPANXT,PSBPANXT-PSB(R6)    PLACE EXTENSION IN CHAIN    03020000
+         ST    R1,PSBPANXT-PSB(R6)          UNORDERED PLAN SEG LIST     03030000
+                                                                        03040000
+EXPSINIT DS    0H                      FORMAT PSB PLAN SEGMENT          03050000
+         MVC   PSBPID,=CL8'PSB-PLAN'   EYECATCHER                       03060000
+         MVC   PSBPAPPL,AAPANAME       APPLNAME                         03070000
+         MVC   PSBPLOGM,AAPLOGMD       LOGMODE                          03080000
+                                                                        03090000
+         L     R1,PSBNPLNS             PSBPLAN SEGMENT USAGE            03100000
+         LA    R1,1(,R1)                                                03110000
+         ST    R1,PSBNPLNS                                              03120000
+                                                                        03130000
+*--------------------------------------------------------------         03140000
+*   Move the plan into PSB ignoring residual contents                   03150000
+*--------------------------------------------------------------         03160000
+                                                                        03170000
+EXPRDY   DS    0H                                                       03180000
+         L     R3,PLNXPAAP             PLAN LOCATION IN AAP             03190000
+         LA    R3,AAP(R3)              CONVERT OFFSET TO ADDRESS        03200000
+         OC    PLSTART-PLAN(L'PLSTART,R3),PLSTART-PLAN(R3)              03210000
+         BZ    COMPLETE                                                 03220000
+                                                                        03230000
+         L     R3,PLNXRETF             PLAN RETENTION FLAG              03240000
+         LA    R3,PSBPLAN(R3)          CONVERT OFFSET TO ADDRESS        03250000
+         MVI   0(R3),TRUE              ALWAYS ACCEPT SUBPLAN            03260000
+                                                                        03270000
+         L     R3,PLNXOWN              PLAN OWNER ID                    03280000
+         LA    R3,PSBPLAN(R3)          CONVERT OFFSET TO ADDRESS        03290000
+         XC    0(4,R3),0(R3)           OWNERSHIP TRANSFERRED TO PSB     03300000
+                                                                        03310000
+         L     R4,PLNXPPSB             PLAN LOCATION IN PSB             03320000
+         LA    R4,PSBPLAN(R4)          CONVERT OFFSET TO ADDRESS        03330000
+         L     R3,PLNXPAAP             PLAN LOCATION IN AAP             03340000
+         LA    R3,AAP(R3)              CONVERT OFFSET TO ADDRESS        03350000
+         MVC   0(PLANLN,R4),0(R3)      TRANSFER PLAN OWNERSHIP TO AAP   03360000
+         XC    0(PLANLN,R3),0(R3)      AND REMOVE TRACKS FROM AAP       03370000
+         B     COMPLETE                DONE                             03380000
+         DROP  R5                      PSB.PSBPLAN SEGMENT / EXTENSION  03390000
+                                                                        03400000
+         EJECT                                                          03410000
+***************************************************************         03420000
+*                                                                       03430000
+*   Return completion status to requester                               03440000
+*                                                                       03450000
+***************************************************************         03460000
+                                                                        03470000
+COMPLETE DS    0H                      FUNCTION COMPLETED SUCCESSFULLY  03480000
+         LA    R15,RC00                                                 03490000
+         B     RETURN                                                   03500000
+                                                                        03510000
+WRN_NPSB DS    0H                      STATEMENT NOT PREPARED           03520000
+         LA    R15,RC04                                                 03530000
+         B     RETURN                                                   03540000
+                                                                        03550000
+ERR_PLAN DS    0H                      SUBPLAN NOT AVAILABLE            03560000
+         LA    R15,RC08                                                 03570000
+         B     RETURN                                                   03580000
+                                                                        03590000
+ERR_APPL DS    0H                      APPLICATION NOT RECOGNIZED       03600000
+         LA    R15,RC12                                                 03610000
+                                                                        03620000
+RETURN   DS    0H                                                       03630000
+         #EXIT ,                       RETURN                           03640000
+                                                                        03650000
+         EJECT                                                          03660000
+***************************************************************         03670000
+*                                                                       03680000
+* ROUTIME: PPLANLOC - locate PSBPLAN assoc with application             03690000
+*                                                                       03700000
+* DESCRIPTION:                                                          03710000
+*                                                                       03720000
+*    This routine is used to locate the PSBPLAN segment of the          03730000
+*    PSB or one of its extensions that corresponds to the               03740000
+*    application named in the given application action block            03750000
+*    (AAP).                                                             03760000
+*                                                                       03770000
+*                                                                       03780000
+* ON ENTRY:                                                             03790000
+*                                                                       03800000
+*    AAP, PSB Addressable                                               03810000
+*                                                                       03820000
+*                                                                       03830000
+* ON EXIT:                                                              03840000
+*                                                                       03850000
+*    R15 contains the address of the PSBPLAN segment of the             03860000
+*        PSB or one of its extensions if the application is             03870000
+*        matched, and zero otherwise.  The condition code is            03880000
+*        set accordingly.                                               03890000
+*                                                                       03900000
+***************************************************************         03910000
+                                                                        03920000
+PPLANLOC DS    0H                                                       03930000
+         LA    R15,PSBPLAN             BEGIN SCAN AT PSB.PSBPLAN        03940000
+         USING PSBPLAN,R15                                              03950000
+                                                                        03960000
+PPLANNXT DS    0H                                                       03970000
+         CLC   PSBPAPPL,AAPANAME       MATCHING APPL NAMES              03980000
+         BNE   PPLANADV                SKIP IF NOT                      03990000
+         CLC   PSBPLOGM,AAPLOGMD       MATCHING LOGMODES?               04000000
+         BER   R14                     RETURN R15 <- PSBPLAN            04010000
+                                                                        04020000
+PPLANADV DS    0H                                                       04030000
+         ICM   R15,15,PSBPANXT         TRY PSBPLAN EXTENSION            04040000
+         BNZ   PPLANNXT                AGAIN                            04050000
+         BR    R14                     RETURN FAIL CC = 0               04060000
+         DROP  R15                     PSBPLAN                          04070000
+                                                                        04080000
+         EJECT                                                          04090000
+***************************************************************         04100000
+*                                                                       04110000
+*   Local read only storage                                             04120000
+*                                                                       04130000
+***************************************************************         04140000
+                                                                        04150000
+CFG_POS  PLNXREF POS                   REPOSITION PLAN                  04160000
+                                                                        04170000
+CFG_DATA PLNXREF DATA                  RUN (DATA) PLAN                  04180000
+                                                                        04190000
+CFG_TERM PLNXREF TERM                  SESSTERM PLAN                    04200000
+                                                                        04210000
+         LTORG ,                                                        04220000
+                                                                        04230000
+         PRINT NOGEN                                                    04240000
+         ICVT  ,                                                        04250000
+         ITASK ,                                                        04260000
+         IPCB  ,                                                        04270000
+         END   ,                                                        04280000

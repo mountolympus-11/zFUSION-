@@ -1,0 +1,1530 @@
+IPRJSERV TITLE '- PROJECT/DATABASE SERVICES'                            00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE: IPRJSERV - PROJECT/DATABASE SERVICES                         00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    THIS PROGRAM CONTAINS ALL FUNCTIONS SUPPORTED BY THE               00080000
+*    PROJECT/DATABASE SERVICES.  SUPPORT IS PROVIDED TO OPEN,           00090000
+*    CLOSE, CREATE, SAVE, SAVEAS, AND DELETE PROJECTS.  OPENING         00100000
+*    AND CREATING PROJECTS CAUSES PROJECT SPACES TO BE CREATED          00110000
+*    AND PROJECTS TO BE IMPORTED FROM THE PROJECT DATABASE.             00120000
+*    A SAVE FUNCTION WILL EXPORT THE MODIFIED PORTIONS OF THE           00130000
+*    PROJECT TO THE VSAM PROJECT DATABASE BACKING THE PROJECT           00140000
+*    SPACES. SAVEAS REQUESTS ALLOW AN ENTIRE PROJECT TO BE              00150000
+*    EXPORTED TO A NEWLY NAMED PROJECT.                                 00160000
+*                                                                       00170000
+*    PROJECTS ARE IMPORTED AND EXPORTED AT THE ALU LEVEL                00180000
+*    (SPACE ALLOCATION UNIT).  A DEFAULT VALUE SPECIFIED BY THE         00190000
+*    #ALUSIZE EQUATE IDENTIFIES THE SPACE SEGMENT SIZE USED             00200000
+*    FOR PROJECT SPACES.  THIS VALUE CAN BE ALTERED TO ADJUST           00210000
+*    THE SPACE ALLOCATION UNIT.                                         00220000
+*                                                                       00230000
+* ON ENTRY:                                                             00240000
+*                                                                       00250000
+*    R1 WILL CONTAIN THE ADDRESS OF A STANDARD OS/VS PARAMETER          00260000
+*    LIST AS FOLLOWS:                                                   00270000
+*                                                                       00280000
+*        00  - FUNCTION CODE                                            00290000
+*              1 = PROJECT OPEN                                         00300000
+*              2 = PROJECT CLOSE                                        00310000
+*              3 = PROJECT CREATE (NEW)                                 00320000
+*              4 = PROJECT SAVE                                         00330000
+*              5 = PROJECT SAVEAS                                       00340000
+*              6 = PROJECT DELETE                                       00350000
+*              7 = REPLACE EXISTING PROJECT WITH SAME NAME              00360000
+*                                                                       00370000
+*        04  - ADDRESS OF PROJECT NAME                                  00380000
+*        08  - ADDRESS OF PROJECT SPACE TOKEN                           00390000
+*        12  - ADDRESS OF REQUESTOR'S USERID                            00400000
+*        16  - ADDRESS OF REQUESTOR'S SOURCE                            00410000
+*        20  - NUMBER  OF OIES (FIXED) FOR SHARED PROJECT SPACE         00420000
+*        24  - ADDRESS OF SPACE LOCK                                    00430000
+*                                                                       00440000
+* ON EXIT:                                                              00450000
+*                                                                       00460000
+*    R15 CONTAINS ONE OF THE FOLLOWING RETURN CODES                     00470000
+*                                                                       00480000
+*        RC00 - PROJECT REQUEST COMPLETED SUCCESSFULLY                  00490000
+*                                                                       00500000
+*        RC08 - PROJECT REQUEST FAILED                                  00510000
+*               R0 = RSN04 - PROJECT NOT FOUND IN DATABASE              00520000
+*                    RSN08 - PROJECT SPACE CREATE FAILED                00530000
+*                    RSN12 - PROJECT SPACE IMPORT FAILED                00540000
+*                    RSN16 - PROJECT SPACE DELETE FAILED                00550000
+*                    RSN20 - PROJECT SPACE EXPORT FAILED                00560000
+*                    RSN24 - PROJECT SPACE CONFIG FAILED                00570000
+*                                                                       00580000
+*        RC12 - DATABASE REQUEST FAILED                                 00590000
+*               R0 = VSAM RETURN/FEEDBACK CODE                          00600000
+*                                                                       00610000
+**<DOC-OFF>****************************************************         00620000
+                                                                        00630000
+         EJECT ,                                                        00640000
+***************************************************************         00650000
+*                                                                       00660000
+* MAINTEANCE:                                                           00670000
+*                                                                       00680000
+*   07/01/92 RON COLMONE                                                00690000
+*            INITIAL VERSION                                            00700000
+*                                                                       00710000
+*   05/07/93 RON COLMONE                                                00720000
+*            MODIFIED FOR ARCHITECHURE CHANGE.                          00730000
+*                                                                       00740000
+*   12/06/94 R. Turgeon                                                 00750000
+*            Removed PAGE= / SHRPAGE= for $SPACE, $OBJECT,              00760000
+*            and TB* service requests.  Replaced STORAGE OBTAIN         00770000
+*            RELEASE requests with $GETSTOR, $RETSTOR.                  00780000
+*                                                                       00790000
+***************************************************************         00800000
+                                                                        00810000
+         EJECT ,                                                        00820000
+         PRJPARMS ,                    PROJECT SERVICES PARMS           00830000
+                                                                        00840000
+         EJECT ,                                                        00850000
+         PERAREA ,                     PROJECT ERROR RETURN AREA        00860000
+                                                                        00870000
+         EJECT ,                                                        00880000
+         EQUS  ,                       REGISTER EQUATES                 00890000
+                                                                        00900000
+         EJECT ,                                                        00910000
+         TBSERVIS ,                    TABLE SERVICES EQUATES           00920000
+                                                                        00930000
+         EJECT ,                                                        00940000
+         $TOKEN ,                      SPACE TOKEN MAPPING              00950000
+                                                                        00960000
+##SQUISH EQU   1                       SQUISH OPTION                    00970000
+#ALUSIZE EQU   4096                    DEFAULT ALUSIZE                  00980000
+                                                                        00990000
+         EJECT ,                                                        01000000
+*--------------------------------------------------------------         01010000
+*                                                                       01020000
+*   GENERAL WORKAREA                                                    01030000
+*                                                                       01040000
+*--------------------------------------------------------------         01050000
+         #WORK LENGTH=2048                                              01060000
+WRK256   DS    XL256                   WORKAREA - 256 BYTE              01070000
+WRK1K    DS    XL1024                  WORKAREA - 1K                    01080000
+REGSAVE1 DS    16F                     REGISTER SAVE AREA               01090000
+REGSAVE2 DS    16F                     REGISTER SAVE AREA               01100000
+REGSAVE3 DS    16F                     REGISTER SAVE AREA               01110000
+                                                                        01120000
+CNTLFLAG DS    X                       CONTROL FLAGS                    01130000
+C$DBEOF  EQU   X'80'                     PROJECT EOF                    01140000
+C$EXPEOF EQU   X'40'                     SPACE EXPORT EOF               01150000
+C$EXPALU EQU   X'20'                     SPACE ALU OBTAINED             01160000
+C$REPPRJ EQU   X'10'                     REPLACE EXISTING PROJECT       01170000
+         DS    XL3                     RESERVED                         01180000
+                                                                        01190000
+$PRJNAME DS    CL8                     GENERATED PROJECT NAME           01200000
+ALUNUM   DS    F                       ALU NUMBER                       01210000
+SPCHKPT  DS    D                       SPACE MGMT CHECKPOINT            01220000
+SAVEALU# DS    F                       SAVE ALU NUMBER                  01230000
+ALUBUFF  DS    A                       ALU DATA ADDRESS                 01240000
+ALUBUFFL DS    F                       ALU DATA LENGTH                  01250000
+RECBUFF  DS    A                       REC DATA ADDRESS                 01260000
+RECBUFFL DS    F                       REC DATA LENGTH                  01270000
+                                                                        01280000
+PROJKEY  DS    0CL20                   PROJECT RECORD KEY               01290000
+PROJNAME DS    CL8                       PROJECT NAME                   01300000
+PROJRSVD DS    CL8                       ** RESERVED **                 01310000
+PROJALU  DS    F                         ALU NUMBER                     01320000
+                                                                        01330000
+$LUSER   DS    CL8                     CHANGED USER                     01340000
+$LTERM   DS    CL8                     CHANGED TERM                     01350000
+$LDATE   DS    F                       CHANGED DATE                     01360000
+$LTIME   DS    F                       CHANGED TIME                     01370000
+                                                                        01380000
+$OBJTOKN DS    XL($TOKLN)              OBJECT TOKEN                     01390000
+                                                                        01400000
+$DBPL    $DBIO   MF=L                  DATABASE I/O PLIST AREA          01410000
+                                                                        01420000
+         #ENDWORK ,                   WORKAREA LENGTH                   01430000
+         EJECT ,                                                        01440000
+***************************************************************         01450000
+*                                                                       01460000
+*  PROJECT SERVICES                                                     01470000
+*                                                                       01480000
+***************************************************************         01490000
+                                                                        01500000
+IPRJSERV #ENTER BASE=R12,         ENTRY LINKAGE                        +01510000
+               PREG=R8,                                                +01520000
+               WAPASS=YES                                               01530000
+                                                                        01540000
+         USING ITASK,R10          ADDRESSABILITY                        01550000
+                                                                        01560000
+         EJECT ,                                                        01570000
+****************************************************************        01580000
+*                                                                       01590000
+*  OBTAIN PASSED PARAMETERS AND CALL REQUESTED FUNCTION                 01600000
+*                                                                       01610000
+****************************************************************        01620000
+         USING PRJPARMS,R8        PLIST ADDRESSABILITY                  01630000
+                                                                        01640000
+         L     R1,PPUSER@         ADDR OF USERID                        01650000
+         MVC   $LUSER,0(R1)       COPY USERID                           01660000
+         L     R1,PPTERM@         ADDR OF USERID                        01670000
+         MVC   $LTERM,0(R1)       COPY LUNAME                           01680000
+                                                                        01690000
+         L     R2,PPFUNC          GET PROJECT SERVICE FUNC              01700000
+         BCTR  R2,0               CALC FUNCTION INDEX                   01710000
+         SLL   R2,2               PREPARE FOR WFB                       01720000
+         B     *+4(R2)            BRANCH TO APPROPRIATE FUNC            01730000
+         B     OPEN               PROJECT OPEN                          01740000
+         B     CLOSE              PROJECT CLOSE                         01750000
+         B     NEW                PROJECT OPEN (NEW)                    01760000
+         B     SAVE               PROJECT SAVE                          01770000
+         B     SAVEAS             PROJECT SAVEAS                        01780000
+         B     DELETE             PROJECT DELETE                        01790000
+         B     REPLACE            PROJECT REPLACE                       01800000
+         EX    R0,*-*             *** UNSUPPORTED FUNC ***              01810000
+         EX    R0,*-*             *** UNSUPPORTED FUNC ***              01820000
+         EX    R0,*-*             *** UNSUPPORTED FUNC ***              01830000
+         EX    R0,*-*             *** UNSUPPORTED FUNC ***              01840000
+         EX    R0,*-*             *** UNSUPPORTED FUNC ***              01850000
+                                                                        01860000
+         EJECT ,                                                        01870000
+****************************************************************        01880000
+*                                                                       01890000
+*  FUNC: OPEN PROJECT                                                   01900000
+*                                                                       01910000
+*    ATTEMPT TO READ ALU #0 RECORD FOR THE PROJECT.  IF PROJECT         01920000
+*    ALU #0 RECORD NOT AVAILABLE, THEN FAIL REQUEST WITH PROJECT        01930000
+*    NOT FOUND.                                                         01940000
+*                                                                       01950000
+****************************************************************        01960000
+OPEN     DS    0H                                                       01970000
+         XC    ALUNUM,ALUNUM           INITIALIZE ALUNUM                01980000
+         BAS   R14,INITKEY             INITIALIZE RECORD KEY            01990000
+                                                                        02000000
+         $DBIO GET,                    GET FIRST PROJECT RECORD        +02010000
+               KEY=PROJKEY,                                            +02020000
+               KEYLEN=L'PROJNAME,                                      +02030000
+               OPTS=(GENERIC,DIRECT),                                  +02040000
+               WORKA=WRK1K,                                            +02050000
+               MF=(E,$DBPL)                                             02060000
+                                                                        02070000
+         LR    R7,R1                   ADDRESS OF PROJECT RECORD        02080000
+         USING IPRJREC,R7              ESTABLISH ADDRESSABILITY         02090000
+                                                                        02100000
+         LTR   R15,R15                 RECORD FOUND?                    02110000
+         BNZ   ERRNOPRJ                PROJECT NOT FOUND                02120000
+         CLC   IPRECKEY,PROJKEY        ALU #0 RECORD OBTAINED?          02130000
+         BNE   ERRNOPRJ                PROJECT NOT FOUND                02140000
+                                                                        02150000
+         MVC   ALUNUM,IPRALU           COPY ALU NUMBER                  02160000
+                                                                        02170000
+*---------------------------------------------------------------        02180000
+*  ALU #0 RECORD FOUND,  CREATE PROJECT SPACE USING ALU #0.             02190000
+*---------------------------------------------------------------        02200000
+                                                                        02210000
+         LR    R1,R7                   ADDR OF PROJECT RECORD           02220000
+         BAS   R14,EXPDATA             EXPAND RECORD DATA               02230000
+                                                                        02240000
+         L     R1,ALUBUFF              ADDR OF ALU BUFFER               02250000
+         BAS   R14,SPCREATE            CREATE PROJECT SPACE             02260000
+         BNZ   ERRSPCRE                NO,  ERROR SPACE CREATE          02270000
+                                                                        02280000
+         BAS   R14,SPIMPSTR            SIGNAL START OF IMPORT           02290000
+         BNZ   ERRSPIMP                IMPORT ERROR                     02300000
+                                                                        02310000
+         EJECT ,                                                        02320000
+*---------------------------------------------------------------        02330000
+*  PROCESS ALL PROJECT RECORDS IMPORTING EACH OF THE DATABASE           02340000
+*  RECORD INTO THE PROJECT SPACE.                                       02350000
+*---------------------------------------------------------------        02360000
+OPENIMP  DS    0H                                                       02370000
+         L     R1,ALUBUFF              ADDRESS OF ALU BUFFER            02380000
+         L     R0,ALUNUM               ASSOCIATED ALU NUMBER            02390000
+         BAS   R14,SPIMPORT            IMPORT ALU TO PROJ SPACE         02400000
+         BNZ   ERRSPIMP                IMPORT FAILED                    02410000
+                                                                        02420000
+         $DBIO GET,                    READ PROJECT SEQUENTIALLY       +02430000
+               OPTS=(SEQ),                                             +02440000
+               WORKA=WRK1K,                                            +02450000
+               MF=(E,$DBPL)                                             02460000
+                                                                        02470000
+         LR    R7,R1                   ADDRESS OF PROJECT RECORD        02480000
+                                                                        02490000
+         LTR   R15,R15                 RECORD FOUND?                    02500000
+         BNZ   OPENEND                 END OF PROJECT                   02510000
+         CLC   IPRJNAME,PROJNAME       SAME PROJECT?                    02520000
+         BNE   OPENEND                 NO, END OF PROJECT               02530000
+                                                                        02540000
+         MVC   ALUNUM,IPRALU           COPY ALU NUMBER                  02550000
+                                                                        02560000
+         LR    R1,R7                   ADDR OF PROJECT RECORD           02570000
+         BAS   R14,EXPDATA             EXPAND RECORD DATA               02580000
+         B     OPENIMP                 IMPORT THIS ALU                  02590000
+                                                                        02600000
+         EJECT ,                                                        02610000
+*---------------------------------------------------------------        02620000
+*  END OF PROJECT TO BE IMPORTED.  TERMINATE DATABASE AND               02630000
+*  SPACE PROCESSING.                                                    02640000
+*---------------------------------------------------------------        02650000
+OPENEND  DS    0H                                                       02660000
+         $DBIO ENDREQ,                 TERMINATE DATABASE REQUEST      +02670000
+               WORKA=WRK1K,                                            +02680000
+               MF=(E,$DBPL)                                             02690000
+                                                                        02700000
+         BAS   R14,SPIMPEND            TERMINATE SPACE IMPORT           02710000
+         BNZ   ERRSPIMP                SPACE IMPORT ERROR               02720000
+         BAS   R14,SPCONFIG            SET TBSERV CONFIG OPTIONS        02730000
+         BNZ   ERRSPCFG                SPACE CONFIG ERROR               02740000
+                                                                        02750000
+         BAS   R14,CLEANUP             CLEANUP ALLOCATED STORAGE        02760000
+                                                                        02770000
+         LA    R15,RC00                OPEN SUCCESSFULL                 02780000
+         LA    R0,RSN00                                                 02790000
+         B     RETURN                  RETURN                           02800000
+         DROP  R7                      IPRJREC                          02810000
+                                                                        02820000
+         EJECT ,                                                        02830000
+****************************************************************        02840000
+*                                                                       02850000
+*  FUNC: CLOSE PROJECT                                                  02860000
+*                                                                       02870000
+*  PROCESS REQUEST TO CLOSE PROJECT.  THIS REQUEST RESULTS IN           02880000
+*  A DELETION OF THE PROJECT SPACE.  NO DATABASE UPDATING WILL          02890000
+*  OCCUR, A PRIOR SAVE(AS) IS REQUIRED TO WRITE THE PROJECT TO          02900000
+*  DASD.                                                                02910000
+*                                                                       02920000
+****************************************************************        02930000
+CLOSE    DS    0H                                                       02940000
+         BAS   R14,SPDELETE            DELETE PROJECT SPACE             02950000
+         BNZ   ERRSPDEL                ERROR DELETING DATASPACE         02960000
+                                                                        02970000
+         LA    R15,RC00                CLOSE SUCCESSFULL                02980000
+         LA    R0,RSN00                                                 02990000
+         B     RETURN                  RETURN                           03000000
+                                                                        03010000
+         EJECT ,                                                        03020000
+****************************************************************        03030000
+*                                                                       03040000
+*  FUNC: NEW PROJECT                                                    03050000
+*                                                                       03060000
+*  PROCESS REQUEST TO CREATE A NEW PROJECT SPACE.  A PROJECT            03070000
+*  SPACE IS CREATED USING THE DEFAULT A DEFAULT ALUSIZE AND             03080000
+*  INITIAL SPACE ALLOCATION.                                            03090000
+*                                                                       03100000
+****************************************************************        03110000
+NEW      DS    0H                                                       03120000
+         SR    R1,R1                   ALU #0 NOT AVAILABLE             03130000
+         BAS   R14,SPCREATE            CREATE PROJECT SPACE             03140000
+         BNZ   ERRSPCRE                NO,  ERROR SPACE CREATE          03150000
+         BAS   R14,SPCONFIG            SET TBSERV CONFIG OPTIONS        03160000
+         BNZ   ERRSPCFG                ERROR, SPACE CONFIG              03170000
+                                                                        03180000
+         BAS   R14,CLEANUP             RELEASE ALLOCATED RESOURCES      03190000
+                                                                        03200000
+         LA    R15,RC00                CLOSE SUCCESSFULL                03210000
+         LA    R0,RSN00                                                 03220000
+         B     RETURN                  RETURN                           03230000
+                                                                        03240000
+         EJECT ,                                                        03250000
+****************************************************************        03260000
+*                                                                       03270000
+*  FUNC: PROJECT SAVEAS                                                 03280000
+*                                                                       03290000
+*  PROCESS REQUEST TO SAVE PROJECT UNDER A NEW NAME.  IF SAVEAS         03300000
+*  REQUEST IS FOR CURRENT PROJECT NAME, THEN PASS CONTROL TO            03310000
+*  STANDARD SAVE LOGIC.  ALL ACTIVE ALU'S ARE EXPORTED FROM THE         03320000
+*  PROJECT AND INSERTED/REPLACE INTO DATABASE UNDER THE NEW             03330000
+*  PROJECT.                                                             03340000
+*                                                                       03350000
+*  IF PROJECT DATABASE RECORDS UNDER THE NEW NAME DO NOT HAVE           03360000
+*  MATCHING EXPORTED ALU'S, THEN THE DATABASE RECORDS ARE               03370000
+*  DELETED.                                                             03380000
+*                                                                       03390000
+*---------------------------------------------------------------        03400000
+REPLACE  DS    0H                                                       03410000
+         OI    CNTLFLAG,C$REPPRJ       INDICATE PROJECT REPLACE         03420000
+         B     SASREPPJ                CONTINUE WITH REPLACE            03430000
+                                                                        03440000
+SAVEAS   DS    0H                                                       03450000
+         L     R3,PPTOKN@              ADDRESS OF TOKEN                 03460000
+         USING $TOKEN,R3               ESTABLISH ADDRESSABILITY         03470000
+         L     R1,PPNAME@              GET NEW PROJ NAME                03480000
+         CLC   $NAME,0(R1)             NEW NAME SAME AS OLD?            03490000
+         BE    SAVE                    YES,  ASSUME STD SAVE            03500000
+         DROP  R3                      $TOKEN                           03510000
+                                                                        03520000
+SASREPPJ DS    0H                                                       03530000
+         BAS   R14,CHGSTAT             GET CHANGE STATISTICS            03540000
+         BAS   R14,SPEXPSTA            PREPARE FOR EXPORT ACTIVE        03550000
+         B     *+4(R15)                BRANCH ON RC                     03560000
+         B     SASEXPGO                OK,  CONTINUE WITH EXPORT        03570000
+         B     SASEXPGO                OPEN OBJS, CONTINUE WITH EXPORT  03580000
+         B     ERRSPEXP                SPACE EXPORT FAILED              03590000
+         B     ERRSPEXP                SPACE EXPORT FAILED              03600000
+                                                                        03610000
+SASEXPGO DS    0H                                                       03620000
+         L     R0,=A(#ALUSIZE)         ALU RECORD BUFFER                03630000
+         A     R0,=A(IPRHDLN)          PLUS LENGTH OF REC HDR           03640000
+         BAS   R14,GETBUFF             GET ALU/REC BUFFER               03650000
+         MVC   RECBUFF,ALUBUFF         COPY BUFFER ADDRESS              03660000
+         MVC   RECBUFFL,ALUBUFFL       COPY BUFFER LENGTH               03670000
+         LR    R7,R1                   ADDRESS OF RECORD HEADER         03680000
+         USING IPRJREC,R7              ESTABLISH ADDRESSABILITY         03690000
+                                                                        03700000
+         L     R0,=A(#ALUSIZE)         ALU BUFFER SIZE                  03710000
+         BAS   R14,GETBUFF             GET ALU/REC BUFFER               03720000
+                                                                        03730000
+*---------------------------------------------------------------        03740000
+*  PRIME THE RECORD BUFFER WITH THE FIRST PROJECT/ALU RECORD            03750000
+*  IN THE DATABASE.  IF THE PROJECT IS NOT FOUND, THEN INDICATE         03760000
+*  END-OF-FILE ON DATABASE.                                             03770000
+*---------------------------------------------------------------        03780000
+         XC    ALUNUM,ALUNUM           INITIALIZE ALU NUMBER            03790000
+         BAS   R14,INITKEY             INITIALIZE RECORD KEY            03800000
+                                                                        03810000
+SASGET   DS    0H                                                       03820000
+         TM    CNTLFLAG,C$DBEOF        PROJECT EOF                      03830000
+         BO    SASEXPNX                YES, EXPORT NEXT RECORD          03840000
+                                                                        03850000
+         $DBIO GET,                    RETRIEVE PROJ RECORD            +03860000
+               KEY=PROJKEY,                                            +03870000
+               KEYLEN=L'PROJKEY,                                       +03880000
+               AREA=*RECBUFF,                                          +03890000
+               AREALEN=*RECBUFFL,                                      +03900000
+               OPTS=(DIRECT,KGE,MOVE,UPDATE),                          +03910000
+               WORKA=WRK1K,                                            +03920000
+               MF=(E,$DBPL)                                             03930000
+                                                                        03940000
+         LTR   R15,R15                 RECORD FOUND                     03950000
+         BNZ   SASDBEOF                PROJDB EOF                       03960000
+                                                                        03970000
+         CLC   IPRJNAME,PROJNAME       RIGHT PROJECT?                   03980000
+         BNE   SASDBEOF                NO, PROJECT END-OF-FILE          03990000
+         MVC   SAVEALU#,IPRALU         SAVE ALU NUMBER                  04000000
+         B     SASEXPNX                EXPORT NEXT ALU RECORD           04010000
+                                                                        04020000
+SASDBEOF DS    0H                                                       04030000
+         OI    CNTLFLAG,C$DBEOF        END OF FILE ON PROJ              04040000
+                                                                        04050000
+         $DBIO ENDREQ,WORKA=WRK1K,MF=(E,$DBPL)                          04060000
+                                                                        04070000
+*---------------------------------------------------------------        04080000
+*  EXPORT ALL ACTIVE ALU'S AND INSERT/REPLACE/DELETE                    04090000
+*  PROJECT DATABASE RECORDS AS APPROPRIATE.                             04100000
+*---------------------------------------------------------------        04110000
+SASEXPNX DS    0H                                                       04120000
+         TM    CNTLFLAG,C$EXPALU       STILL HAVE ALU TO EXP?           04130000
+         BO    SASCOMPR                YES, CONTINUE WITH COMP          04140000
+         TM    CNTLFLAG,C$EXPEOF       SPEXPORT EOF?                    04150000
+         BO    SASCOMPR                YES, CONTINUE WITH COMP          04160000
+                                                                        04170000
+         L     R1,ALUBUFF              ADDR OF RECORD DATA              04180000
+         BAS   R14,SPEXPORT            EXPORT ACTIVE PAGE               04190000
+         B     *+4(R15)                BRANCH ON EXP RC                 04200000
+         B     SASEXPOK                OK,  INDICATE EXP OK             04210000
+         B     SASEXEOF                EOF, TERMINATE EXPORT            04220000
+         B     ERRSPEXP                SPACE EXPORT FAILED              04230000
+         B     ERRSPEXP                SPACE EXPORT FAILED              04240000
+                                                                        04250000
+SASEXPOK DS    0H                                                       04260000
+         OI    CNTLFLAG,C$EXPALU       HAVE ALU TO PROCESS              04270000
+                                                                        04280000
+*---------------------------------------------------------------        04290000
+*  COMPARE EXPORTED ALU NUMBER AND DATABASE RECORD KEY TO               04300000
+*  DETERMINE IF ALU SHOULD BE INSERTED/REPLACED OR IF PROJ              04310000
+*  RECORD SHOULD BE DELETED.                                            04320000
+*---------------------------------------------------------------        04330000
+SASCOMPR DS    0H                                                       04340000
+         TM    CNTLFLAG,C$DBEOF+C$EXPEOF  EOF ON DB AND SPACE           04350000
+         BO    SASEND                  YES, TERMINATE SAVEAS            04360000
+                                                                        04370000
+         TM    CNTLFLAG,C$DBEOF        PROJECT END-OF-FILE              04380000
+         BO    SASINSRT                INSERT PROJECT RECORD            04390000
+         TM    CNTLFLAG,C$EXPEOF       EXPORT END-OF-FILE               04400000
+         BO    SASDELET                DELETE PROJECT RECORD            04410000
+                                                                        04420000
+         L     R0,ALUNUM               GET EXPORTED ALU NUMBER          04430000
+         C     R0,SAVEALU#             COMP EXP ALU AND DB REC          04440000
+         BE    SASREPL                 EQUAL - REPLACE DB RECORD        04450000
+         BL    SASINSRT                LESS  - INSERT EXP ALU           04460000
+         BH    SASDELET                HIGH  - DELETE  DB RECORD        04470000
+                                                                        04480000
+*---------------------------------------------------------------        04490000
+*  EXPORTED ALU AND DB RECORD CONTAIN IDENTICAL KEYS.  REPLACE          04500000
+*  PROJECT RECORD FOR THIS ALU IN PROJECT DATABASE.                     04510000
+*---------------------------------------------------------------        04520000
+                                                                        04530000
+SASREPL  DS    0H                                                       04540000
+         BAS   R14,INITKEY             INITIALIZE RECORD KEY            04550000
+         BAS   R14,INITREC             INITIALIZE RECORD HEADER         04560000
+         BAS   R14,ALU2REC             COPY ALU TO RECORD               04570000
+         LH    R2,IPRECLEN             GET LENGTH OF RECORD             04580000
+                                                                        04590000
+         $DBIO UPDATE,                 INSERT PROJ RECORD              +04600000
+               AREA=*RECBUFF,                                          +04610000
+               AREALEN=*RECBUFFL,                                      +04620000
+               RECLEN=(R2),                                            +04630000
+               KEY=PROJKEY,                                            +04640000
+               KEYLEN=L'PROJKEY,                                       +04650000
+               OPTS=(MOVE),                                            +04660000
+               WORKA=WRK1K,                                            +04670000
+               MF=(E,$DBPL)                                             04680000
+                                                                        04690000
+         LTR   R15,R15                 INSERT SUCCESSFULL?              04700000
+         BNZ   ERRDBREQ                DATABASE REQUEST ERROR           04710000
+                                                                        04720000
+         NI    CNTLFLAG,FF-C$EXPALU    RESET EXP ALU FLAG               04730000
+         B     SASGETNX                GET NEXT DATABASE RECORD         04740000
+                                                                        04750000
+*---------------------------------------------------------------        04760000
+*  DATABASE REC DOES NOT EXIST FOR MATCHING ALU NUMBER, INSERT          04770000
+*  PROJECT ALU RECORD INTO DATABASE.                                    04780000
+*---------------------------------------------------------------        04790000
+SASINSRT DS    0H                                                       04800000
+         TM    CNTLFLAG,C$DBEOF        PROJECT EOF                      04810000
+         BO    SASINSGO                YES, CONTINUE W/ INSERT          04820000
+         $DBIO ENDREQ,WORKA=WRK1K,MF=(E,$DBPL)                          04830000
+                                                                        04840000
+SASINSGO DS    0H                                                       04850000
+         BAS   R14,INITKEY             INITIALIZE RECORD KEY            04860000
+         BAS   R14,INITREC             INITIALIZE RECORD HEADER         04870000
+         BAS   R14,ALU2REC             COPY ALU TO RECORD               04880000
+         LH    R2,IPRECLEN             GET LENGTH OF RECORD             04890000
+                                                                        04900000
+         $DBIO INSERT,                 INSERT PROJ RECORD              +04910000
+               AREA=*RECBUFF,                                          +04920000
+               AREALEN=*RECBUFFL,                                      +04930000
+               RECLEN=(R2),                                            +04940000
+               KEY=PROJKEY,                                            +04950000
+               KEYLEN=L'PROJKEY,                                       +04960000
+               OPTS=(MOVE,DIRECT),                                     +04970000
+               WORKA=WRK1K,                                            +04980000
+               MF=(E,$DBPL)                                             04990000
+                                                                        05000000
+         LTR   R15,R15                 INSERT SUCCESSFULL?              05010000
+         BNZ   ERRDBREQ                DATABASE REQUEST ERROR           05020000
+                                                                        05030000
+         NI    CNTLFLAG,FF-C$EXPALU    RESET EXP ALU FLAG               05040000
+         MVC   PROJALU,SAVEALU#        RESTORE ALU NUMBER               05050000
+         B     SASGET                  RETRIEVE DB RECORD               05060000
+                                                                        05070000
+*---------------------------------------------------------------        05080000
+*  RECORD EXISTS IN PROJECT DATABASE AND NO MATCHING ALU                05090000
+*  WAS EXPORTED FROM THE PROJECT SPACE.  DELETE MISMATCHED              05100000
+*  ALU RECORD.                                                          05110000
+*---------------------------------------------------------------        05120000
+SASDELET DS    0H                                                       05130000
+         $DBIO DELETE,                 INSERT PROJ RECORD              +05140000
+               KEY=PROJKEY,                                            +05150000
+               KEYLEN=L'PROJKEY,                                       +05160000
+               OPTS=(MOVE),                                            +05170000
+               WORKA=WRK1K,                                            +05180000
+               MF=(E,$DBPL)                                             05190000
+                                                                        05200000
+         LTR   R15,R15                 INSERT SUCCESSFULL?              05210000
+         BNZ   ERRDBREQ                DATABASE REQUEST ERROR           05220000
+                                                                        05230000
+         B     SASGETNX                RETRIEVE NEXT DB RECORD          05240000
+                                                                        05250000
+*---------------------------------------------------------------        05260000
+*  INCREMENT PROJECT RECORD KEY AND GO RETRIEVE NEXT PROJECT            05270000
+*  RECORD.                                                              05280000
+*---------------------------------------------------------------        05290000
+SASGETNX DS    0H                                                       05300000
+         L     R1,SAVEALU#             GET LAST RECORD ALU NUMBER       05310000
+         LA    R1,1(,R1)               INCREMENT BY 1                   05320000
+         ST    R1,PROJALU              PROJECT KEY ALU NUMBER           05330000
+         B     SASGET                                                   05340000
+                                                                        05350000
+*---------------------------------------------------------------        05360000
+*  END OF FILE OCCURRED ON SPACE EXPORT, FLAG EOF AND                   05370000
+*  CONTINUE PROCESSING PROJECT RECORD DELETES UNTIL EOF                 05380000
+*  ON PROJECT.                                                          05390000
+*---------------------------------------------------------------        05400000
+SASEXEOF DS    0H                                                       05410000
+         OI    CNTLFLAG,C$EXPEOF       INDICATE EOF ON SPACE EXP        05420000
+         B     SASCOMPR                COMPLETE PROCESSING ON DB        05430000
+                                                                        05440000
+*---------------------------------------------------------------        05450000
+*   THE PROJECT HAS BEEN COMPLETLY EXPORTED FROM THE SPACE.             05460000
+*   TERMINATE EXPORT PROCESSING AND RELEASE THE SERIALIZATION           05470000
+*   ON THE OLD PROJECT NAME.  RENAME THE PROJECT IN THE TOKEN.          05480000
+*---------------------------------------------------------------        05490000
+SASEND   DS    0H                                                       05500000
+         BAS   R14,SPEXPEND            TERMINATE EXPORT REQUEST         05510000
+         BNZ   ERRSPEXP                EXPORT REQUEST FAILED            05520000
+                                                                        05530000
+         BAS   R14,CLEANUP             CLEANUP ALLOCATED STORAGE        05540000
+                                                                        05550000
+         TM    CNTLFLAG,C$REPPRJ       REPLACE PROJECT REQUESTED?       05560000
+         BO    SASEXIT                 YES, SKIP PROJECT RENAME ON REP  05570000
+                                                                        05580000
+         L     R3,PPTOKN@              ADDRESS OF TOKEN                 05590000
+         USING $TOKEN,R3               ESTABLISH ADDRESSABILITY         05600000
+         L     R1,PPNAME@              GET NEW PROJ NAME                05610000
+         MVC   $NAME,0(R1)             RENAME PROJECT                   05620000
+         DROP  R3                      $TOKEN                           05630000
+                                                                        05640000
+SASEXIT  DS    0H                                                       05650000
+         LA    R15,RC00                SAVEAS SUCCESSFULL               05660000
+         LA    R0,RSN00                                                 05670000
+         B     RETURN                  RETURN                           05680000
+         DROP  R7                      IPRJREC                          05690000
+                                                                        05700000
+         EJECT ,                                                        05710000
+****************************************************************        05720000
+*                                                                       05730000
+*  FUNC: SAVE PROJECT                                                   05740000
+*                                                                       05750000
+*  PROCESS REQUEST TO SAVE THE PROJECT.  THE MODIFIED ALU'S             05760000
+*  ARE RETRIEVED FROM THE PROJECT SPACE.  A GETUPD AGAINST              05770000
+*  THE PROJECT DATABASE IS ISSUED TO OBTIAN THE RECORD                  05780000
+*  FOR UPDATE/DELETE PROCESSING.  IF THE RECORD DOES NOT EXIST          05790000
+*  IN THE DATABASE AND THE ALU IS ACTIVE IN THE SPACE, THEN             05800000
+*  A RECORD IS BUILT TO BE INSERTED INTO THE DATABASE.                  05810000
+*                                                                       05820000
+****************************************************************        05830000
+SAVE     DS    0H                                                       05840000
+         BAS   R14,CHGSTAT             GET CHANGE STATISTICS            05850000
+         BAS   R14,SPEXPSTM            PREPARE FOR EXPORT MODIFIED      05860000
+         B     *+4(R15)                BRANCH ON RC                     05870000
+         B     SAVEXPGO                OK,  CONTINUE WITH EXPORT        05880000
+         B     SAVEXPGO                OPEN OBJS, CONTINUE WITH EXPORT  05890000
+         B     ERRSPEXP                SPACE EXPORT FAILED              05900000
+         B     ERRSPEXP                SPACE EXPORT FAILED              05910000
+                                                                        05920000
+SAVEXPGO DS    0H                                                       05930000
+         L     R0,=A(#ALUSIZE)         ALU RECORD BUFFER                05940000
+         A     R0,=A(IPRHDLN)          PLUS LENGTH OF RECORD HDR        05950000
+         BAS   R14,GETBUFF             GET ALU/REC BUFFER               05960000
+         MVC   RECBUFF,ALUBUFF         COPY BUFFER ADDRESS              05970000
+         MVC   RECBUFFL,ALUBUFFL       COPY BUFFER LENGTH               05980000
+         LR    R7,R1                   ADDRESS OF RECORD HEADER         05990000
+         USING IPRJREC,R7              ESTABLISH ADDRESSABILITY         06000000
+                                                                        06010000
+         L     R0,=A(#ALUSIZE)         ALU BUFFER SIZE                  06020000
+         BAS   R14,GETBUFF             GET ALU BUFFER                   06030000
+                                                                        06040000
+*---------------------------------------------------------------        06050000
+*  EXPORT THE MODIFIED ALU'S IN THE PROJECT SPACE AND DETERMINE         06060000
+*  ATTEMPT TO OBTAIN UPDATE CONTOL OF THE ALU DATABASE RECORD.          06070000
+*  IF THE RECORD IS AVAILABLE, THEN DETERMINE IF UPDATE OR DELETE       06080000
+*  PROCESSING IS REQUIRED.                                              06090000
+*---------------------------------------------------------------        06100000
+SAVEXPNX DS    0H                                                       06110000
+         L     R1,ALUBUFF              ADDRESS OF ALU BUFFER            06120000
+         BAS   R14,SPEXPORT            GET MODIFIED ALU                 06130000
+         B     *+4(R15)                BRANCH ON EXP RC                 06140000
+         B     SAVPROC                 OK, PROCESS ALU                  06150000
+         B     SAVEND                  EOF, TERMINATE EXPORT            06160000
+         B     ERRSPEXP                SPACE EXPORT FAILED              06170000
+         B     ERRSPEXP                SPACE EXPORT FAILED              06180000
+                                                                        06190000
+SAVPROC  DS    0H                                                       06200000
+         LR    R2,R0                   SAVE ALLOCATED INDICATOR         06210000
+         BAS   R14,INITKEY             INITIALIZE RECORD KEY            06220000
+                                                                        06230000
+         $DBIO GET,                    GET DATABASE RECORD (UPDATE)    +06240000
+               AREA=*RECBUFF,                                          +06250000
+               AREALEN=*RECBUFFL,                                      +06260000
+               RECLEN=0,                                               +06270000
+               KEY=PROJKEY,                                            +06280000
+               KEYLEN=L'PROJKEY,                                       +06290000
+               OPTS=(MOVE,DIRECT,UPDATE),                              +06300000
+               WORKA=WRK1K,                                            +06310000
+               MF=(E,$DBPL)                                             06320000
+                                                                        06330000
+         LTR   R15,R15                 DATABASE RECORD AVAILABLE?       06340000
+         BNZ   SAVINSRT                NO, INSERT INTO DATABASE         06350000
+                                                                        06360000
+         LTR   R2,R2                   ALU ALLOCATED?                   06370000
+         BNZ   SAVDELET                NO, DELETE EXISTING RECORD       06380000
+                                                                        06390000
+*---------------------------------------------------------------        06400000
+*  MODIFIED ALU IS ALLOCATED,  BUILD DATABASE RECORD AND                06410000
+*  UPDATE RECORD IN DATABASE.                                           06420000
+*---------------------------------------------------------------        06430000
+         BAS   R14,INITREC             INITIALIZE RECORD HEADER         06440000
+         BAS   R14,ALU2REC             COPY ALU TO RECORD               06450000
+         LH    R2,IPRECLEN             GET LENGTH OF RECORD             06460000
+                                                                        06470000
+         $DBIO UPDATE,                 UPDATE DATABASE RECORD          +06480000
+               AREA=*RECBUFF,                                          +06490000
+               AREALEN=*RECBUFFL,                                      +06500000
+               RECLEN=(R2),                                            +06510000
+               KEY=PROJKEY,                                            +06520000
+               KEYLEN=L'PROJKEY,                                       +06530000
+               OPTS=(MOVE),                                            +06540000
+               WORKA=WRK1K,                                            +06550000
+               MF=(E,$DBPL)                                             06560000
+                                                                        06570000
+         LTR   R15,R15                 INSERT SUCCESSFULL?              06580000
+         BNZ   ERRDBREQ                DATABASE REQUEST ERROR           06590000
+                                                                        06600000
+         B     SAVEXPNX                GET NEXT MODIFIED ALU            06610000
+                                                                        06620000
+*---------------------------------------------------------------        06630000
+*  ALU CURRENTLY DOES NOT EXIST IN DATABASE. DETERMINE IF THE           06640000
+*  MODIFIED ALU IS ALLOCATED OR DEALLOCATED.  IF ALLOCATED, THEN        06650000
+*  INSERT THE MODIFIED ALU INTO THE PROJECT DATABASE.                   06660000
+*---------------------------------------------------------------        06670000
+SAVINSRT DS    0H                                                       06680000
+         LTR   R2,R2                   ALU ALLOCATED?                   06690000
+         BNZ   SAVEXPNX                NO,  GET NEXT MOD ALU            06700000
+                                                                        06710000
+         BAS   R14,INITKEY             INITIALIZE RECORD KEY            06720000
+         BAS   R14,INITREC             INITIALIZE RECORD HEADER         06730000
+         BAS   R14,ALU2REC             COPY ALU TO RECORD               06740000
+         LH    R2,IPRECLEN             GET LENGTH OF RECORD             06750000
+                                                                        06760000
+         $DBIO INSERT,                 INSERT PROJ RECORD              +06770000
+               AREA=*RECBUFF,                                          +06780000
+               AREALEN=*RECBUFFL,                                      +06790000
+               RECLEN=(R2),                                            +06800000
+               KEY=PROJKEY,                                            +06810000
+               KEYLEN=L'PROJKEY,                                       +06820000
+               OPTS=(MOVE,DIRECT),                                     +06830000
+               WORKA=WRK1K,                                            +06840000
+               MF=(E,$DBPL)                                             06850000
+                                                                        06860000
+         LTR   R15,R15                 INSERT SUCCESSFULL?              06870000
+         BNZ   ERRDBREQ                DATABASE REQUEST ERROR           06880000
+                                                                        06890000
+         B     SAVEXPNX                GET NEXT MODIFIED ALU            06900000
+                                                                        06910000
+*---------------------------------------------------------------        06920000
+*  MODIFIED ALU IS NOT ALLOCATED BUT RESIDES IN THE PROJECT             06930000
+*  DATABASE.  DELETE THE ALU RECORD FROM THE DATABASE.                  06940000
+*---------------------------------------------------------------        06950000
+SAVDELET DS    0H                                                       06960000
+         $DBIO DELETE,                 DELETE DEALLOCATED RECORD       +06970000
+               KEY=PROJKEY,                                            +06980000
+               KEYLEN=L'PROJKEY,                                       +06990000
+               OPTS=(MOVE),                                            +07000000
+               WORKA=WRK1K,                                            +07010000
+               MF=(E,$DBPL)                                             07020000
+                                                                        07030000
+         LTR   R15,R15                 INSERT SUCCESSFULL?              07040000
+         BNZ   ERRDBREQ                DATABASE REQUEST ERROR           07050000
+                                                                        07060000
+         B     SAVEXPNX                GET NEXT MODIFIED ALU            07070000
+                                                                        07080000
+*---------------------------------------------------------------        07090000
+*   EXPORT MODIFIED PROCESSING IS COMPLETED.  PROJECT DATABASE          07100000
+*   NOW REFLECTS PROJECT SPACE.  TERMINATE EXPORT PROCESSING.           07110000
+*---------------------------------------------------------------        07120000
+SAVEND   DS    0H                                                       07130000
+         BAS   R14,SPEXPEND            TERMINATE EXPORT REQUEST         07140000
+         BNZ   ERRSPEXP                EXPORT REQUEST FAILED            07150000
+                                                                        07160000
+         BAS   R14,CLEANUP             CLEANUP ALLOCATED RESOURCE       07170000
+                                                                        07180000
+         LA    R15,RC00                SAVE SUCCESSFULL                 07190000
+         LA    R0,RSN00                                                 07200000
+         B     RETURN                  RETURN                           07210000
+         DROP  R7                      IPRJREC                          07220000
+                                                                        07230000
+         EJECT ,                                                        07240000
+****************************************************************        07250000
+*                                                                       07260000
+*  FUNC: DELETE PROJECT                                                 07270000
+*                                                                       07280000
+*  PROCESS REQUEST TO DELETE ALL RECORDS IN THE SPECIFIED               07290000
+*  PROJECT.                                                             07300000
+*                                                                       07310000
+*  THE PROJECT ALU DATABASE RECORDS ARE READ SEQUENTIALLY               07320000
+*  AND DELETED FROM THE DATABASE.                                       07330000
+*                                                                       07340000
+****************************************************************        07350000
+DELETE   DS    0H                                                       07360000
+         XC    ALUNUM,ALUNUM           INITIALIZE ALUNUM                07370000
+         BAS   R14,INITKEY             BUILD DATABASE RECORD KEY        07380000
+                                                                        07390000
+DELNEXT  DS    0H                                                       07400000
+         $DBIO GET,                    GET PROJ RECORD (UPDATE)        +07410000
+               KEY=PROJKEY,                                            +07420000
+               KEYLEN=L'PROJNAME,                                      +07430000
+               OPTS=(GENERIC,DIRECT,UPDATE),                           +07440000
+               WORKA=WRK1K,                                            +07450000
+               MF=(E,$DBPL)                                             07460000
+                                                                        07470000
+         LR    R7,R1                   ADDRESS OF PROJECT RECORD        07480000
+         USING IPRJREC,R7              ESTABLISH ADDRESSABILITY         07490000
+                                                                        07500000
+         LTR   R15,R15                 RECORD FOUND?                    07510000
+         BNZ   DELDONE                 PROJECT NOT FOUND                07520000
+         CLC   IPRJNAME,PROJNAME       SAME PROJECT                     07530000
+         BNE   DELDONE                 PROJECT NOT FOUND                07540000
+                                                                        07550000
+         $DBIO DELETE,                 DELETE PROJECT RECORD           +07560000
+               KEY=PROJKEY,                                            +07570000
+               KEYLEN=L'PROJKEY,                                       +07580000
+               WORKA=WRK1K,                                            +07590000
+               MF=(E,$DBPL)                                             07600000
+                                                                        07610000
+         LTR   R15,R15                 RECORD DELETED?                  07620000
+         BNZ   ERRDBREQ                DATABASE REQUEST ERROR           07630000
+         B     DELNEXT                 DELETE NEXT RECORD               07640000
+                                                                        07650000
+*---------------------------------------------------------------        07660000
+*   DELETE PROCESSING COMPLETED.  CLEANUP ALLOCATED RESOURCES           07670000
+*   AND RETURN.                                                         07680000
+*---------------------------------------------------------------        07690000
+DELDONE  DS    0H                                                       07700000
+         BAS   R14,CLEANUP             CLEANUP ALLOCATED RESOURCES      07710000
+         LA    R15,RC00                DELETE SUCCESSFULL               07720000
+         LA    R0,RSN00                                                 07730000
+         B     RETURN                  AND RETURN                       07740000
+                                                                        07750000
+         EJECT ,                                                        07760000
+****************************************************************        07770000
+*                                                                       07780000
+*  ERROR EXITS                                                          07790000
+*                                                                       07800000
+****************************************************************        07810000
+                                                                        07820000
+*-----------------                                                      07830000
+* OPEN/NEW ERRORS                                                       07840000
+*-----------------                                                      07850000
+ERRNOPRJ DS    0H                                                       07860000
+         BAS   R14,CLEANUP             CLEANUP ALLOCATED STG            07870000
+         LA    R15,RC08                PROJECT REQUEST FAILED           07880000
+         LA    R0,RSN04                PROJECT NOT FOUND IN DB          07890000
+         B     RETURN                  RETURN                           07900000
+                                                                        07910000
+*------------------------------------------------------                 07920000
+* $SPACE ERRORS                                                         07930000
+* NOTE: PROTECT R15-R1 UNTIL SAVED IN ERROR RETURN AREA                 07940000
+*                                                                       07950000
+* R15 - $SPACE RETURN CODE                                              07960000
+*    $SPACE RC DEPENDENT                                                07970000
+*    R0  - SYSTEM SERVICE RETURN CODE                                   07980000
+*    R1  - SYSTEM SERVICE REASON CODE                                   07990000
+*------------------------------------------------------                 08000000
+ERRSPCRE DS    0H                                                       08010000
+         LA    R3,RSN08                CREATE FAILED                    08020000
+         B     ERRSPCMN                                                 08030000
+                                                                        08040000
+ERRSPIMP DS    0H                                                       08050000
+         LA    R3,RSN12                IMPORT FAILED                    08060000
+         B     ERRSPCMN                                                 08070000
+                                                                        08080000
+ERRSPDEL DS    0H                                                       08090000
+         LA    R3,RSN16                DESTROY FAILED                   08100000
+         B     ERRSPCMN                                                 08110000
+                                                                        08120000
+ERRSPEXP DS    0H                                                       08130000
+         LA    R3,RSN20                EXPORT FAILED                    08140000
+         B     ERRSPCMN                                                 08150000
+                                                                        08160000
+ERRSPCFG DS    0H                                                       08170000
+         LA    R3,RSN24                CONFIG FAILED                    08180000
+         B     ERRSPCMN                                                 08190000
+                                                                        08200000
+ERRSPCMN DS    0H                                                       08210000
+         ICM   R2,B'1111',PPERR@       RETURN ERROR DETAILS ?           08220000
+         BZ    ERRSPCLN                NO, CLEAN UP                     08230000
+                                                                        08240000
+         USING PERAREA,R2                                               08250000
+         MVC   PERSRVC,=CL(L'PERSRVC)'SPACE' RETURN ERROR DETAILS       08260000
+         STM   15,1,PERRCS             $SPACE RC, SYS RC, RSN TO CALLER 08270000
+         DROP  R2                      PERAREA                          08280000
+                                                                        08290000
+ERRSPCLN DS    0H                                                       08300000
+         BAS   R14,CLEANUP             CLEANUP ALLOCATED STG            08310000
+         LA    R15,RC08                PROJECT REQUEST FAILED - RC      08320000
+         LR    R0,R3                   REASON CODE                      08330000
+         B     RETURN                  RETURN                           08340000
+                                                                        08350000
+*-----------------------------------------------                        08360000
+* $DBIO ERRORS                                                          08370000
+*-----------------------------------------------                        08380000
+ERRDBREQ DS    0H                                                       08390000
+         ICM   R2,15,PPERR@            RETURN ERROR DETAILS ?           08400000
+         BZ    ERRDBCLN                NO, CLEAN UP                     08410000
+         USING PERAREA,R2              ADDRESSABILITY                   08420000
+         MVC   PERSRVC,=CL(L'PERSRVC)'DBIO' RETURN ERROR DETAILS        08430000
+         STM   R15,R1,PERRCS           DBIO RC, RSN and INFO            08440000
+         DROP  R2                      PERAREA                          08450000
+                                                                        08460000
+ERRDBCLN DS    0H                                                       08470000
+         LA    R4,$DBPL                ADDRESS OF DBIO PLIST            08480000
+         USING IDBIOP,R4               ESTAB ADDRESSABILITY             08490000
+         L     R3,IDBFDBK              GET FEEDBACK CODE                08500000
+         DROP  R4                      IDBIOP                           08510000
+                                                                        08520000
+         BAS   R14,CLEANUP             CLEANUP ALLOCATED STG            08530000
+         LA    R15,RC12                PROJECT REQUEST FAILED           08540000
+         LR    R0,R3                   COPY FEEDBACK CODE               08550000
+         B     RETURN                  RETURN                           08560000
+                                                                        08570000
+         EJECT ,                                                        08580000
+****************************************************************        08590000
+*                                                                       08600000
+*  RETURN                                                               08610000
+*                                                                       08620000
+****************************************************************        08630000
+RETURN   DS    0H                                                       08640000
+         L     R1,PPTOKN@         TOKEN ADDRESS                         08650000
+         #EXIT ,                  RETURN                                08660000
+                                                                        08670000
+         EJECT ,                                                        08680000
+****************************************************************        08690000
+*                                                                       08700000
+*  ROUTINE:   INITKEY                                                   08710000
+*                                                                       08720000
+*  FUNCTION:                                                            08730000
+*                                                                       08740000
+*    INITIALIZE THE DATABASE RECORD KEY AREA.                           08750000
+*                                                                       08760000
+*                                                                       08770000
+*  ENTRY:  N/A                                                          08780000
+*                                                                       08790000
+*  EXIT:   N/A                                                          08800000
+*                                                                       08810000
+****************************************************************        08820000
+INITKEY  DS    0H                                                       08830000
+         STM   R0,R15,REGSAVE1         SAVE CALLER'S REGISTERS          08840000
+                                                                        08850000
+         L     R1,PPNAME@              ADDR OF PROJECT NAME             08860000
+         MVC   PROJNAME,0(R1)          PROJECT NAME IN KEY              08870000
+         MVC   PROJRSVD,BLANKS         SET RESERVED AREA                08880000
+         MVC   PROJALU,ALUNUM          COPY ALU NUMBER                  08890000
+                                                                        08900000
+         LM    R0,R15,REGSAVE1         RESTORE CALLER'S REGISTERS       08910000
+         BR    R14                     AND RETURN                       08920000
+                                                                        08930000
+         EJECT ,                                                        08940000
+****************************************************************        08950000
+*                                                                       08960000
+*  ROUTINE:   INITREC                                                   08970000
+*                                                                       08980000
+*  FUNCTION:                                                            08990000
+*                                                                       09000000
+*    INITIALIZE THE DATABASE RECORD HEADER.                             09010000
+*                                                                       09020000
+*                                                                       09030000
+*  ENTRY:  N/A                                                          09040000
+*                                                                       09050000
+*  EXIT:   N/A                                                          09060000
+*                                                                       09070000
+****************************************************************        09080000
+INITREC  DS    0H                                                       09090000
+         STM   R0,R15,REGSAVE1         SAVE CALLER'S REGISTERS          09100000
+                                                                        09110000
+         L     R0,RECBUFF              ADDRESS OF RECORD BUFFER         09120000
+         L     R1,RECBUFFL             LENGTH  OF RECORD BUFFER         09130000
+         SR    R15,R15                 PREPARE FOR CLEAR                09140000
+         MVCL  R0,R14                  CLEAR RECORD AREA                09150000
+                                                                        09160000
+         L     R7,RECBUFF              ADDR OF RECORD BUFFER            09170000
+         USING IPRJREC,R7              ESTABLISH ADDRESSABILITY         09180000
+                                                                        09190000
+         MVC   IPRECLEN,=AL2(IPRHDLN)  INITIAL RECORD LENGTH            09200000
+         MVC   IPRHDRLN,=AL2(IPRHDLN)  LENGTH OF RECORD HEADER          09210000
+         MVC   IPRECKEY,PROJKEY        RECORD KEY                       09220000
+         MVC   IPRLUSER,$LUSER         LAST UPDATE USER                 09230000
+         MVC   IPRLTERM,$LTERM         LAST UPDATE LUNAME               09240000
+         MVC   IPRLDATE,$LDATE         LAST UPDATE DATE                 09250000
+         MVC   IPRLTIME,$LTIME         LAST UPDATE TIME                 09260000
+         MVC   IPRALUSZ,=A(#ALUSIZE)   LENGTH OF AN ALU                 09270000
+                                                                        09280000
+         LM    R0,R15,REGSAVE1         RESTORE CALLER'S REGISTERS       09290000
+         BR    R14                     AND RETURN                       09300000
+         DROP  R7                      IPRJREC                          09310000
+                                                                        09320000
+         EJECT ,                                                        09330000
+****************************************************************        09340000
+*                                                                       09350000
+*  ROUTINE:  CHGSTAT                                                    09360000
+*                                                                       09370000
+*  FUNCTION:                                                            09380000
+*                                                                       09390000
+*    THIS ROUTINE WILL RETRIEVE THE USERID OF THE REQUESTOR             09400000
+*    AS WELL AS THE DATE AND TIME OF THE REQUEST.                       09410000
+*                                                                       09420000
+*  ENTRY: N/A                                                           09430000
+*                                                                       09440000
+*  EXIT:  N/A                                                           09450000
+*                                                                       09460000
+****************************************************************        09470000
+CHGSTAT  DS    0H                                                       09480000
+         STM   R0,R15,REGSAVE1         SAVE CALLER'S REGISTERS          09490000
+                                                                        09500000
+         TIME  ,                       GET TIME/DATE OF REQUEST         09510000
+         ST    R0,$LTIME               SAVE TIME                        09520000
+         ST    R1,$LDATE               SAVE DATE                        09530000
+                                                                        09540000
+         LM    R0,R15,REGSAVE1         RESTORE CALLER'S REGISTERS       09550000
+         BR    R14                     RETURN                           09560000
+                                                                        09570000
+         EJECT ,                                                        09580000
+****************************************************************        09590000
+*                                                                       09600000
+*  ROUTINE:  EXPDATA                                                    09610000
+*                                                                       09620000
+*  FUNCTION:                                                            09630000
+*                                                                       09640000
+*    THIS ROUTINE WILL EXPAND THE DATA PORTION OF THE PROJECT           09650000
+*    RECORD INTO ITS ALU DATA REPRESENTATION.  IF THE DATA IN           09660000
+*    RECORD IS TRIMMED AND/OR SQUISHED, IT WILL BE UNSQUISHED           09670000
+*    INTO ITS FULL LENGTH.                                              09680000
+*                                                                       09690000
+*  ENTRY: R1  - RECORD ADDRESS                                          09700000
+*                                                                       09710000
+*  EXIT:  R15 - N/A                                                     09720000
+*                                                                       09730000
+****************************************************************        09740000
+EXPDATA  DS    0H                                                       09750000
+         STM   R0,R15,REGSAVE1         SAVE CALLER'S REGISTERS          09760000
+         LR    R7,R1                   ADDR OF RECORD                   09770000
+         USING IPRJREC,R7              ESTABLISH ADDRESSABILITY         09780000
+                                                                        09790000
+         L     R0,IPRALUSZ             GET RECORD ALU SIZE              09800000
+         ICM   R1,15,ALUBUFF           ALU BUFFER AVAILABLE?            09810000
+         BNZ   *+8                     YES, CONTINUE                    09820000
+         BAS   R14,GETBUFF             ALLOCATE BUFFER                  09830000
+                                                                        09840000
+         LR    R0,R1                   ADDR OF BUFFER                   09850000
+         L     R1,ALUBUFFL             LEN  OF BUFFER                   09860000
+                                                                        09870000
+         TM    IPRPFLAG,IPRP$SQH       DATA IN SQUISHED FORMAT          09880000
+         BZ    EXPNOSQH                NO,  JUST MOVE FROM RECORD       09890000
+                                                                        09900000
+         SR    R15,R15                 PREPARE FOR CLEAR                09910000
+         MVCL  R0,R14                  CLEAR ALUAREA                    09920000
+                                                                        09930000
+         L     R3,IPRDLEN              RECORD DATA LENGTH               09940000
+         L     R4,ALUBUFF              ADDRESS OF RECORD BUFFER         09950000
+         L     R5,ALUBUFFL             LENGTH  OF RECORD BUFFER         09960000
+                                                                        09970000
+         $CLINK FUNC=USQUISH,                                          +09980000
+               (CHAR*,IPRDATA),(REGISTER_SHORT,(R3)),                  +09990000
+               (CHAR*,(R4)),(REGISTER_SHORT,(R5))                       10000000
+                                                                        10010000
+         B     EXPDRET                 RETURN                           10020000
+                                                                        10030000
+EXPNOSQH DS    0H                                                       10040000
+         LA    R14,IPRDATA             ADDRESS OF ALU DATA              10050000
+         L     R15,IPRDLEN             LENGTH  OF ALU DATA              10060000
+         MVCL  R0,R14                  COPY ALU BUFFER                  10070000
+                                                                        10080000
+EXPDRET  DS    0H                                                       10090000
+         LM    R0,R15,REGSAVE1         RESTORE CALLER'S REGISTERS       10100000
+         BR    R14                     RETURN                           10110000
+         DROP  R7                      IPRJREC                          10120000
+                                                                        10130000
+         EJECT ,                                                        10140000
+****************************************************************        10150000
+*                                                                       10160000
+*  ROUTINE:  ALU2REC                                                    10170000
+*                                                                       10180000
+*  FUNCTION:                                                            10190000
+*                                                                       10200000
+*    COPY ALU BUFFER INTO RECORD.  FIRST TRIM THE RECORD TO             10210000
+*    CHOP OFF THE TRAILING ZEROS.  THEN ATTEMPT TO SQUISH THE           10220000
+*    ALU INTO THE DATA BUFFER.  IF THE SQUISH FAILS (GETS BIGGER        10230000
+*    INSTEAD OF SMALLER) THEN JUST COPY THE TRIMMED ALU BUFFER.         10240000
+*                                                                       10250000
+*  ENTRY: R1  - N/A                                                     10260000
+*                                                                       10270000
+*  EXIT:  R15 - N/A                                                     10280000
+*                                                                       10290000
+*                                                                       10300000
+****************************************************************        10310000
+ALU2REC  DS    0H                                                       10320000
+         STM   R0,R15,REGSAVE1         SAVE CALLER'S REGISTERS          10330000
+                                                                        10340000
+         L     R7,RECBUFF              ADDRESS OF RECORD BUFFER         10350000
+         USING IPRJREC,R7              ESTABLISH ADDRESSABILITY         10360000
+                                                                        10370000
+         L     R4,ALUBUFF              ADDRESS OF ALU BUFFER            10380000
+         L     R3,ALUBUFFL             LENGTH  OF ALU BUFFER            10390000
+         ST    R3,IPRDLENU             UNTRIMMED DATA LENGTH            10400000
+                                                                        10410000
+         @TRIM (R4),(R3),CHAR=0        TRIM ZEROES FROM END             10420000
+         LR    R5,R1                   GET TRIMMED ALU LENGTH           10430000
+                                                                        10440000
+         CLI   DOSQUISH,0              SHOULD WE SQUISH DATA?           10450000
+         BE    A2RCOPY                 NO, JUST COPY                    10460000
+                                                                        10470000
+         $CLINK FUNC=SQUISH,                                           +10480000
+               (CHAR*,(R4)),(REGISTER_SHORT,(R5)),                     +10490000
+               (CHAR*,IPRDATA),(REGISTER_SHORT,(R3)),                  +10500000
+               (CHAR,ICTZERO)                                           10510000
+                                                                        10520000
+         LTR   R15,R15                 SQUISH SUCCESSFULL?              10530000
+         BM    A2RCOPY                 NO,  JUST COPY ALU               10540000
+         ST    R15,IPRDLEN             SET DATA LENGTH IN RECORD        10550000
+         AH    R15,IPRECLEN            ADD INITIAL RECORD LENGTH        10560000
+         STH   R15,IPRECLEN            TOTAL RECORD LENGTH              10570000
+         OI    IPRPFLAG,IPRP$SQH       INIDICATE DATA SQUISHED          10580000
+         B     A2RRET                  RETURN                           10590000
+                                                                        10600000
+A2RCOPY  DS    0H                                                       10610000
+         LR    R2,R5                   SAVE TRIMMED REC LENGTH          10620000
+         LA    R14,IPRDATA             ADDRESS OF RECORD DATA           10630000
+         LR    R15,R3                  LENGTH  OF RECORD BUFF           10640000
+         MVCL  R14,R4                  COPY RECORD TO BUFFER            10650000
+         ST    R2,IPRDLEN              SET DATA LENGTH IN RECORD        10660000
+         AH    R2,IPRECLEN             ADD INITIAL RECORD LENGTH        10670000
+         STH   R2,IPRECLEN             TOTAL RECORD LENGTH              10680000
+                                                                        10690000
+A2RRET   DS    0H                                                       10700000
+         LM    R0,R15,REGSAVE1         RESTORE CALLER'S REGISTERS       10710000
+         BR    R14                     RETURN                           10720000
+         DROP  R7                      IPRJREC                          10730000
+                                                                        10740000
+DOSQUISH DC    AL1(##SQUISH)           SQUISH OPTION                    10750000
+                                                                        10760000
+         EJECT ,                                                        10770000
+****************************************************************        10780000
+*                                                                       10790000
+*  ROUTINE:  SPCREATE                                                   10800000
+*                                                                       10810000
+*  FUNCTION:                                                            10820000
+*                                                                       10830000
+*    THE FUNCTION OF THIS ROUTINE IS TO CREATE A PROJECT                10840000
+*    WORKAREA SPACE USING THE SPACE MGMT SERVICE ROUTINE.               10850000
+*    PROJECT NAMES PREFIXED WITH 'SYS' ARE ALTERED TO                   10860000
+*    CONTAIN A PREFIX OF 'INT'.  THIS ENABLES THE PRODUCT               10870000
+*    RUN NON-APF AUTHORIZED, SINCE DSPSERV CANNOT CREATE                10880000
+*    SYSTEM SPACES FROM A PROBLEM STATE PROGRAM.                        10890000
+*                                                                       10900000
+*  ENTRY: R1  - ADDRESS OF ALU(0) OR 0 FOR NEW CREATE                   10910000
+*                                                                       10920000
+*  EXIT:  R15 - RC FROM $SPACE CREATE                                   10930000
+*                                                                       10940000
+*         $SPACE CREATE RC DEPENDENT                                    10950000
+*             R0 - SYSTEM SERVICE RETCODE                               10960000
+*             R1 - SYSTEM SERVICE RSNCODE                               10970000
+*                                                                       10980000
+****************************************************************        10990000
+SPCREATE DS    0H                                                       11000000
+         STM   R0,R15,REGSAVE1         SAVE CALLER'S REGISTERS          11010000
+         LR    R3,R1                   ADDR OF ALU OR 0                 11020000
+         L     R2,PPSPCSZ              INITIAL SPACE SIZE IN KBYTES     11030000
+         SLL   R2,10                   CONVERT TO BYTES                 11040000
+                                                                        11050000
+         L     R1,PPNAME@              ADDR OF PROJECT NAME             11060000
+         MVC   $PRJNAME,0(R1)          COPY PROJECT NAME                11070000
+         CLC   =C'SYS',$PRJNAME        SYSTEM SPACE PREFIX?             11080000
+         BNE   *+10                    NO CONTINUE                      11090000
+         MVC   $PRJNAME(3),=C'INT'     DEFAULT TO INTEGRATOR PREFIX     11100000
+                                                                        11110000
+         L     R4,PPTTOKEN             OWNING TASK TOKEN OR ZERO        11120000
+         TM    ICTSTAT2,ICT2$APF       APF AUTHORIZED REQUEST?          11130000
+         BNO   *+6                     RETAIN TOKEN IF NOT              11140000
+         SR    R4,R4                   NO EXPLICIT TASK TOKEN OTHERWISE 11150000
+                                                                        11160000
+         $SPACE CREATE,                CREATE A PROJECT SPACE          +11170000
+               TOKEN=*PPTOKN@,                                         +11180000
+               NAME=$PRJNAME,                                          +11190000
+               TCBTOKEN=(R4),                                          +11200000
+               USING=(R3),                                             +11210000
+               ALUSIZE=*=A(#ALUSIZE),                                  +11220000
+               SIZE=(R2),                                              +11230000
+               SERIALIZE=*PPSPLOCK,                                    +11240000
+               OIECOUNT=*PPOIECNT,                                     +11250000
+               MF=(E,WRK256)                                            11260000
+         BNZ   SPCR_RET                ERROR, RETURN                    11270000
+                                                                        11280000
+         L     R1,PPNAME@              ORIGINAL NAME                    11290000
+         L     R2,PPTOKN@              TOKEN ADDRESS                    11300000
+         USING $TOKEN,R2               TEMP ADDRESSABILITY              11310000
+         MVC   $NAME,0(R1)             ENSURE ORIGINAL NAME             11320000
+         DROP  R2                      $TOKEN                           11330000
+                                                                        11340000
+SPCR_RET DS    0H                                                       11350000
+         LM    R2,R14,REGSAVE1+8       RESTORE CALLERS' REGISTERS       11360000
+         LTR   R15,R15                 SET CONDITION CODE               11370000
+         BR    R14                     AND RETURN                       11380000
+                                                                        11390000
+         EJECT ,                                                        11400000
+****************************************************************        11410000
+*                                                                       11420000
+*  ROUTINE:  SPDELETE                                                   11430000
+*                                                                       11440000
+*  FUNCTION:                                                            11450000
+*                                                                       11460000
+*    THE FUNCTION OF THIS ROUTINE IS TO DELETE A PROJECT                11470000
+*    WORKAREA SPACE USING THE SPACE MGMT SERVICE ROUTINE.               11480000
+*                                                                       11490000
+*  ENTRY: N/A                                                           11500000
+*                                                                       11510000
+*                                                                       11520000
+*  EXIT:  R15 - RC FROM $SPACE DESTROY                                  11530000
+*                                                                       11540000
+*         $SPACE DESTROY RC DEPENDENT                                   11550000
+*             R0 - SYSTEM SERVICE RETCODE                               11560000
+*             R1 - SYSTEM SERVICE RSNCODE                               11570000
+*                                                                       11580000
+****************************************************************        11590000
+SPDELETE DS    0H                                                       11600000
+         STM   R0,R15,REGSAVE1         SAVE CALLER'S REGISTERS          11610000
+                                                                        11620000
+         $SPACE DESTROY,               DELETE A PROJECT SPACE          +11630000
+               TOKEN=*PPTOKN@,                                         +11640000
+               NAME=*PPNAME@,                                          +11650000
+               MF=(E,WRK256)                                            11660000
+                                                                        11670000
+         LM    R2,R14,REGSAVE1+8       RESTORE CALLER'S REGISTERS       11680000
+         LTR   R15,R15                 REQUEST SUCCESSFULL?             11690000
+         BR    R14                     AND RETURN                       11700000
+                                                                        11710000
+         EJECT ,                                                        11720000
+****************************************************************        11730000
+*                                                                       11740000
+*  ROUTINE:  SPIMPORT                                                   11750000
+*                                                                       11760000
+*  FUNCTION:                                                            11770000
+*                                                                       11780000
+*    THIS ROUTINE WILL IMPORT AN ALU TO THE PROJECT SPACE               11790000
+*    WORKAREA WHICH HAS BEEN OBTAINED FROM THE PROJECT DATABASE.        11800000
+*                                                                       11810000
+*  ENTRY:  R1  - ADDRESS OF ALU                                         11820000
+*          R0  - ALU NUMBER                                             11830000
+*                                                                       11840000
+*  EXIT:   R15 - RC FROM $SPACE IMPORT                                  11850000
+*                                                                       11860000
+*         $SPACE IMPORT RC DEPENDENT                                    11870000
+*             R0 - SYSTEM SERVICE RETCODE                               11880000
+*             R1 - SYSTEM SERVICE RSNCODE                               11890000
+*                                                                       11900000
+****************************************************************        11910000
+SPIMPORT DS    0H                                                       11920000
+         STM   R0,R15,REGSAVE1         SAVE CALLER'S REGISTERS          11930000
+         LR    R3,R1                   ADDRESS OF ALU BUFFER            11940000
+         ST    R0,ALUNUM               ALU NUMBER AREA                  11950000
+                                                                        11960000
+         $SPACE IMPORT,                IMPORT AN ALU TO PROJ           +11970000
+               ADDR=(R3),                                              +11980000
+               ALU=ALUNUM,                                             +11990000
+               TOKEN=*PPTOKN@,                                         +12000000
+               MF=(E,WRK256)                                            12010000
+                                                                        12020000
+         LM    R2,R14,REGSAVE1+8       RESTORE CALLERS' REGISTERS       12030000
+         LTR   R15,R15                 REQUEST SUCCESSFULL?             12040000
+         BR    R14                     AND RETURN                       12050000
+                                                                        12060000
+         EJECT ,                                                        12070000
+****************************************************************        12080000
+*                                                                       12090000
+*  ROUTINE:  SPIMPSTR                                                   12100000
+*                                                                       12110000
+*  FUNCTION:                                                            12120000
+*                                                                       12130000
+*    THIS ROUTINE WILL SIGNAL THE SPACE MGMT SERVICE ROUTINE            12140000
+*    TO START AN IMPORT DIALOG.                                         12150000
+*                                                                       12160000
+*  ENTRY:  N/A                                                          12170000
+*                                                                       12180000
+*  EXIT:   R15 - RC FROM $SPACE IMPORT                                  12190000
+*                                                                       12200000
+*          $SPACE IMPORT RC DEPENDENT                                   12210000
+*              R0 - SYSTEM SERVICE RETCODE                              12220000
+*              R1 - SYSTEM SERVICE RSNCODE                              12230000
+*                                                                       12240000
+****************************************************************        12250000
+SPIMPSTR DS    0H                                                       12260000
+         STM   R0,R15,REGSAVE1         SAVE CALLER'S REGISTERS          12270000
+                                                                        12280000
+         $SPACE IMPORT,START,          START IMPORT DIALOG             +12290000
+               TOKEN=*PPTOKN@,                                         +12300000
+               MF=(E,WRK256)                                            12310000
+                                                                        12320000
+         LM    R2,R14,REGSAVE1+8       RESTORE CALLERS' REGISTERS       12330000
+         LTR   R15,R15                 REQUEST SUCCESSFULL?             12340000
+         BR    R14                     AND RETURN                       12350000
+                                                                        12360000
+         EJECT ,                                                        12370000
+****************************************************************        12380000
+*                                                                       12390000
+*  ROUTINE:  SPIMPEND                                                   12400000
+*                                                                       12410000
+*  FUNCTION:                                                            12420000
+*                                                                       12430000
+*    THIS ROUTINE WILL SIGNAL THE SPACE MGMT SERVICE ROUTINE            12440000
+*    TO TERMINATE AN IMPORT DIALOG.                                     12450000
+*                                                                       12460000
+*  ENTRY:  N/A                                                          12470000
+*                                                                       12480000
+*  EXIT:   R15 - RC FROM $SPACE IMPORT                                  12490000
+*                                                                       12500000
+*          $SPACE IMPORT RC DEPENDENT                                   12510000
+*              R0 - SYSTEM SERVICE RETCODE                              12520000
+*              R1 - SYSTEM SERVICE RSNCODE                              12530000
+*                                                                       12540000
+****************************************************************        12550000
+SPIMPEND DS    0H                                                       12560000
+         STM   R0,R15,REGSAVE1         SAVE CALLER'S REGISTERS          12570000
+                                                                        12580000
+         $SPACE IMPORT,END,            END IMPORT DIALOG               +12590000
+               TOKEN=*PPTOKN@,                                         +12600000
+               MF=(E,WRK256)                                            12610000
+                                                                        12620000
+         LM    R2,R14,REGSAVE1+8       RESTORE CALLER'S REGISTERS       12630000
+         LTR   R15,R15                 REQUEST SUCCESSFULL?             12640000
+         BR    R14                     AND RETURN                       12650000
+                                                                        12660000
+         EJECT ,                                                        12670000
+****************************************************************        12680000
+*                                                                       12690000
+*  ROUTINE:  SPEXPORT                                                   12700000
+*                                                                       12710000
+*    THIS ROUTINE WILL EXPORT AN ALU FROM THE PROJECT SPACE             12720000
+*    WORKAREA TO BE WRITTEN TO THE PROJECT DATABASE.  THE               12730000
+*    SPACE EXPORT START REQUEST IDENTIFIES WHETHER TO EXPORT            12740000
+*    ALL ACTIVE ALU'S OR JUST THE MODIFIED ALU'S.                       12750000
+*                                                                       12760000
+*                                                                       12770000
+*  ENTRY:  R1  - ADDRESS OF ALU RECORD BUFFER                           12780000
+*                                                                       12790000
+*  EXIT:   R15 - RC FROM $SPACE EXPORT                                  12800000
+*                                                                       12810000
+*          $SPACE EXPORT RC DEPENDENT                                   12820000
+*              R0 - SYSTEM SERVICE RETCODE                              12830000
+*              R1 - SYSTEM SERVICE RSNCODE                              12840000
+*                                                                       12850000
+****************************************************************        12860000
+SPEXPORT DS    0H                                                       12870000
+         STM   R0,R15,REGSAVE1         SAVE CALLER'S REGISTERS          12880000
+         LR    R3,R1                   ADDR OF ALU BUFFER               12890000
+                                                                        12900000
+         $SPACE EXPORT,                EXPORT A CHANGED ALU FROM PROJ  +12910000
+               ADDR=(R3),                                              +12920000
+               ALU=ALUNUM,                                             +12930000
+               CHKPT=SPCHKPT,                                          +12940000
+               TOKEN=*PPTOKN@,                                         +12950000
+               MF=(E,WRK256)                                            12960000
+                                                                        12970000
+         LM    R2,R14,REGSAVE1+8       RESTORE CALLER'S REGISTERS       12980000
+         LTR   R15,R15                 REQUEST SUCCESSFULL?             12990000
+         BR    R14                     AND RETURN                       13000000
+                                                                        13010000
+         EJECT ,                                                        13020000
+****************************************************************        13030000
+*                                                                       13040000
+*  ROUTINE:  SPEXPSTM                                                   13050000
+*                                                                       13060000
+*                                                                       13070000
+*    THIS ROUTINE WILL SIGNAL THE SPACE MGMT SERVICE ROUTINE            13080000
+*    TO BEGIN AN EXPORT MODIFIED DIALOG.                                13090000
+*                                                                       13100000
+*  ENTRY:  N/A                                                          13110000
+*                                                                       13120000
+*  EXIT:   R15 - RC FROM $SPACE EXPORT                                  13130000
+*                                                                       13140000
+*          $SPACE EXPORT RC DEPENDENT                                   13150000
+*              R0 - SYSTEM SERVICE RETCODE                              13160000
+*              R1 - SYSTEM SERVICE RSNCODE                              13170000
+*                                                                       13180000
+****************************************************************        13190000
+SPEXPSTM DS    0H                                                       13200000
+         STM   R0,R15,REGSAVE1         SAVE CALLER'S REGISTERS          13210000
+                                                                        13220000
+         $SPACE EXPORT,START,          EXPORT MODIFIED ALU'S FROM      +13230000
+               SELECT=MODIFIED,        PROJECT SPACE                   +13240000
+               CHKPT=SPCHKPT,                                          +13250000
+               TOKEN=*PPTOKN@,                                         +13260000
+               MF=(E,WRK256)                                            13270000
+                                                                        13280000
+         LM    R2,R14,REGSAVE1+8       RESTORE CALLER'S REGISTERS       13290000
+         LTR   R15,R15                 REQUEST SUCCESSFULL?             13300000
+         BR    R14                     AND RETURN                       13310000
+                                                                        13320000
+         EJECT ,                                                        13330000
+****************************************************************        13340000
+*                                                                       13350000
+*  ROUTINE:  SPEXPSTA                                                   13360000
+*                                                                       13370000
+*                                                                       13380000
+*    THIS ROUTINE WILL SIGNAL THE SPACE MGMT SERVICE ROUTINE            13390000
+*    TO BEGIN AN EXPORT ACTIVE DIALOG.                                  13400000
+*                                                                       13410000
+*  ENTRY:  N/A                                                          13420000
+*                                                                       13430000
+*  EXIT:   R15 - RC FROM $SPACE EXPORT                                  13440000
+*                                                                       13450000
+*          $SPACE EXPORT RC DEPENDENT                                   13460000
+*              R0 - SYSTEM SERVICE RETCODE                              13470000
+*              R1 - SYSTEM SERVICE RSNCODE                              13480000
+*                                                                       13490000
+****************************************************************        13500000
+SPEXPSTA DS    0H                                                       13510000
+         STM   R0,R15,REGSAVE1         SAVE CALLER'S REGISTERS          13520000
+                                                                        13530000
+         $SPACE EXPORT,START,          EXPORT AN ALU FROM PROJ         +13540000
+               SELECT=ACTIVE,                                          +13550000
+               CHKPT=SPCHKPT,                                          +13560000
+               TOKEN=*PPTOKN@,                                         +13570000
+               MF=(E,WRK256)                                            13580000
+                                                                        13590000
+         LM    R2,R14,REGSAVE1+8       RESTORE CALLER'S REGISTERS       13600000
+         LTR   R15,R15                 REQUEST SUCCESSFULL?             13610000
+         BR    R14                     AND RETURN                       13620000
+                                                                        13630000
+         EJECT ,                                                        13640000
+****************************************************************        13650000
+*                                                                       13660000
+*  ROUTINE:  SPEXPEND                                                   13670000
+*                                                                       13680000
+*                                                                       13690000
+*    THIS ROUTINE WILL SIGNAL THE SPACE MGMT SERVICE ROUTINE            13700000
+*    TO TERMINATE AN EXPORT DIALOG.                                     13710000
+*                                                                       13720000
+*  ENTRY:  N/A                                                          13730000
+*                                                                       13740000
+*  EXIT:   R15 - RC FROM $SPACE EXPORT                                  13750000
+*                                                                       13760000
+*          $SPACE EXPORT RC DEPENDENT                                   13770000
+*              R0 - SYSTEM SERVICE RETCODE                              13780000
+*              R1 - SYSTEM SERVICE RSNCODE                              13790000
+*                                                                       13800000
+****************************************************************        13810000
+SPEXPEND DS    0H                                                       13820000
+         STM   R0,R15,REGSAVE1         SAVE CALLER'S REGISTERS          13830000
+                                                                        13840000
+         $SPACE EXPORT,END,            EXPORT AN ALU FROM PROJ         +13850000
+               CHKPT=SPCHKPT,                                          +13860000
+               TOKEN=*PPTOKN@,                                         +13870000
+               MF=(E,WRK256)                                            13880000
+                                                                        13890000
+         LM    R2,R14,REGSAVE1+8       RESTORE CALLER'S REGISTERS       13900000
+         LTR   R15,R15                 REQUEST SUCCESSFULL?             13910000
+         BR    R14                     AND RETURN                       13920000
+                                                                        13930000
+         EJECT ,                                                        13940000
+****************************************************************        13950000
+*                                                                       13960000
+*  ROUTINE:  SPCONFIG                                                   13970000
+*                                                                       13980000
+*    THIS ROUTINE WILL SET THE SPACE CONFIGURATION OBTIONS FOR          13990000
+*    THE TABLE SERVICES APPLICATION.                                    14000000
+*                                                                       14010000
+*  ENTRY:  N/A                                                          14020000
+*                                                                       14030000
+*  EXIT:   R15 - RC FROM $SPACE CONFIG                                  14040000
+*                                                                       14050000
+*          $SPACE CONFIG RC DEPENDENT                                   14060000
+*              R0 - SYSTEM SERVICE RETCODE                              14070000
+*              R1 - SYSTEM SERVICE RSNCODE                              14080000
+*                                                                       14090000
+****************************************************************        14100000
+SPCONFIG DS    0H                                                       14110000
+         STM   R0,R15,REGSAVE1         SAVE CALLER'S REGISTERS          14120000
+                                                                        14130000
+         $SPACE CONFIG,POST,           SET TBSERV CONFIG OPTIONS       +14140000
+               WORD=TBSERV_CFGWORD,                                    +14150000
+               DATA=PPTBSCFG,                                          +14160000
+               TOKEN=*PPTOKN@,                                         +14170000
+               MF=(E,WRK256)                                            14180000
+                                                                        14190000
+         LM    R2,R14,REGSAVE1+8       RESTORE CALLER'S REGISTERS       14200000
+         LTR   R15,R15                 REQUEST SUCCESSFULL?             14210000
+         BR    R14                     AND RETURN                       14220000
+                                                                        14230000
+         EJECT ,                                                        14240000
+****************************************************************        14250000
+*                                                                       14260000
+*  ROUTINE:   GETBUFF                                                   14270000
+*                                                                       14280000
+*  FUNCTION:                                                            14290000
+*                                                                       14300000
+*    THE FUNCTION OF THIS ROUTINE IS TO ALLOC A STORAGE FOR THE         14310000
+*    ALU BUFFER/RECORD AREA.                                            14320000
+*                                                                       14330000
+*                                                                       14340000
+*  ENTRY:  R0 - SIZE OF BUFFER TO BE ALLOCATED                          14350000
+*                                                                       14360000
+*  EXIT:   R1 - ADDRESS OF BUFFER                                       14370000
+*                                                                       14380000
+****************************************************************        14390000
+GETBUFF  DS    0H                                                       14400000
+         STM   R0,R15,REGSAVE2         SAVE CALLER'S REGISTERS          14410000
+         LR    R2,R0                   GET LENGTH OF BUFFER             14420000
+                                                                        14430000
+         $GETSTOR (R2)                 ALLOCATE STORAGE                 14440000
+                                                                        14450000
+         ST    R1,ALUBUFF              SAVE STORAGE ADDRESS             14460000
+         ST    R2,ALUBUFFL             SAVE STORAGE LENGTH              14470000
+                                                                        14480000
+         LM    R2,R15,REGSAVE2+8       RESTORE CALLER'S REGISTERS       14490000
+         BR    R14                     AND RETURN                       14500000
+                                                                        14510000
+         EJECT ,                                                        14520000
+****************************************************************        14530000
+*                                                                       14540000
+*  ROUTINE:   FREEBUFF                                                  14550000
+*                                                                       14560000
+*  FUNCTION:                                                            14570000
+*                                                                       14580000
+*    THE FUNCTION OF THIS ROUTINE IS TO RELEASE STORAGE THAT            14590000
+*    WAS ALLOCATED FOR ALU/RECORD BUFFER PROCESSING.                    14600000
+*                                                                       14610000
+*  ENTRY:  N/A                                                          14620000
+*                                                                       14630000
+*  EXIT:   N/A                                                          14640000
+*                                                                       14650000
+****************************************************************        14660000
+FREEBUFF DS    0H                                                       14670000
+         STM   R0,R15,REGSAVE2         SAVE CALLER'S REGISTERS          14680000
+                                                                        14690000
+         ICM   R2,15,ALUBUFF           STORAGE ACQUIRED                 14700000
+         BZ    FREEBRET                NONE, RETURN                     14710000
+         L     R3,ALUBUFFL             LENGTH OF BUFFER                 14720000
+                                                                        14730000
+         $RETSTOR (R2)                                                  14740000
+                                                                        14750000
+FREEBRET DS    0H                                                       14760000
+         LM    R0,R15,REGSAVE2         RESTORE CALLER'S REGISTERS       14770000
+         BR    R14                     AND RETURN                       14780000
+                                                                        14790000
+         EJECT ,                                                        14800000
+****************************************************************        14810000
+*                                                                       14820000
+*  ROUTINE:   CLEANUP                                                   14830000
+*                                                                       14840000
+*  FUNCTION:                                                            14850000
+*                                                                       14860000
+*    THIS ROUTINE WILL RELEASE ALL RESOURCES REQUIRED                   14870000
+*    DURING REQUEST PROCESSING.                                         14880000
+*                                                                       14890000
+*  ENTRY:  N/A                                                          14900000
+*                                                                       14910000
+*  EXIT:   N/A                                                          14920000
+*                                                                       14930000
+****************************************************************        14940000
+CLEANUP  DS    0H                                                       14950000
+         STM   R0,R15,REGSAVE3         SAVE CALLER'S REGISTERS          14960000
+                                                                        14970000
+         $DBIO ENDREQ,                 TERMINATE DBIO REQUEST          +14980000
+               WORKA=WRK1K,                                            +14990000
+               MF=(E,$DBPL)                                             15000000
+                                                                        15010000
+         BAS   R14,FREEBUFF            RELEASE ALU BUFFER STORAGE       15020000
+         MVC   ALUBUFF,RECBUFF         RECORD BUFFER ADDRESS            15030000
+         MVC   ALUBUFFL,RECBUFFL       RECORD BUFFER LENGTH             15040000
+         BAS   R14,FREEBUFF            RELEASE ALU BUFFER STORAGE       15050000
+                                                                        15060000
+         LM    R0,R15,REGSAVE3         RESTORE CALLER'S REGISTERS       15070000
+         BR    R14                     RETURN                           15080000
+                                                                        15090000
+         EJECT ,                                                        15100000
+****************************************************************        15110000
+*  CONSTANTS, LITERALS                                                  15120000
+****************************************************************        15130000
+BLANKS   DC    CL8' '                  BLANKS                           15140000
+                                                                        15150000
+         LTORG ,                                                        15160000
+                                                                        15170000
+         EJECT ,                                                        15180000
+         IPRJREC DSECT=YES             PROJECT DATABASE REC HDR         15190000
+                                                                        15200000
+         EJECT ,                                                        15210000
+         IDBIOP  DSECT=YES             DATABASE IO PLIST                15220000
+                                                                        15230000
+         EJECT ,                                                        15240000
+         PRINT NOGEN                                                    15250000
+         ICVT  ,                                                        15260000
+         ITASK ,                                                        15270000
+         PRINT GEN                                                      15280000
+                                                                        15290000
+         END   ,                                                        15300000
