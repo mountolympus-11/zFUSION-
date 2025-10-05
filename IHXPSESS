@@ -1,0 +1,826 @@
+IHXPSESS TITLE 'HOST XPORT HLLAPI DRIVER'                               00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE:  IHXPSESS - Host Xport HLLAPI Driver Process                 00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This routine is the entry point to the $PLUMAIN process            00080000
+*    create by the MAIN process of a VTAM user task.  The               00090000
+*    function of this routine is to drive the PLU session Host          00100000
+*    Xport process.  After initial session setup,  this routine         00110000
+*    listens for messages from other processes requesting to            00120000
+*    send a packet to a client logical session, or from the             00130000
+*    $SESS Receive service obtaining data from the Client               00140000
+*    session.                                                           00150000
+*                                                                       00160000
+*    During initialization the session userdata and other               00170000
+*    required session information is extracted from the $SESS           00180000
+*    service.  The userdata information is used to obtain the           00190000
+*    Xport profile to be used for the Host Xport sesion                 00200000
+*    characteristics.  The IHXPUDAT routine calls the CMDSCAN           00210000
+*    service and the PRMPOST service to update the PSESS wih            00220000
+*    session parameters.  Then HXPINIT is called to initialize          00230000
+*    the remainder of the PSESS.                                        00240000
+*                                                                       00250000
+*    Also during initialization, a new storage pool is                  00260000
+*    initialized and passed to the Xport processing routines            00270000
+*    via the PSESS for control block and general storage                00280000
+*    allocation.                                                        00290000
+*                                                                       00300000
+*    When messages are received from the $XPSEND service,               00310000
+*    (intra task message services),  the HXPSEND function is            00320000
+*    called to process the message.  When input is received on          00330000
+*    the session, via completion of a $SESS RECEIVE event               00340000
+*    posted, then the HXPRECV function is called to process the         00350000
+*    received packet.                                                   00360000
+*                                                                       00370000
+* NOTE:                                                                 00380000
+*                                                                       00390000
+*    The $SESS plist specified on the asyncronous receive request       00400000
+*    is allocated from ITASK $GETSTOR storage.  Any pending             00410000
+*    request at session termination are freed by the $SESS API.         00420000
+*                                                                       00430000
+* ENTRY:                                                                00440000
+*                                                                       00450000
+*    Upon entry R1 contains the address of the parameter list as        00460000
+*    follows:                                                           00470000
+*                                                                       00480000
+*      +00 (04) - Session token                                         00490000
+*                                                                       00500000
+* EXIT:                                                                 00510000
+*                                                                       00520000
+*    Upon Exit R15 will contain one of the following return codes:      00530000
+*                                                                       00540000
+*      R15 = RC00 - Normal Completion                                   00550000
+*            RC08 - Processing failure                                  00560000
+*                   R0 = RSN04 - Session Receive failure                00570000
+*                        RSN08 - Session Extract failure                00580000
+*                        RSN12 - Initialization error                   00590000
+*                        RSN16 - Invalid token provided                 00600000
+*                        RSN20 - Session Posresp failure                00610000
+*            RC12 - Service failure                                     00620000
+*                   R0 = RSN04 - Storage allocation failed              00630000
+*                                                                       00640000
+**<DOC-OFF>****************************************************         00650000
+                                                                        00660000
+         EJECT ,                                                        00670000
+***************************************************************         00680000
+*                                                                       00690000
+* MAINTENANCE:                                                          00700000
+*                                                                       00710000
+*   07/07/93  Ron Colmone                                               00720000
+*             Initial Version                                           00730000
+*                                                                       00740000
+*   07/24/94  Ron Colmone             Par# 134222                       00750000
+*                                                                       00760000
+*             Added support to Host Xport for LU 6.2 (CPI-C).           00770000
+*             IHXPSESS is only used from $SESS support                  00780000
+*             conversations.  The PSESS block now contains              00790000
+*             a pointer to a communcation conversion block              00800000
+*             specific to the protocol.  The $SESS communcation         00810000
+*             block (XPSESS) is now allocated during                    00820000
+*             initialization.                                           00830000
+*                                                                       00840000
+*             HXPINIT no longer sends the initial Avail screen.         00850000
+*             A new Avail function is now invoked to send the           00860000
+*             Initial Avail Screen on $sess sessions.                   00870000
+*                                                                       00880000
+*                                                                       00890000
+***************************************************************         00900000
+                                                                        00910000
+         EJECT ,                                                        00920000
+         EQUS  ,                  GENERAL EQUATES                       00930000
+         EJECT ,                                                        00940000
+         MSGCODES ,               INTERTASK MESSAGE CODES               00950000
+         EJECT ,                                                        00960000
+         EVCODES ,                TASK EVENT CODES                      00970000
+         EJECT                                                          00980000
+         KEYTAB DSECT=YES         XPORT USERDATA OPERANDS               00990000
+         EJECT                                                          01000000
+         POSTOPS DSECT=YES        XPORT USERDATA OPERAND INTERNAL REP   01010000
+         EJECT                                                          01020000
+         OPLIST ,                 XPORT USERDATA OPERAND INSTANCE MAP   01030000
+         EJECT ,                                                        01040000
+         $TASK DSECT=YES          TASK MANAGEMENT PLIST                 01050000
+         EJECT ,                                                        01060000
+         $SESS DSECT=YES          SESSION MANAGEMENT PLIST              01070000
+         EJECT ,                                                        01080000
+         TMSG  ,                  INTERTASK MESSAGE HEADER              01090000
+         EJECT ,                                                        01100000
+         PSESS ,                  PRIMARY SESSION CONTROL BLOCK         01110000
+         EJECT ,                                                        01120000
+         XPSESS ,                 XPORT $SESS COMMUNICATION BLK 134222  01130000
+         EJECT ,                                                        01140000
+         XPORTHDR HDRTYPE=COMMON  XPORT HEADER (COMMON FORMAT)          01150000
+                                                                        01160000
+         EJECT ,                                                        01170000
+WORKAREA #WORK ,                  GENERAL WORKAREA                      01180000
+WRK256   DS    XL256              WORKAREA                              01190000
+REGSAVE1 DS    16F                REGISTER SAVEAREA                     01200000
+REGSAVE2 DS    16F                REGISTER SAVEAREA                     01210000
+SAVRCRSN DS    F,F                RETURN/REASON SAVE AREA               01220000
+                                                                        01230000
+SESSTOKN DS    XL8                PLU SESSION TOKEN                     01240000
+USERDATA DS    CL256              SESSION USERDATA                      01250000
+                                                                        01260000
+UDATA    DS    0F                 LENGTH/ADDRESS OF USERDATA            01270000
+UDATALEN DS    F                  LENGTH OF USERDATA                    01280000
+UDATADDR DS    A                  ADDR   OF USERDATA                    01290000
+                                                                        01300000
+MSGINFO  DS    0F                 TMSG INFORMATION                      01310000
+MSGLEN   DS    F                  LENGTH  OF TSEND MESSAGE BUFFER       01320000
+MSGADDR  DS    A                  ADDRESS OF TSEND MESSAGE BUFFER       01330000
+                                                                        01340000
+STGQHDR  DS    A,A                STORAGE MGMT QUEUE HEADER             01350000
+PSESS@   DS    A                  ADDRESS OF PSESS BLOCK                01360000
+                                                                        01370000
+RCVYADDR DS    A                  RECOVERY RETRY ADDRESS                01380000
+ERRENTRY DS    A                  IPRMPOST INVALID TABLE ENTRY RETURN   01390000
+ERRTOKEN DS    CL16               IPRMPOST ERROR MESSAGE TOKEN RETURN   01400000
+                                                                        01410000
+FLAGS    DS    X                  FLAGS                                 01420000
+$DATARU  EQU   X'80'                RU IS DATA                          01430000
+                                                                        01440000
+         PRMREQB DSECT=NO         PARSE AND APPLICATION REQUEST         01450000
+$SESSPL@ DS    A                  ADDR OF RECEIVE $SESS PLIST           01460000
+                                                                        01470000
+$SESSPL  $SESS MF=L,FIELDS=(USERDATA,LUTYPE,BUFFSIZE)                   01480000
+$TASKMFL $TASK MF=L               $TASK REQUEST PLIST                   01490000
+WORKLEN  #ENDWORK ,               WORKAREA END                          01500000
+                                                                        01510000
+#1K      EQU   1024                                                     01520000
+#STGSIZE EQU   (8*#1K)-64         INITIAL STORAGE POOL ALLOCATION       01530000
+#DFTAREA EQU   2*#1K              INITIAL (DFT) SESS RECV BUFF SIZE     01540000
+                                                                        01550000
+         $MSGDFT PREFIX=ICTPID,COMPID='HXP',TABLE=*#MSGS,              +01560000
+               CONID=*ICTCONID,CONNAME=ICTCONNM,                       +01570000
+               MF=(E,WRK256)                                            01580000
+                                                                        01590000
+         EJECT ,                                                        01600000
+***************************************************************         01610000
+*                                                                       01620000
+*  Initialize the Host Xport PLU driver process.  Allocate              01630000
+*  and initialize the PSESS block for the primary session.              01640000
+*  Set the default parameter values are parse the userdata to           01650000
+*  post overrides to the PSESS parameters.                              01660000
+*                                                                       01670000
+***************************************************************         01680000
+                                                                        01690000
+IHXPSESS #ENTER BASE=R12,PREG=R8,SAVE=(YES,NOFRAME)                     01700000
+                                                                        01710000
+         USING ITASK,R10          ADDRESSABILITY                        01720000
+                                                                        01730000
+         LTR   R8,R8              TOKEN PROVIDED                        01740000
+         BZ    ERR_TOKN           NO, INVALID TOKEN                     01750000
+         SR    R2,R2              PREPARE FOR INSERT                    01760000
+         ICM   R2,1,0(R8)         LENGTH OF SESSION TOKEN               01770000
+         BZ    ERR_TOKN           INVALID SESSION TOKEN                 01780000
+         C     R2,=A(L'SESSTOKN)  VALIDATE TOKEN LENGTH                 01790000
+         BNE   ERR_TOKN           INVALID SESSION TOKEN                 01800000
+                                                                        01810000
+         MVC   SESSTOKN,1(R8)     COPY SESSION TOKEN                    01820000
+                                                                        01830000
+         $RETSTOR (R8),OWNER=ITASK     RELEASE PLIST                    01840000
+                                                                        01850000
+         EJECT ,                                                        01860000
+*--------------------------------------------------------------         01870000
+*  INITIALIZE RECOVERY ENVIRONMENT                                      01880000
+*--------------------------------------------------------------         01890000
+         LA    R1,PROCSTOP        ADDRESS OF RECOVERY RETRY             01900000
+         ST    R1,RCVYADDR        SAVE RETRY ADDRESS                    01910000
+                                                                        01920000
+         $RCVRY CREATE,RECOVRTN,PARM=(R13),MF=(E,MFE_LIST)              01930000
+                                                                        01940000
+         EJECT ,                                                        01950000
+*--------------------------------------------------------------         01960000
+*  ALLOCATE STORAGE POOL FOR XPORT USAGE                                01970000
+*--------------------------------------------------------------         01980000
+         L     R2,=A(#STGSIZE)    INITIAL SIZE OF STORAGE POOL          01990000
+                                                                        02000000
+         STGINIT (R2),            ALLOC XPORT STORAGE POOL             +02010000
+               QH=STGQHDR                                               02020000
+         BNZ   ERR_STG            STORAGE ALLOCATION ERROR              02030000
+                                                                        02040000
+         EJECT ,                                                        02050000
+*--------------------------------------------------------------         02060000
+*  ALLOCATE PRIMARY SESSION BLOCK                                       02070000
+*--------------------------------------------------------------         02080000
+         STGGET PSESSLN,          ALLOCATE AREA FOR PRI SESS BLK       +02090000
+               QH=STGQHDR                                               02100000
+         BNZ   ERR_STG            STORAGE ALLOCATION ERROR              02110000
+                                                                        02120000
+         LR    R9,R1              ADDRESS OF PSESS BLOCK                02130000
+         USING PSESS,R9           ADDRESSABILITY                        02140000
+         ST    R9,PSESS@          SAVE PSESS ADDRESS                    02150000
+                                                                        02160000
+*-------------------------------------------------------------- 134222  02170000
+*  ALLOCATE / INITIALIZE XPORT $SESS COMMUNICATION AREA BLOCK   134222  02180000
+*-------------------------------------------------------------- 134222  02190000
+         STGGET XPSLENG,          ALLOCATE $SESS COMMAREA BLOCK 134222 +02200000
+               QH=STGQHDR                                       134222  02210000
+         BNZ   ERR_STG            STORAGE ALLOCATION ERROR      134222  02220000
+                                                                        02230000
+         LR    R7,R1              ADDRESS OF XPSESS BLOCK       134222  02240000
+         USING XPSESS,R7          ADDRESSABILITY                134222  02250000
+                                                                        02260000
+         MVC   XPSID,=CL8'XP$SESS'  EYECATCHER                  134222  02270000
+         MVC   XPSTOKN,SESSTOKN   COPY SESSION TOKEN            134222  02280000
+                                                                        02290000
+         EJECT ,                                                        02300000
+*--------------------------------------------------------------         02310000
+*  INITIALIZE PRIMARY SESSION BLOCK                                     02320000
+*--------------------------------------------------------------         02330000
+         MVC   PSSID,=CL8'PSESS'  CONTROL BLOCK ID                      02340000
+         MVC   PSSUSRPR,#USRAPPL  USER PROCESS                          02350000
+         ST    R7,PSSCOMM@        $SESS COMMAREA BLOCK          134222  02360000
+                                                                        02370000
+         LA    R0,STGQHDR         XPORT STORAGE POOL QH ADDR            02380000
+         ST    R0,PSSSTGQH        SET ADDRESS OF STGPOOL QH             02390000
+         LA    R0,TSKSTG          ADDRESS OF TASK STORAGE QH            02400000
+         ST    R0,PSSTSKQH        SET ADDRESS OF ITASK STG QH           02410000
+                                                                        02420000
+         $SESS $SESS_EXTRACT,     EXTRACT SESSION USERDATA             +02430000
+               SESSION=XPSTOKN,                                        +02440000
+               FIELDS=((LUTYPE,PSSLUTYP),                              +02450000
+               (BUFFSIZE,PSSBUFSZ)),                                   +02460000
+               MF=(E,$SESSPL)                                           02470000
+********       (USERDATA,USERDATA,UDATALEN),                            02480000
+         BNZ   ERR_EXTR                                                 02490000
+                                                                        02500000
+         LA    R1,USERDATA        ADDR OF USERDATA AREA                 02510000
+         ST    R1,UDATADDR        SAVE FOR FUTURE RETRIEVAL             02520000
+                                                                        02530000
+         EJECT ,                                                        02540000
+*--------------------------------------------------------------         02550000
+*  LOAD DEFAULT KEYWORD VALUES AND OVERRIDE WITH USERDATA INFO          02560000
+*--------------------------------------------------------------         02570000
+         BAS   R14,PSESDFTS       APPLY PSESS DEFAULT VALUES            02580000
+         BNZ   ERR_INIT           INITIALIZATION ERROR                  02590000
+         BAS   R14,PSESUDAT       EXCEPT USERDATA INPUT                 02600000
+         BNZ   ERR_INIT           INITIALIZATION ERROR                  02610000
+                                                                        02620000
+*--------------------------------------------------------------         02630000
+*  CALL XPORT INITIALIZATION FUNCTION                                   02640000
+*--------------------------------------------------------------         02650000
+         L     R3,#HXPPROT        OBTAIN ADDRESS OF PROFILE TABLE       02660000
+         $CLINK FUNC=*$HXPINIT,(STRUCT*,PSESS),(STRUCT*,(R3))           02670000
+         LTR   R15,R15            INITIALIZATION SUCCESSFUL?            02680000
+         BNZ   ERR_INIT           NO, INITIALIZATION ERROR              02690000
+                                                                        02700000
+*-------------------------------------------------------------- 134222  02710000
+*  SEND INITIAL AVAIL TO CLIENT SESSION                         134222  02720000
+*-------------------------------------------------------------- 134222  02730000
+         $CLINK FUNC=*$HXPAVAL,(STRUCT*,PSESS)                  134222  02740000
+         LTR   R15,R15            AVAIL SUCCESSFUL?             134222  02750000
+         BNZ   ERR_INIT           NO, INITIALIZATION ERROR      134222  02760000
+                                                                        02770000
+         EJECT ,                                                        02780000
+***************************************************************         02790000
+*                                                                       02800000
+*  Host Xport driver work processing.  Prepare process message          02810000
+*  EPB to receive message from XPSEND requestors.  Also issue a         02820000
+*  receive to the $SESS service to receive data from the PLU            02830000
+*  session.  When one of the various types of messages are              02840000
+*  received, call the appropriate routine to process the                02850000
+*  message.                                                             02860000
+*                                                                       02870000
+***************************************************************         02880000
+PREPTMSG DS    0H                                                       02890000
+         BAS   R14,TMSGRECV       PREPARE FOR MESSAGE RECEIVE           02900000
+                                                                        02910000
+PREPSESS DS    0H                                                       02920000
+         SR    R0,R0              ASYNC RECV W/ CURRENT BUFFER          02930000
+         BAS   R14,SESSRECV       PREPARE FOR SESSION RECEIVE           02940000
+         BNZ   ERR_RECV           ERROR SESSION RECEIVE                 02950000
+                                                                        02960000
+*--------------------------------------------------------------         02970000
+*  WAIT FOR EVENT TO COMPLETE                                           02980000
+*--------------------------------------------------------------         02990000
+PROCWAIT DS    0H                                                       03000000
+         $TASK WAIT,              WAIT FOR EVENT COMPLETION            +03010000
+               MESSAGE=PROCMSG,                                        +03020000
+               STOP=PROCSTOP,                                          +03030000
+               CANCEL=PROCCNCL,                                        +03040000
+               MF=(E,$TASKMFL)                                          03050000
+                                                                        03060000
+         C     R15,=A(EC$HXP_RECV)  DATA RECEIVED ON PLU SESSION        03070000
+         BE    HXP_RECV           YES, PROCESS RECEIVE DATA             03080000
+         B     PROCWAIT           NO,  WAIT FOR EVENT COMPLETION        03090000
+                                                                        03100000
+         EJECT ,                                                        03110000
+*--------------------------------------------------------------         03120000
+* MESSAGE EVENT RECEIVED, RESET MESSAGE EPB AND RECEIVE MSGS            03130000
+*--------------------------------------------------------------         03140000
+PROCMSG  DS    0H                                                       03150000
+         BAS   R14,TMSGRECV       PREPARE FOR NEXT MESSAGE              03160000
+                                                                        03170000
+PROCMSGL DS    0H                                                       03180000
+         BAS   R14,GETMSG         RECEIVE $XPSEND MESSAGE               03190000
+         BNZ   PROCWAIT           END OF MESSAGES,  WAIT                03200000
+                                                                        03210000
+         LR    R6,R1              ADDRESS OF MESSAGE HEADER             03220000
+         USING TMSGSTD,R6         MESSAGE ADDRESSABILITY                03230000
+                                                                        03240000
+         L     R0,TMSGTYPE        RETRIEVE MESSAGE REQUEST              03250000
+         C     R0,=A(ITM_HXP_SEND)  XPORT SEND REQUEST                  03260000
+         BE    HXP_SEND           PROCESS XPORT SEND REQUEST            03270000
+                                                                        03280000
+         B     PROCMSGL           PROCESS NEXT MESSAGE                  03290000
+                                                                        03300000
+         EJECT ,                                                        03310000
+*--------------------------------------------------------------         03320000
+*  CALL IHXPSEND TO PROCESS XPSEND REQUEST                              03330000
+*--------------------------------------------------------------         03340000
+HXP_SEND DS    0H                                                       03350000
+         L     R3,TMSGW1          RETRIEVE LOGICAL SESSION HANDLE       03360000
+         L     R4,TMSGW2          NOTIFY SEND COMPLETE EPB              03370000
+                                                                        03380000
+         XC    XPSSPL,XPSSPL      CLEAR $SESS PLIST ADDRESS             03390000
+                                                                        03400000
+         $CLINK FUNC=*$HXPSEND,   CALL SERVICE TO SEND MSG             +03410000
+               (STRUCT*,PSESS),                                        +03420000
+               (STRUCT*,(R3)),                                         +03430000
+               (STRUCT*,(R4)),                                         +03440000
+               (CHAR*,TMSGINFO),                                       +03450000
+               (LONG,TMSGINFL)                                          03460000
+                                                                        03470000
+         LR    R2,R15             RETURN CODE FROM XPSEND               03480000
+                                                                        03490000
+*--------------------------------------------------------------         03500000
+*  POST REQUESTOR IF REPLY=YES SPECIFIED                                03510000
+*--------------------------------------------------------------         03520000
+         ICM   R3,15,TMSGEPB      GET ADDR OF REPLY EPB                 03530000
+         BZ    PROCMSGL           NO,  PROCESS NEXT MESSAGE             03540000
+                                                                        03550000
+         $TASK POST,EPB=(R3),PCODE=(R2),MF=(E,$TASKMFL)                 03560000
+                                                                        03570000
+         B     PROCMSGL           PROCESS NEXT MESSAGE                  03580000
+         DROP  R6                 TMSGSTD                               03590000
+                                                                        03600000
+         EJECT ,                                                        03610000
+*--------------------------------------------------------------         03620000
+*  CALL IHXPRECV TO PROCESS XPRECV REQUEST                              03630000
+*--------------------------------------------------------------         03640000
+HXP_RECV DS    0H                                                       03650000
+         L     R6,$SESSPL@        ADDRESS OF $SESS REQ PLIST            03660000
+         USING SPLIST,R6          ADDRESSABILITY                        03670000
+         ST    R6,XPSSPL          SPLIST ADDRESS                        03680000
+                                                                        03690000
+         L     R15,SPLRETCD       RECEIVE REQUEST RETURN CODE           03700000
+         C     R15,=A($SESS_RC_SUCCESS)   SUCCESSFUL COMPLETION         03710000
+         BNE   ERR_RECV           NO,   RECEIVE ERROR                   03720000
+                                                                        03730000
+         NI    FLAGS,FF-$DATARU   RESET DATA RU FLAG                    03740000
+         TM    SPLCNTDF,RPLDATA   DATA RU?                              03750000
+         BZ    HXP_PRSP           NO, CONTINUE WITH POS RESP    134222  03760000
+         OI    FLAGS,$DATARU      RESET DATA RU FLAG                    03770000
+         MVI   PSSCSTAT,PSS$REDY  READY TO SEND                 134222  03780000
+                                                                        03790000
+HXP_PRSP DS    0H                                               134222  03800000
+         L     R3,SPLAREA         ADDRESS OF RECEIVE BUFFER     134222  03810000
+         L     R4,SPLAREAL        LENGTH  OF RECEIVE BUFFER     134222  03820000
+                                                                        03830000
+         $SESS $SESS_SEND_POSRESP, ACKNOWLEDGE ACCEPTANCE       134222 +03840000
+               SESSION=XPSTOKN,                                 134222 +03850000
+               CNTRL=*,                                         134222 +03860000
+               RH=*,                                            134222 +03870000
+               SEQNO=*,                                         134222 +03880000
+               SENSE=*,                                         134222 +03890000
+               MF=(E,SPLIST)                                            03900000
+         BNZ   ERR_RESP           ERROR SENDING RESPONSE        134222  03910000
+                                                                        03920000
+         $CLINK FUNC=*$HXPRECV,   CALL SERVICE TO SEND MSG             +03930000
+               (STRUCT*,PSESS),   PSESS BLOCK                          +03940000
+               (CHAR*,(R3)),                                           +03950000
+               (REGISTER_LONG,(R4))                                     03960000
+                                                                        03970000
+         TM    FLAGS,$DATARU      IS IT A DATA RU                       03980000
+         BZ    PREPSESS           NO RECEIVE NEXT REQUEST               03990000
+         LTR   R3,R3              RECEIVE BUFFER AVAILABLE              04000000
+         BZ    PREPSESS           NO ISSUE RECEIVE REQUEST              04010000
+                                                                        04020000
+         $RETSTOR (R3),OWNER=ITASK  FREE SESSION BUFFER                 04030000
+                                                                        04040000
+         B     PREPSESS           ISSUE RECEIVE REQUEST AND WAIT        04050000
+         DROP  R6                 SPLIST                                04060000
+                                                                        04070000
+         EJECT ,                                                        04080000
+***************************************************************         04090000
+*  EXIT  /  ERRORS                                                      04100000
+***************************************************************         04110000
+PROCSTOP DS    0H                                                       04120000
+PROCCNCL DS    0H                                                       04130000
+         LA    R0,RSN00           SET REASON CODE                       04140000
+         LA    R15,RC00           SET RETURN CODE                       04150000
+         B     RETURN             RETURN                                04160000
+                                                                        04170000
+ERR_RECV DS    0H                                                       04180000
+         LA    R15,RC08           SET RETURN CODE  - FAILURE            04190000
+         LA    R0,RSN04           RECEIVE FAILED                        04200000
+         B     RETURN             RETURN                                04210000
+                                                                        04220000
+ERR_EXTR DS    0H                                                       04230000
+         LA    R15,RC08           SET RETURN CODE  - FAILURE            04240000
+         LA    R0,RSN08           EXTRACT FAILED                        04250000
+         B     RETURN             RETURN                                04260000
+                                                                        04270000
+ERR_INIT DS    0H                                                       04280000
+         LA    R15,RC08           SET RETURN CODE  - FAILURE            04290000
+         LA    R0,RSN12           INITIALIZATION ERROR                  04300000
+         B     RETURN             RETURN                                04310000
+                                                                        04320000
+ERR_TOKN DS    0H                                                       04330000
+         LA    R15,RC08           SET RETURN CODE  - FAILURE            04340000
+         LA    R0,RSN16           INVALID TOKEN PROVIDED                04350000
+         B     RETURN             RETURN                                04360000
+                                                                        04370000
+ERR_RESP DS    0H                                                       04380000
+         LA    R15,RC08           SET RETURN CODE  - FAILURE            04390000
+         LA    R0,RSN20           SESSION POSITION RESPONSE FAILED      04400000
+         B     RETURN             RETURN                                04410000
+                                                                        04420000
+ERR_STG  DS    0H                                                       04430000
+         LA    R15,RC12           SET RETURN CODE  - SERVICE ERROR      04440000
+         LA    R0,RSN04           STORAGE ALLOCATION FAILURE            04450000
+         B     RETURN             RETURN                                04460000
+                                                                        04470000
+***************************************************************         04480000
+*  RETURN                                                               04490000
+***************************************************************         04500000
+RETURN   DS    0H                                                       04510000
+         STM   R15,R0,SAVRCRSN    SAVE RETURN/REASON CODES              04520000
+                                                                        04530000
+         $RCVRY DELETE,MF=(E,MFE_LIST) DEL RECOVERY ENVIRONMENT         04540000
+                                                                        04550000
+         LM    R0,R1,MSGINFO      LENGTH / ADDRESS OF TMSG              04560000
+         BAS   R14,FREEMSG        FREE MESSAGE AREA                     04570000
+                                                                        04580000
+         STGTERM QH=STGQHDR       FREE ENTIRE STORAGE POOL              04590000
+                                                                        04600000
+         LM    R15,R0,SAVRCRSN    RESTORE RETURN/REASON CODES           04610000
+         #EXIT ,                  RETURN                                04620000
+                                                                        04630000
+         EJECT ,                                                        04640000
+***************************************************************         04650000
+*                                                                       04660000
+* ROUTINE: PSESDFTS - POST DEFAULT VALUES TO PSESS                      04670000
+*                                                                       04680000
+* DESCRIPTION:                                                          04690000
+*                                                                       04700000
+*   THIS ROUTINE WILL PROCESS THE USERDATA OPERAND TABLE AND            04710000
+*   POST THE DEFAULT VALUES TO THE PRIMARY SESSION BLOCK.               04720000
+*                                                                       04730000
+* ENTRY:   N/A                                                          04740000
+*                                                                       04750000
+* EXIT:    R15 WILL CONTAIN ONE OF THE FOLLOWING RETURN CODES           04760000
+*              RC00 - DEFAULT VALUES SUCCESSFULLY POSTED                04770000
+*              RC04 - ERROR POSTING DEFAULT VALUES                      04780000
+*                                                                       04790000
+***************************************************************         04800000
+PSESDFTS DS    0H                                                       04810000
+         STM   R0,R15,REGSAVE1    SAVE CALLER'S REGISTERS               04820000
+         LA    R6,RC00            ASSUME SUCCESS                        04830000
+                                                                        04840000
+         L     R4,$HXPKEYS        KEYWORD TABLE HEADER                  04850000
+         L     R4,KEYHORG-KEYHDR(,R4)  KEYWORD TABLE ORIGIN             04860000
+         USING KEYTAB,R4          SYMBOLICALLY                          04870000
+         L     R5,$HXPOPS         POSTOPS TABLE                         04880000
+         USING POSTOPS,R5         SYMBOLICALLY                          04890000
+                                                                        04900000
+PDFT_MOR DS    0H                                                       04910000
+         $CLINK FUNC=PRMPOST,                                          +04920000
+               (STRUCT*,KEYTAB),  KEYWORD TABLE                        +04930000
+               (STRUCT*,0),       OPERAND LIST OMITTED                 +04940000
+               (STRUCT*,POSTOPS), POSTOPS TABLE                        +04950000
+               (STRUCT*,PSESS),   OPTIONS POSTED IN PSESS              +04960000
+               (VOID**,ERRENTRY), TABLE ENTRY IN ERROR                 +04970000
+               (CHAR*,ERRTOKEN)   TERSE ERROR DESCRIPTION (TEXT)        04980000
+                                                                        04990000
+         LTR   R2,R15             MISSION COMPLETE?                     05000000
+         BZ    PDFT_RET           DEFAULTS IN PLACE                     05010000
+                                                                        05020000
+         L     R1,ERRENTRY        ENTRY IN ERROR                        05030000
+         L     R0,$HXPOPS         TABLE ORIGIN                          05040000
+         N     R0,=X'7FFFFFFF'    REMOVE AMODE INDICATOR                05050000
+         SR    R1,R0              COMPUTE OFFSET TO ENTRY               05060000
+         SR    R0,R0              PREPARE FOR DIVIDE                    05070000
+         D     R0,=A(POSTOPLN)    CONVERT OFFSET TO INDEX               05080000
+         LA    R3,1(,R1)          CONVERT INDEX TO ENTRY NUMBER         05090000
+                                                                        05100000
+         $MSG  050,FIELDS=(((R2)),ERRTOKEN,((R3)))                      05110000
+                                                                        05120000
+         L     R5,ERRENTRY        FAILING ENTRY                         05130000
+         LA    R5,POSTOPS+POSTOPLN   ADVANCE TO NEXT ENTRY              05140000
+         LA    R6,RC04            INDICATE FAILURE                      05150000
+         B     PDFT_MOR           FORCE TO COMPLETION                   05160000
+         DROP  R4,R5              KEYTAB, POSTOPS                       05170000
+                                                                        05180000
+PDFT_RET DS    0H                                                       05190000
+         LTR   R15,R6             RESTORE RETURN CODE                   05200000
+         LM    R0,R14,REGSAVE1    RESTORE CALLER'S REGISTERS            05210000
+         BR    R14                RETURN                                05220000
+                                                                        05230000
+         EJECT ,                                                        05240000
+***************************************************************         05250000
+*                                                                       05260000
+* ROUTINE: PSESUDAT - POST USERDATA VALUES TO PSESS                     05270000
+*                                                                       05280000
+* DESCRIPTION:                                                          05290000
+*                                                                       05300000
+*   THIS ROUTINE WILL PROCESS THE SESSION USERDATA INFO AND             05310000
+*   POST THE VALUES TO THE PRIMARY SESSION BLOCK.                       05320000
+*                                                                       05330000
+* ENTRY:   N/A                                                          05340000
+*                                                                       05350000
+* EXIT:    R15 WILL CONTAIN ONE OF THE FOLLOWING RETURN CODES           05360000
+*              RC00 - VALUES SUCCESSFULLY POSTED                        05370000
+*              RC04 - ERROR POSTING USERDATA VALUES                     05380000
+*                                                                       05390000
+***************************************************************         05400000
+PSESUDAT DS    0H                                                       05410000
+         STM   R0,R15,REGSAVE1    SAVE CALLER'S REGISTERS               05420000
+                                                                        05430000
+         L     R0,$HXPKEYS        PARM KEYWORD DEFINITION               05440000
+         ST    R0,PRQBKMOD                                              05450000
+         L     R0,$HXPOPS         POSTOPS TABLE (APPLICATION/POST)      05460000
+         ST    R0,PRQBPOPS                                              05470000
+         LA    R0,PSESS           OPTION BLOCK IS PSESS                 05480000
+         ST    R0,PRQBCB                                                05490000
+         LA    R0,GETUDATA        ROUTINE TO RETURN USER DATA           05500000
+         ST    R0,PRQBRTNA        USED BY SERVICE ROUTINE               05510000
+                                                                        05520000
+         LA    R0,UDATA           ADDRESS OF USER DATA                  05530000
+         ST    R0,FWORD           SAVE USERDATA ADDRESS                 05540000
+         LA    R0,FWORD           COMMUNICATIONS WORD                   05550000
+         ST    R0,PRQBRTNP        USED AS DELIVERY FLAG                 05560000
+                                                                        05570000
+         LA    R1,PRMREQB         PREPARE PLIST                         05580000
+         @CALL IHXPUDAT           INVOKE PARSE & APPL SERVICE           05590000
+                                                                        05600000
+         LM    R0,R14,REGSAVE1    RESTORE CALLER'S REGISTERS            05610000
+         LTR   R15,R15            SUCCESSFUL COMPLETION?                05620000
+         BR    R14                RETURN                                05630000
+                                                                        05640000
+         EJECT ,                                                        05650000
+***************************************************************         05660000
+*                                                                       05670000
+* ROUTINE: IHXPUDAT EXIT ROUTINE - ACQUIRE USERDATA FIELD               05680000
+*                                                                       05690000
+***************************************************************         05700000
+GETUDATA DS    0H                                                       05710000
+         USING *,R15              LOCAL ADDRESSABILITY                  05720000
+         STM   R14,12,12(R13)     SAVE REGS                             05730000
+                                                                        05740000
+         LA    R5,RC04            ASSUME DELIVERY PREVIOUSLY MADE       05750000
+         ICM   R2,15,0(R1)        RETRIEVE USERDATA INFO                05760000
+         BZ    GET_URET           EOF IF SO                             05770000
+         XC    0(4,R1),0(R1)      CLOSE THE GATE                        05780000
+                                                                        05790000
+         LM    R0,R1,0(R2)        RETURN USERDATA ADDRESS/LENGTH        05800000
+         LTR   R0,R0              ZERO LENGTH RECORD                    05810000
+         BZ    GET_URET           YES, EOF                              05820000
+         LA    R5,RC00            TEXT RESPONSE                         05830000
+                                                                        05840000
+GET_URET DS    0H                                                       05850000
+         LR    R15,R5             RETCODE                               05860000
+         LM    R2,R12,28(R13)     RESTORE REGS                          05870000
+         BR    R14                RETURN                                05880000
+         DROP  R15                                                      05890000
+                                                                        05900000
+         EJECT ,                                                        05910000
+***************************************************************         05920000
+*                                                                       05930000
+* ROUTINE: SESSRECV - RECEIVE SESSION DATA                              05940000
+*                                                                       05950000
+* DESCRIPTION:                                                          05960000
+*                                                                       05970000
+*   THIS ROUTINE WILL INITIALIZE A REQUEST TO RECEIVE DATA              05980000
+*   FROM THE $SESS (SESSION MANAGEMENT) FACILITY. All $sess             05990000
+*   RECEIVE REQUEST WILL BE ISSUED WITH AN EPB WHICH WILL BE            06000000
+*   POSTED WHEN THE RECEIVE EVENT COMPLETES.                            06010000
+*                                                                       06020000
+* ENTRY:   N/A                                                          06030000
+*                                                                       06040000
+* EXIT:    UPON RETURN FROM THIS ROUTINE R15 WILL CONTAIN               06050000
+*          THE RETURN CODE FROM THE $SESS SERVICE.                      06060000
+*                                                                       06070000
+***************************************************************         06080000
+SESSRECV DS    0H                                                       06090000
+         STM   R0,R15,REGSAVE1    SAVE CALLER'S REGISTERS               06100000
+                                                                        06110000
+         ICM   R0,15,$SESSPL@     ADDR OF $SESS PLIST                   06120000
+         BNZ   SESS_EPB           INIT SESSION EPB                      06130000
+         $GETSTOR L'SPL,OWNER=ITASK    ALLOCATE $SESS PLIST             06140000
+         ST    R1,$SESSPL@        SAVE SPLIST ADDRESS                   06150000
+                                                                        06160000
+SESS_EPB DS    0H                                                       06170000
+         $TASK SETEPB,            INITIALIZE $SESS RECEIVE EPB         +06180000
+               ECODE=EC$HXP_RECV,                                      +06190000
+               MF=(E,$TASKMFL)                                          06200000
+                                                                        06210000
+         LR    R3,R1              EPB TOKEN / ADDR                      06220000
+                                                                        06230000
+         $SESS $SESS_RECEIVE,     SCHEDULE SESS RECEIVE                +06240000
+               SESSION=XPSTOKN,                                 134222 +06250000
+               EPB=(R3),                                               +06260000
+               MF=(E,*$SESSPL@)                                         06270000
+                                                                        06280000
+         LM    R2,R14,REGSAVE1+8  RESTORE CALLER'S REGISTERS            06290000
+         LTR   R15,R15            SET CONDITION CODE                    06300000
+         BR    R14                RETURN                                06310000
+                                                                        06320000
+         EJECT ,                                                        06330000
+***************************************************************         06340000
+*                                                                       06350000
+* ROUTINE: TMSGRECV - PREPARE FOR MESSAGE RECEIVE                       06360000
+*                                                                       06370000
+* DESCRIPTION:                                                          06380000
+*                                                                       06390000
+*    THIS ROUTINE WILL PREPARE THE MESSAGE EPB FOR THE                  06400000
+*    CURRENT PCB TO ENABLE XPORT MESSAGE TO BE SENT                     06410000
+*    TO THE PLU DRIVER PROCESS.                                         06420000
+*                                                                       06430000
+* ENTRY: N/A                                                            06440000
+*                                                                       06450000
+* EXIT:  N/A                                                            06460000
+*                                                                       06470000
+***************************************************************         06480000
+TMSGRECV DS    0H                                                       06490000
+         STM   R0,R15,REGSAVE1    SAVE CALLER'S REGISTERS               06500000
+                                                                        06510000
+         L     R15,TSKPCBC        ADDRESS OF CURRENT PCB                06520000
+         USING IPCB,R15           ADDRESSABILITY                        06530000
+         LA    R3,PCBMEPB         ADDRESS OF MESSAGE EPB                06540000
+         DROP  R15                IPCB                                  06550000
+                                                                        06560000
+         $TASK SETEPB,            INITIALIZE MESSAGE EPB               +06570000
+               EPB=(R3),                                               +06580000
+               ECODE=EC$MSG,                                           +06590000
+               SCOPE=LOCAL,                                            +06600000
+               MF=(E,$TASKMFL)                                          06610000
+                                                                        06620000
+         LM    R2,R14,REGSAVE1+8  RESTORE CALLER'S REGISTERS            06630000
+         LTR   R15,R15            SET CONDITION CODE                    06640000
+         BR    R14                RETURN                                06650000
+                                                                        06660000
+         EJECT ,                                                        06670000
+***************************************************************         06680000
+*                                                                       06690000
+* ROUTINE: GETMSG - RECEIVE MESSAGE FROM MESSAGE QUEUE                  06700000
+*                                                                       06710000
+* DESCRIPTION:                                                          06720000
+*                                                                       06730000
+*    THIS ROUTINE WILL RECEIVE A MESSAGE FROM THE LOCAL                 06740000
+*    PCB MESSAGE QUEUE.  A ZERO LENGTH $TRECV REQUEST IS                06750000
+*    ISSUED TO OBTAIN THE LENGTH OF THE MESSAGE TO BE                   06760000
+*    RECEIVED.  RC08 FROM THE TRECV SERVICE INDICATES                   06770000
+*    THAT THE BUFFER PROVIDED IS TOO SMALL AND RETURNS THE              06780000
+*    REQUIRED LENGTH IN R1.  A MESSAGE BUFFER IS THEN ALLOCATED         06790000
+*    AND THE RECEIVE IS RETRIED.                                        06800000
+*                                                                       06810000
+* ENTRY:  N/A                                                           06820000
+*                                                                       06830000
+* EXIT:   UPON EXIT R15 WILL CONTAIN THE RETURN CODE FROM               06840000
+*         THE $TRECV SERVICE AS FOLLOWS:                                06850000
+*                                                                       06860000
+*          R15 = RC00 - MESSAGE RECEIVED (R1 = MSG ADDRESS)             06870000
+*                RC04 - MESSAGE NOT FOUND                               06880000
+*                                                                       06890000
+***************************************************************         06900000
+GETMSG   DS    0H                                                       06910000
+         STM   R0,R15,REGSAVE1    SAVE CALLER'S REGISTERS               06920000
+                                                                        06930000
+         L     R3,MSGADDR         ADDRESS OF MESSAGE BUFFER             06940000
+         L     R2,MSGLEN          LENGTH  OF MESSAGE BUFFER             06950000
+                                                                        06960000
+MSG_RECV DS    0H                                                       06970000
+         $TRECV ((R3),(R2)),      RECEIVE PCB MESSAGE                  +06980000
+               SCOPE=PCB,                                              +06990000
+               MF=(E,MFE_LIST)                                          07000000
+                                                                        07010000
+         C     R15,=A(RC08)       MESSAGE BUFFER TOO SMALL?             07020000
+         BNE   MSG_EXIT           NO, RETURN                            07030000
+         LR    R2,R1              GET REQUIRED LENGTH OF MSG            07040000
+                                                                        07050000
+         LM    R0,R1,MSGINFO      GET MESSAGE ADDR/LEN                  07060000
+         BAS   R14,FREEMSG        RELEASE CURRENT MESSAGE BUFFER        07070000
+                                                                        07080000
+         STGGET (R2),QH=STGQHDR   ALLOC MESSAGE BUFFER                  07090000
+         BNZ   MSG_EXIT           ERROR, RETURN                         07100000
+         LR    R3,R1              ADDR OF MESSAGE BUFFER                07110000
+         STM   R2,R3,MSGINFO      SAVE MESSAGE LEN/ADDR                 07120000
+         B     MSG_RECV           RETRY RECEIVE                         07130000
+                                                                        07140000
+MSG_EXIT DS    0H                                                       07150000
+         L     R1,MSGADDR         ADDRESS OF MESSAGE BUFFER             07160000
+         LM    R2,R14,REGSAVE1+8  RESTORE CALLER'S REGISTERS            07170000
+         LTR   R15,R15            SET CONDITION CODE                    07180000
+         BR    R14                RETURN                                07190000
+                                                                        07200000
+         EJECT ,                                                        07210000
+***************************************************************         07220000
+*                                                                       07230000
+* ROUTINE: FREEMSG - FREE TRECV MESSAGE BUFFER                          07240000
+*                                                                       07250000
+* DESCRIPTION:                                                          07260000
+*                                                                       07270000
+*    THIS ROUTINE WILL FREE THE STORAGE ASSOCIATED WITH THE             07280000
+*    TRECV MESSAGE BUFFER AND CLEAR ITS ADDRESS AND LENGTH.             07290000
+*                                                                       07300000
+* ENTRY: UPON ENTRY R1 AND R0 CONTAIN THE FOLLOWING VALUES              07310000
+*                                                                       07320000
+*        R1 =  ADDRESS OF TSEND MSG TO FREE                             07330000
+*        R0 =  LENGTH  OF TSEND MSG TO FREE                             07340000
+*                                                                       07350000
+* EXIT:  N/A                                                            07360000
+*                                                                       07370000
+***************************************************************         07380000
+FREEMSG  DS    0H                                                       07390000
+         STM   R0,R15,REGSAVE2    SAVE CALLER'S REGISTERS               07400000
+                                                                        07410000
+         LTR   R3,R1              ADDR OF MESSAGE BUFFER                07420000
+         BZ    FMSG_RET           NONE, RETURN                          07430000
+         LTR   R4,R0              LEN  OF MESSAGE BUFFER                07440000
+         BZ    FMSG_RET           ZERO, RETURN                          07450000
+                                                                        07460000
+         STGRETN ADDR=(R3),LEN=(R4),QH=STGQHDR                          07470000
+                                                                        07480000
+         XC    MSGLEN,MSGLEN      CLEAR MESSAGE LENGTH                  07490000
+         XC    MSGADDR,MSGADDR    CLEAR MESSAGE ADDRESS                 07500000
+                                                                        07510000
+FMSG_RET DS    0H                                                       07520000
+         LM    R0,R15,REGSAVE2    RESTORE CALLER'S REGISTERS            07530000
+         BR    R14                RETURN                                07540000
+                                                                        07550000
+         EJECT ,                                                        07560000
+***************************************************************         07570000
+*                                                                       07580000
+*  ROUTINE: RECOVRTN - RECOVERY ROUTINE EXIT                            07590000
+*                                                                       07600000
+*  DESCRIPTION:                                                         07610000
+*                                                                       07620000
+*    THIS ROUTINE IS AN ABEND RECOVERY EXIT.  IF AN ABEND               07630000
+*    OCCURS WHILE THE RECOVERY ENVIRONMENT IS ACTIVE,  THIS             07640000
+*    ROUTINE WILL RECEIVE CONTROL AND ATTEMPT TO RESTORE                07650000
+*    THE ENVINRONMENT AND SET THE RETRY ADDRESS TO THE                  07660000
+*    CURRENT RESUME POINT SPECIFIED IN THE WORKAREA.                    07670000
+*                                                                       07680000
+*  ENTRY:  R13 - ADDRESS OF SAVE AREA                                   07690000
+*          R1  - PARAMETER LIST ADDRESS SPECIFIED IN $RCVRY             07700000
+*                (ADDRESS OF WORKAREA)                                  07710000
+*          R14 - RETURN ADDRESS                                         07720000
+*                                                                       07730000
+*  EXIT:   R15 CONTAINS THE ADDRESS OF THE RETRYRTN OR                  07740000
+*          TO PERCOLATE THE ABEND.                                      07750000
+*                                                                       07760000
+***************************************************************         07770000
+RECOVRTN DS    0H                                                       07780000
+         PUSH  USING              PRESERVE USING ENVIRONMENT            07790000
+         DROP  R13                WORKAREA                              07800000
+         STM   R14,R12,12(R13)    SAVE RECOVRTN REGISTERS               07810000
+         CR    R0,R10             RUNNING UNDER PROPER ITASK?           07820000
+         BNE   RECPERC            NO, PERCOLATE ABEND                   07830000
+                                                                        07840000
+         LR    R3,R1              RESTORE ORIGINAL WORKAREA ADDR        07850000
+W        USING WORKAREA,R3        ADDRESSABILITY                        07860000
+                                                                        07870000
+         ST    R12,TSKERCVR+(R12*4)  ENVIRONMENT                        07880000
+         ST    R3,TSKERCVR+(R13*4)   REGISTERS                          07890000
+                                                                        07900000
+         L     R15,W.RCVYADDR     ADDRESS OF RECOVERY RESUME            07910000
+         B     REC_RET            RETURN                                07920000
+                                                                        07930000
+RECPERC  DS    0H                                                       07940000
+         SR    R15,R15            NO RETRY,  PERCOLATE                  07950000
+                                                                        07960000
+REC_RET  DS    0H                                                       07970000
+         L     R14,12(,R13)       RESTORE RETURN ADDRESS                07980000
+         LM    R0,R12,20(R13)     RESTORE REGISTERS                     07990000
+         BR    R14                RETURN                                08000000
+         POP   USING              RESTORE USING ENVIRONMENT             08010000
+                                                                        08020000
+         EJECT ,                                                        08030000
+***************************************************************         08040000
+*  LITERALS AND CONSTANTS                                               08050000
+***************************************************************         08060000
+$HXPINIT DC    V(HXPINIT)         EXTERNAL ADDR OF XPORT INIT RTN       08070000
+$HXPAVAL DC    V(HXPAVAL)         EXTERNAL ADDR OF XPORT AVAL   134222  08080000
+$HXPRECV DC    V(HXPRECV)         EXTERNAL ADDR OF XPORT RECV RTN       08090000
+$HXPSEND DC    V(HXPSEND)         EXTERNAL ADDR OF XPORT SEND RTN       08100000
+$HXPKEYS DC    V(IHXPKEYS)        EXTERNAL ADDR OF XPORT KEYWORD        08110000
+$HXPOPS  DC    V(IHXPOPS)         EXTERNAL ADDR OF XPORT OPTIONS        08120000
+                                                                        08130000
+         LTORG ,                  LITERALS                              08140000
+                                                                        08150000
+         PRINT NOGEN                                                    08160000
+         ICVT  ,                                                        08170000
+         IVTAMCVT ,                                                     08180000
+         ITASK ,                                                        08190000
+         IPCB  ,                                                        08200000
+         IRPL  ,                                                        08210000
+         ISTDBIND ,                                                     08220000
+         ISESS ,                                                        08230000
+         PRINT GEN                                                      08240000
+                                                                        08250000
+         END   ,                                                        08260000

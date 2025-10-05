@@ -1,0 +1,1052 @@
+IENTSERV TITLE '- $ENTITY SERVICE '                                     00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE: IENTSERV - $ENTITY service routine                           00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This routine implements the services defined by the                00080000
+*    $ENTITY macro. It allows a number of independent workunits         00090000
+*    to register information defining or describing named               00100000
+*    resources.  Subsequent requests by the same or different           00110000
+*    callers can fetch or update this information, which is             00120000
+*    referred to throughout as "userdata".                              00130000
+*                                                                       00140000
+*    Userdata is a 16 byte block provided by the caller which           00150000
+*    may be used to provide data relevant to the application.           00160000
+*    Often, the information will include the address of an              00170000
+*    associated data area.  Userdata may be provided when the           00180000
+*    entity is defined (ADD), or may be provided at any later           00190000
+*    point using the POST service.  Similarly, userdata is              00200000
+*    retrieved from an entity entry by the EXTR (extract)               00210000
+*    service, and optionally by DEL (delete).                           00220000
+*                                                                       00230000
+*    A non-reusable token is assigned to all managed entities.          00240000
+*    The requesters sharing this entity can use the token on            00250000
+*    Subsequent access requests rather than the entity name.            00260000
+*    This assures the requester that the entity accessed has            00270000
+*    not been versioned (deleted and then redefined).                   00280000
+*                                                                       00290000
+*    A hashing technique is used to provide rapid access to a           00300000
+*    large number of managed entities.  Additionally, a list of         00310000
+*    managed entities is maintained for command processing,             00320000
+*    etc.                                                               00330000
+*                                                                       00340000
+*                                                                       00350000
+* METHOD:                                                               00360000
+*                                                                       00370000
+*    When the init service is invoked, a hash table and                 00380000
+*    associated control information described by ENTCNTL is             00390000
+*    allocated.  Subsequent add requests introduce entity               00400000
+*    entries (ENENTRY) to the structure; delete requests remove         00410000
+*    them.                                                              00420000
+*                                                                       00430000
+*    ENENTRY's reside in three lists. The first two are hash            00440000
+*    synonum chains used to resolve collisions of qualified             00450000
+*    entity name and token, (ENEHN* and ENEHT*) respectively.           00460000
+*    Each hash table slot contains distinct by-name and                 00470000
+*    by-token synonym chain ptrs. The third list is an ordered          00480000
+*    list of all ENENTRY nodes, optionally maintained in                00490000
+*    qualified entity name order, and anchored in ENTCNTL.ENTQ.         00500000
+*                                                                       00510000
+*    If duplicate entity names are permitted via the ALLOWDUP=YES       00520000
+*    operand of the init function, a fourth list of duplicate           00530000
+*    entries is maintained.  Only the first entry on this list          00540000
+*    participates in the by-name list.                                  00550000
+*                                                                       00560000
+*                                                                       00570000
+* NOTES:                                                                00580000
+*                                                                       00590000
+*    STG* service requests are coded with MF=(E,DWORD) with the         00600000
+*    knowledge that the longest plist in this class (STGRETN) is        00610000
+*    three words, spanning both DWORD and FWORD in #WORK.  This         00620000
+*    is ugly, but it allowed the size of the passed workarea            00630000
+*    to be reduced considerably.                                        00640000
+*                                                                       00650000
+*                                                                       00660000
+* ON ENTRY:                                                             00670000
+*                                                                       00680000
+*    R1  contains the address of a parameter list mapped by             00690000
+*        $ENTPARM, which is expanded via $ENTITY DSECT=YES              00700000
+*                                                                       00710000
+*                                                                       00720000
+* ON EXIT:                                                              00730000
+*                                                                       00740000
+*    R15 contains one of the following return codes. Reason             00750000
+*        codes are returned via R0 when applicable.                     00760000
+*                                                                       00770000
+*        RC00 - request completed normally                              00780000
+*                                                                       00790000
+*               RSN00 - qualified entity name is unique                 00800000
+*               RSN04 - qualified entity name is not unique             00810000
+*                                                                       00820000
+*        RC04 - request not completed.  For ADD requests, an            00830000
+*               entity with the given qualified name already            00840000
+*               exists.  For DELete, POST and EXTRact requests,         00850000
+*               the designated entry is not defined.                    00860000
+*                                                                       00870000
+*        RC08 - invalid qualifier or entity name                        00880000
+*                                                                       00890000
+*        RC12 - required arguments not provided                         00900000
+*                                                                       00910000
+*        RC16 - INIT not previously completed                           00920000
+*                                                                       00930000
+*                                                                       00940000
+*    R1  in all cases that the designated entity entry exists           00950000
+*        at the completion of the call, a ptr to its token is           00960000
+*        returned in R1.  This includes ADD requests that are           00970000
+*        failed because of a duplicate entity name.                     00980000
+*                                                                       00990000
+**<DOC-OFF>****************************************************         01000000
+                                                                        01010000
+***************************************************************         01020000
+*                                                                       01030000
+* MAINTENANCE:                                                          01040000
+*                                                                       01050000
+*    06/25/93 R. Turgeon                                                01060000
+*             Initial version                                           01070000
+*                                                                       01080000
+*    10/19/94 R. Turgeon                                                01090000
+*             Reduction of workarea size from 512 to 256 bytes          01100000
+*                                                                       01110000
+*    01/21/95 R. Turgeon                                                01120000
+*             Consolidation of HASHQE / HSUM routines to                01130000
+*             address bottlenecks identified in strobe analysis         01140000
+*                                                                       01150000
+***************************************************************         01160000
+                                                                        01170000
+         EJECT ,                                                        01180000
+         #WORK LENGTH=256,PLIST=NO                                      01190000
+                                                                        01200000
+REGSAVE  DS    16F           LOCAL SUBROUTINE REGISTER SAVEAREA         01210000
+                                                                        01220000
+RSNCODE  DS    F             FUNCTION DEPENDENT REASON CODE             01230000
+DUPENTRY DS    A             ADD - ADDR OF DUPLICATE ENTRY, IF ANY      01240000
+QENAMEL  DS    F             LENGTH OF QUALIFIED ENTITY NAME            01250000
+QENAME   DS    CL(64+8+1+(3))   QUALIFIED ENTITY NAME AND ALIGN         01260000
+                                                                        01270000
+WORKLEN  #ENDWORK ,          END WORKAREA                               01280000
+                                                                        01290000
+         EJECT                                                          01300000
+         $ENTITY DSECT=ALL   PARM LIST AND INTERNAL MAPPINGS            01310000
+                                                                        01320000
+         EJECT                                                          01330000
+         ABCODES ,                                                      01340000
+                                                                        01350000
+         EQUS  ,                                                        01360000
+                                                                        01370000
+         EJECT                                                          01380000
+IENTSERV #ENTER PREG=R8,WAPASS=YES,CLEAR=XC                             01390000
+                                                                        01400000
+         USING ITASK,R10                                                01410000
+                                                                        01420000
+*--------------------------------------------------------------         01430000
+                                                                        01440000
+         USING $ENTPARM,R8        ENTRANCE LIST                         01450000
+         ICM   R9,15,$ENTANCH     LOCATE ENTCNTL AREA ANCHOR            01460000
+         BNP   ERR_MISS           INVALID REQUEST                       01470000
+                                                                        01480000
+         SR    R3,R3              PREPARE FOR INSERT                    01490000
+         IC    R3,$ENTTYPE        REQUEST CODE                          01500000
+         B     *+4(R3)            ANALYZE REQUEST TYPE                  01510000
+         B     INIT                  00 - INIT                          01520000
+         B     ADD                   04 - ADD ENTITY                    01530000
+         B     DPE                   08 - DELETE ENTITY                 01540000
+         B     DPE                   12 - UPDATE USERDATA               01550000
+         B     DPE                   16 - EXTRACT USERDATA              01560000
+         B     TERM                  20 - TERMINATE                     01570000
+         EX    R0,*                                                     01580000
+         EX    R0,*                                                     01590000
+                                                                        01600000
+         EJECT ,                                                        01610000
+***************************************************************         01620000
+*                                                                       01630000
+*   INIT:  BUILD THE ENTCNTL STRUCTURE                                  01640000
+*                                                                       01650000
+***************************************************************         01660000
+INIT     DS    0H                                                       01670000
+         ICM   R2,15,$ENTSLOT     SLOT COUNT                            01680000
+         BNP   ERR_MISS           UNSATISFIED EXPECTATION               01690000
+         SLL   R2,3               EACH SLOT CONTAINS TWO PTRS           01700000
+         LA    R2,ENTLN(R2)       TOTAL LENGTH OF STRUCTURE             01710000
+                                                                        01720000
+         L     R3,$ENTSQH         requester DESIGNATES STORAGE POOL     01730000
+                                                                        01740000
+         STGGET (R2),QH=(R3),MF=(E,DWORD)                               01750000
+                                                                        01760000
+         BNZ   ERR_STG            STORAGE FAILURE                       01770000
+                                                                        01780000
+         LR    R7,R1              ACCEPT RETURNED STORAGE               01790000
+         USING ENTCNTL,R7         CAST TO STRUCTURE                     01800000
+         STH   R2,ENTLEN          LENGTH OF AREA                        01810000
+         MVC   ENTSLOT#,$ENTSLOT  MANAGED SLOTS                         01820000
+         MVC   ENTOPTS,$ENTOPTS   OPTION FLAGS                          01830000
+         MVC   ENTSQH,$ENTSQH     STORAGE POOL                          01840000
+         ST    R7,0(,R9)          ANCHOR THE CONTROL AREA               01850000
+                                                                        01860000
+         LA    R15,RC00           NORMAL COMPLETION                     01870000
+         SR    R0,R0              REASON CODE NOT DEFINED               01880000
+         B     RETURN             FUNCTION COMPLETE                     01890000
+         DROP  R7                 ENTCNTL                               01900000
+                                                                        01910000
+         EJECT ,                                                        01920000
+***************************************************************         01930000
+*                                                                       01940000
+*   ADD:  REGISTER A NEW ENTITY                                         01950000
+*                                                                       01960000
+*   THE ENTITY NAME, AND OPTIONALLY ITS QUALIFIER (QNAME) ARE           01970000
+*   JOINED TO CREATE A QENTITY NAME WHICH MUST BE UNIQUE                01980000
+*   IN THE MANAGED ENTITY LIST.  ONCE ACCEPTED, A TOKEN IS              01990000
+*   ASSIGNED TO THE ENTITY AND RETURNED TO THE requester IN             02000000
+*   THE DESIGNATED STORAGE AREA.  USERDATA, IF PROVIDED, IS             02010000
+*   INSERTED IN THE NEWLY ALLOCATED ENTITY ENTRY.                       02020000
+*                                                                       02030000
+*   08/17/93 - LOGIC MODIFIED TO ALLOW ADDITION OF DUPLICATE            02040000
+*   ENTITIES BY NAME WHEN ALLOWDUP=YES IS SPECIFIED AT                  02050000
+*   INITIALIZATION.  THE REASON CODE RETURNED IN R0 CONVEYS             02060000
+*   WHETHER OR NOT DUPLICATION HAS OCCURRED.                            02070000
+*                                                                       02080000
+***************************************************************         02090000
+ADD      DS    0H                                                       02100000
+         ICM   R7,15,0(R9)        LOCATE ENTITY CONTROL AREA            02110000
+         BZ    ERR_INIT           ASSERT ITS EXISTENCE                  02120000
+         USING ENTCNTL,R7         CAST TO STRUCTURE                     02130000
+                                                                        02140000
+         ICM   R0,15,$ENTNAMA     ENTITY NAME PROVIDED?                 02150000
+         BZ    ERR_MISS           MISSING ARGUMENT IF NOT               02160000
+         ICM   R0,15,$ENTTOKN     TOKEN RETURN AREA PROVIDED?           02170000
+         BZ    ERR_MISS           MISSING ARGUMENT IF NOT               02180000
+                                                                        02190000
+         LA    R1,QENAME          QENTITY NAME CONSTRUCTION AREA        02200000
+         LA    R0,L'QENAME        MAX LENGTH OF RESULT                  02210000
+         BAS   R14,BLDQE          BUILD QUALIFIED NAME                  02220000
+         BNZ   ERR_NAME           INVALID ENTITY NAME                   02230000
+         ST    R0,QENAMEL         SAVE LENGTH OF COMPOUND NAME          02240000
+                                                                        02250000
+*--------------------------------------------------------------         02260000
+*   DETERMINE WHETHER THE QENTITY NAME IS DUPLICATED                    02270000
+*--------------------------------------------------------------         02280000
+         L     R0,ENTSLOT#        NUMBER OF SLOTS                       02290000
+         BAS   R14,HASHQE         CONVERT ENTITY TO SLOT NUMBER         02300000
+         LR    R4,R15             SLOT NUMBER                           02310000
+         SLL   R4,3               EACH SLOT CONTAINS TWO PTRS           02320000
+         LA    R4,ENTSLOTS(R4)    ADDRESS OF SLOT                       02330000
+                                                                        02340000
+         LR    R1,R4              SYNONYM CHAIN ANCHOR                  02350000
+         BAS   R14,SRCHQE         ENSURE NAME IS UNIQUE                 02360000
+         BNZ   ADDCONT            NO DUPLICATION ENCOUNTERED            02370000
+                                                                        02380000
+         ST    R1,DUPENTRY        SAVE PTR TO DUPLICATE ENTRY           02390000
+         TM    ENTOPTS,$ENTDUPS   DUPLICATION PERMITTED?                02400000
+         BO    ADDCONT            CONTINUE IF SO                        02410000
+         LA    R1,ENETOKEN-ENENTRY(R1)   RETURN DUP'S TOKEN PTR         02420000
+         B     WRN_DUPL           REQUEST IS FAILED                     02430000
+                                                                        02440000
+*--------------------------------------------------------------         02450000
+*   ALLOCATE AND FORMAT AN ENTITY ENTRY                                 02460000
+*--------------------------------------------------------------         02470000
+ADDCONT  DS    0H                                                       02480000
+         L     R2,QENAMEL         LENGTH OF QENTITY NAME                02490000
+         LA    R2,ENELN(,R2)      TOTAL LENGTH OF ENTITY ENTRY          02500000
+                                                                        02510000
+         L     R3,ENTSQH          STORAGE SUBPOOL                       02520000
+                                                                        02530000
+         STGGET (R2),QH=(R3),MF=(E,DWORD)                               02540000
+                                                                        02550000
+         BNZ   ERR_STG            STORAGE MANAGMENT FAILURE             02560000
+         LR    R6,R1              ENTRY PTR BY CONVENTION               02570000
+         USING ENENTRY,R6         DECLARE INTENTIONS                    02580000
+                                                                        02590000
+         STH   R2,ENELEN          TOTAL LENGTH OF ENENTRY               02600000
+         L     R2,QENAMEL         LENGTH OF QENTITY NAME PORTION        02610000
+         STH   R2,ENENTLN         POST LENGTH OF QENTITY NAME           02620000
+         BCTR  R2,0               PREPARE FOR COPY                      02630000
+         EX    R2,*+4             COPY QENTITY NAME                     02640000
+         MVC   ENENTITY(*-*),QENAME                                     02650000
+                                                                        02660000
+         LM    R0,R1,ENTTOKEN     LAST TOKEN ASSIGNED                   02670000
+         AL    R1,=F'1'           CREATE UNIQUE VALUE                   02680000
+         BC    B'1100',*+8        BRANCH IF NO CARRY                    02690000
+         AL    R0,=F'1'           ELSE APPLY CARRY TO HIGH ORDER        02700000
+         STM   R0,R1,ENTTOKEN     SAVE LAST TOKEN ASSIGNED              02710000
+         STM   R0,R1,ENETOKEN     ASSIGN TO THIS ENTITY                 02720000
+                                                                        02730000
+         L     R3,$ENTTOKN        TOKEN RETURN AREA                     02740000
+         MVC   0(L'ENETOKEN,R3),ENETOKEN                                02750000
+                                                                        02760000
+         ICM   R3,15,$ENTUSER     USERDATA PROVIDED?                    02770000
+         BZ    *+10               OPTIONAL ON ADD                       02780000
+         MVC   ENEUSER,0(R3)      IMPORT A COPY                         02790000
+                                                                        02800000
+*--------------------------------------------------------------         02810000
+*   ADD ENTITY ENTRY TO BY-NAME HASH SYNONYM CHAIN IF NOT A DUP         02820000
+*--------------------------------------------------------------         02830000
+         ICM   R0,15,DUPENTRY     NEW ENTRY DUPLICATES ENTITY NAME?     02840000
+         BNZ   SKPBYNAM           LINKS WILL BE ASSUMED FROM DUP ENTRY  02850000
+                                                                        02860000
+R        USING ENENTRY,R5         REMOTE ENTRY                          02870000
+         ICM   R5,15,0(R4)        FIRST ENTRY OF BY-NAME LIST           02880000
+         ST    R5,ENEHNFWD        INSERT NEW ENTRY AT FRONT OF CHAIN    02890000
+         BZ    *+8                DONE IF ONLY ENTRY                    02900000
+         ST    R6,R.ENEHNBWD      ELSE SET BACK PTR                     02910000
+         ST    R4,ENEHNBWD        RETAIN PTR TO SLOT ENTRY              02920000
+         OI    ENEHNBWD,X'80'     INDICATE SLOT PTR                     02930000
+         ST    R6,0(,R4)          REANCHOR BY-NAME LIST                 02940000
+                                                                        02950000
+SKPBYNAM DS    0H                                                       02960000
+                                                                        02970000
+*--------------------------------------------------------------         02980000
+*   ADD ENTITY ENTRY TO TOP OF DUP CHAIN AND UPDATE BY-NAME Q.          02990000
+*   REPLACED (STACKED) ENTITY MAY OR MAY NOT RESIDE AT ORIGIN           03000000
+*   OF BY-NAME Q AS IS FORCED ABOVE.                                    03010000
+*--------------------------------------------------------------         03020000
+         ICM   R5,15,DUPENTRY     DUPLICATE ENTRY ADDR (R)              03030000
+         BZ    SKPBYDUP           DONE IF NOT                           03040000
+                                                                        03050000
+         ST    R5,ENEDUPF         SET DUPLICATE CHAIN FWD LINK          03060000
+         ST    R6,R.ENEDUPB       SET DUPLICATE CHAIN BWD LINK          03070000
+                                                                        03080000
+         MVC   ENEHNFWD,R.ENEHNFWD                                      03090000
+         MVC   ENEHNBWD,R.ENEHNBWD                                      03100000
+         XC    R.ENEHNFWD,R.ENEHNFWD                                    03110000
+         XC    R.ENEHNBWD,R.ENEHNBWD                                    03120000
+                                                                        03130000
+         ICM   R5,15,ENEHNBWD     NEW ENTRY AT ORIGIN OF BY-NAME Q?     03140000
+         BNP   *+8                SKIP IF NOT                           03150000
+         ST    R6,R.ENEHNFWD      ELSE INSERT NEW ENTRY IN FWD CHAIN    03160000
+         BP    *+8                SKIP IF NOT THE ANCHOR                03170000
+         ST    R6,0(,R4)          ELSE RESET HEAD OF CHAIN              03180000
+         ICM   R5,15,ENEHNFWD     SUCCESSOR ENTRY?                      03190000
+         BZ    *+8                SKIP IF NOT                           03200000
+         ST    R6,R.ENEHNBWD      ELSE INSERT NEW ENTRY IN BWD CHAIN    03210000
+                                                                        03220000
+         LA    R0,RSN04           INDICATE DUPLICATION                  03230000
+         ST    R0,RSNCODE         POST FOR RETURN                       03240000
+                                                                        03250000
+SKPBYDUP DS    0H                                                       03260000
+                                                                        03270000
+*--------------------------------------------------------------         03280000
+*   ADD ENTITY ENTRY TO BY-TOKEN HASH SYNONYM CHAIN                     03290000
+*--------------------------------------------------------------         03300000
+         L     R0,ENTSLOT#        NUMBER OF SLOTS                       03310000
+         BAS   R14,HASHTOKN       HASH THE ASSIGNED TOKEN               03320000
+         LR    R4,R15             SLOT NUMBER                           03330000
+         SLL   R4,3               EACH SLOT CONTAINS TWO PTRS           03340000
+         LA    R4,ENTSLOTS(R4)    ADDRESS OF SLOT                       03350000
+                                                                        03360000
+         ICM   R5,15,4(R4)        FIRST ENTRY OF BY-TOKEN CHAIN         03370000
+         ST    R5,ENEHTFWD        INSERT NEW ENTRY AT FRONT OF CHAIN    03380000
+         BZ    *+8                DONE IF ONLY ENTRY                    03390000
+         ST    R6,R.ENEHTBWD      ELSE SET BACK PTR                     03400000
+         ST    R4,ENEHTBWD        RETAIN PTR TO SLOT ENTRY              03410000
+         OI    ENEHTBWD,X'80'     INDICATE SLOT PTR                     03420000
+         ST    R6,4(,R4)          REANCHOR BY-TOKEN CHAIN               03430000
+                                                                        03440000
+*--------------------------------------------------------------         03450000
+*   ADD ENTRY TO DESIGNATED POSITION IN THE ORDERED LIST                03460000
+*--------------------------------------------------------------         03470000
+         LA    R5,ENTQ-(ENEQFWD-ENENTRY)                                03480000
+         TM    ENTOPTS,$ENTORDR   ENTITY LIST ORDERING BY QENTITY?      03490000
+         BNO   ADDLIST            IMMEDIATE INSERTION IF NOT            03500000
+                                                                        03510000
+ADDSCAN  DS    0H                                                       03520000
+S        USING ENENTRY,R9         FORWARD NODE                          03530000
+         ICM   R9,15,R.ENEQFWD    ADVANCE FORWARD NODE PTR              03540000
+         BZ    ADDLIST            END OF LIST ENCOUNTERED               03550000
+         LA    R0,ENENTITY        NEW QENTITY NAME                      03560000
+         LH    R1,ENENTLN         LENGTH OF NEW QENTITY                 03570000
+         LA    R14,S.ENENTITY     FORWARD QENTITY NAME                  03580000
+         LH    R15,S.ENENTLN      LENGTH OF FORWARD QENTITY NAME        03590000
+         CLCL  R0,R14             APPROPRIATE INSERT POINT?             03600000
+         BNH   ADDLIST            INSERT BETWEEN R AND S IF SO          03610000
+         LR    R5,R9              R <== S                               03620000
+         B     ADDSCAN            CONTINUE SCAN                         03630000
+                                                                        03640000
+ADDLIST  DS    0H                 INSERT CURRENT ENTRY AFTER R          03650000
+         MVC   ENEQFWD,R.ENEQFWD  SET C.FWD LINK                        03660000
+         ST    R6,R.ENEQFWD       SET R.FWD LINK                        03670000
+         LA    R0,ENTQ-(ENEQFWD-ENENTRY)                                03680000
+         CR    R0,R5              IS R THE ANCHOR?                      03690000
+         BE    *+8                NO BACKWARD LINK IF SO                03700000
+         ST    R5,ENEQBWD         SET C.BWD LINK                        03710000
+         ICM   R9,15,ENEQFWD      SUCCESSOR NODE PRESENT?               03720000
+         BZ    *+8                SKIP IF NOT                           03730000
+         ST    R6,S.ENEQBWD       SET S.BWD LINK                        03740000
+                                                                        03750000
+*--------------------------------------------------------------         03760000
+*   ENTITY ENTRY INSERTION COMPLETE                                     03770000
+*--------------------------------------------------------------         03780000
+         L     R15,ENTRIES        NUMBER OF MANAGED ENTRIES             03790000
+         LA    R15,1(,R15)        ACCOUNT FOR NEW ENTRY                 03800000
+         ST    R15,ENTRIES        SAVE UPDATED COUNT                    03810000
+                                                                        03820000
+         LA    R15,RC00           NORMAL COMPLETION                     03830000
+         LA    R1,ENETOKEN        RETURN TOKEN PTR                      03840000
+         L     R0,RSNCODE         REFLECT DUPLICATION IF ANY TO CALLER  03850000
+         B     RETURN             FUNCTION COMPLETE                     03860000
+         DROP  R7,R6,R,S          ENTCNTL, ENENTRY'S (CURR, RMT1, RMT2) 03870000
+                                                                        03880000
+         EJECT ,                                                        03890000
+***************************************************************         03900000
+*                                                                       03910000
+*   DELETE, POST, EXTRACT:  COMMON PROLOG                               03920000
+*                                                                       03930000
+*   LOCATE THE DESIGNATED ENTITY ENTRY BY TOKEN OR QUALIFIED            03940000
+*   ENTITY NAME.  IF BOTH ARE PROVIDED, ONLY THE TOKEN IS               03950000
+*   EXAMINED.                                                           03960000
+*                                                                       03970000
+***************************************************************         03980000
+DPE      DS    0H                                                       03990000
+         ICM   R7,15,0(R9)        LOCATE ENTITY CONTROL AREA            04000000
+         BZ    ERR_INIT           ASSERT ITS EXISTENCE                  04010000
+         USING ENTCNTL,R7         CAST TO STRUCTURE                     04020000
+                                                                        04030000
+         ICM   R0,15,$ENTTOKN     TOKEN PROVIDED?                       04040000
+         BZ    DPE_NAME           SEARCH BY QENTITY NAME OTHERWISE      04050000
+         L     R0,ENTSLOT#        NUMBER OF SLOTS                       04060000
+         BAS   R14,HASHTOKN       CONVERT TOKEN TO SLOT #               04070000
+         LR    R4,R15             SLOT NUMBER                           04080000
+         SLL   R4,3               EACH SLOT CONTAINS TWO PTRS           04090000
+         LA    R4,ENTSLOTS(R4)    ADDRESS OF SLOT                       04100000
+                                                                        04110000
+         LA    R1,4(,R4)          BY-TOKEN SYNONYM CHAIN ANCHOR         04120000
+         BAS   R14,SRCHTOKN       LOCATE MATCHING ENTITY ENTRY (R1)     04130000
+         BNZ   WRN_NF             ERROR - ENTRY NOT FOUND               04140000
+         B     DPE_COMN           R1 CONTAINS ENTRY PTR                 04150000
+                                                                        04160000
+*--------------------------------------------------------------         04170000
+*   LOCATE ENTITY BY QUALIFIED NAME                                     04180000
+*--------------------------------------------------------------         04190000
+DPE_NAME DS    0H                                                       04200000
+         ICM   R0,15,$ENTNAMA     ENTITY NAME PROVIDED?                 04210000
+         BNZ   *+8                SKIP IF SO                            04220000
+         EX    R0,*               PROGRAMMING ERROR                     04230000
+                                                                        04240000
+         LA    R1,QENAME          QENTITY NAME CONSTRUCTION AREA        04250000
+         LA    R0,L'QENAME        MAX LENGTH OF RESULT                  04260000
+         BAS   R14,BLDQE          CONSTRUCT QENTITY                     04270000
+         BNZ   ERR_NAME           INVALID NAMES                         04280000
+         ST    R0,QENAMEL         SAVE RESULT LENGTH                    04290000
+                                                                        04300000
+         L     R0,ENTSLOT#        NUMBER OF SLOTS                       04310000
+         BAS   R14,HASHQE         CONVERT QENTITY TO SLOT NUMBER        04320000
+         LR    R4,R15             SLOT NUMBER                           04330000
+         SLL   R4,3               EACH SLOT CONTAINS TWO PTRS           04340000
+         LA    R4,ENTSLOTS(R4)    ADDRESS OF SLOT                       04350000
+                                                                        04360000
+         LR    R1,R4              SYNONYM CHAIN ANCHOR                  04370000
+         BAS   R14,SRCHQE         LOCATE MATCHING ENTITY ENTRY (R1)     04380000
+         BNZ   WRN_NF             ERROR - ENTRY NOT FOUND               04390000
+*                                 R1 CONTAINS ENTRY PTR                 04400000
+                                                                        04410000
+*--------------------------------------------------------------         04420000
+*   DELETE, POST, EXTRACT: FUNCTION COMPLETION                          04430000
+*--------------------------------------------------------------         04440000
+DPE_COMN DS    0H                                                       04450000
+         LR    R6,R1              ACCEPT ENTITY ENTRY                   04460000
+         USING ENENTRY,R6         ADDRESSABILITY                        04470000
+         L     R0,ENEDUPF         TEST DUPLICATION CHAIN                04480000
+         O     R0,ENEDUPB         ACCUMULATE BOTH PTRS                  04490000
+         BZ    DPE_DISP           NO DUPLICATION                        04500000
+         ST    R0,DUPENTRY        TRUE IF POPULATED DUPLICATION CHAIN   04510000
+         LA    R0,RSN04           INDICATE DUPS INVOLVED                04520000
+         ST    R0,RSNCODE         SAVE FOR RETURN                       04530000
+         DROP  R6                 ENENTRY                               04540000
+                                                                        04550000
+DPE_DISP DS    0H                                                       04560000
+         SR    R3,R3              PREPARE FOR INSERT                    04570000
+         IC    R3,$ENTTYPE        REQUEST CODE                          04580000
+         B     *+4(R3)            ANALYZE REQUEST TYPE                  04590000
+         EX    R0,*                  00 - INIT                          04600000
+         EX    R0,*                  04 - ADD ENTITY                    04610000
+         B     DELETE                08 - DELETE ENTITY                 04620000
+         B     POST                  12 - UPDATE USERDATA               04630000
+         B     EXTRACT               16 - EXTRACT USERDATA              04640000
+         EX    R0,*                  20 - TERMINATE                     04650000
+         EX    R0,*                                                     04660000
+         EX    R0,*                                                     04670000
+                                                                        04680000
+         EJECT ,                                                        04690000
+***************************************************************         04700000
+*                                                                       04710000
+*   DELETE:  DELETE ENTITY ENTRY (R1) FROM SYNONYM CHAIN (R0)           04720000
+*                                                                       04730000
+*   08/17/93 - WHEN THE DELETED ENTRY RESIDES IN A DUPLICATE            04740000
+*   MEMBER LIST IT IS FIRST DELETED FROM THAT LIST.  THEN, IT           04750000
+*   IS ALSO DELETED FROM THE BY-NAME QUEUE IF IT IS THE FIRST           04760000
+*   ENTRY IN THE DUPLICATE CHAIN.  SUBSEQUENT (STACKED) ENTRIES         04770000
+*   DO NOT RESIDE IN ANY BY-NAME QUEUE.                                 04780000
+*                                                                       04790000
+***************************************************************         04800000
+DELETE   DS    0H                                                       04810000
+         LR    R6,R1              ENTITY ENTRY                          04820000
+         USING ENENTRY,R6         ADDRESSABILITY                        04830000
+                                                                        04840000
+         ICM   R1,15,$ENTUSER     USERDATA SOURCE                       04850000
+         BZ    *+10               FINAL EXTRACT NOT REQUIRED            04860000
+         MVC   0(L'ENEUSER,R1),ENEUSER  EXTRACT USERDATA                04870000
+                                                                        04880000
+         L     R15,ENTRIES        MANAGED ENTRY COUNT                   04890000
+         BCTR  R15,0              ACCOUNT FOR DELETION                  04900000
+         ST    R15,ENTRIES        SAVE UPDATED COUNT                    04910000
+                                                                        04920000
+*--------------------------------------------------------------         04930000
+*   REMOVE ENTRY FROM BY-NAME CHAIN IF NOT A DUPLICATE MEMBER           04940000
+*--------------------------------------------------------------         04950000
+R        USING ENENTRY,R5         PREDECESSOR ENTRY PTR                 04960000
+                                                                        04970000
+         ICM   R0,15,DUPENTRY     MEMBER OF DUPLICATE LIST?             04980000
+         BNZ   DELDUP             DISTINCT DELETION LOGIC IF SO         04990000
+                                                                        05000000
+         ICM   R5,15,ENEHNBWD     PREDECESSOR ENTRY PRESENT?            05010000
+         BNP   *+10               HEAD OF LIST IF NONE                  05020000
+         MVC   R.ENEHNFWD,ENEHNFWD ELSE DECHAIN OUR ENTRY               05030000
+         BP    *+10               SKIP IF NOT LIST HEAD                 05040000
+         MVC   0(4,R5),ENEHNFWD   REANCHOR SYNONYM LIST                 05050000
+         ICM   R5,15,ENEHNFWD     SUCCESSOR ENTRY?                      05060000
+         BZ    *+10               SKIP IF NOT                           05070000
+         MVC   R.ENEHNBWD,ENEHNBWD   DECHAIN OUR ENTRY                  05080000
+         B     ENAMDUP                                                  05090000
+                                                                        05100000
+*--------------------------------------------------------------         05110000
+*   DEL ENTRY FROM DUP LIST & UPDATE BY-NAME IF AFFECTED                05120000
+*--------------------------------------------------------------         05130000
+DELDUP   DS    0H                                                       05140000
+         ICM   R5,15,ENEDUPB      DUPL PREDECESSOR ENTRY PRESENT?       05150000
+         BZ    *+10               SKIP IF NOT                           05160000
+         MVC   R.ENEDUPF,ENEDUPF  DECHAIN ENTRY FROM PREDECESSOR        05170000
+         ICM   R5,15,ENEDUPF      SUCCESSOR ENTRY?                      05180000
+         BZ    *+10               SKIP IF NOT                           05190000
+         MVC   R.ENEDUPB,ENEDUPB  DECHAIN OUR ENTRY                     05200000
+                                                                        05210000
+         ICM   R0,15,ENEDUPB      DUP CHAIN LIST HEAD DELETED?          05220000
+         BNZ   ENAMDUP            DONE IF NOT                           05230000
+         MVC   R.ENEHNFWD,ENEHNFWD   PROMOTE STACKED DUP                05240000
+         MVC   R.ENEHNBWD,ENEHNBWD                                      05250000
+                                                                        05260000
+S        USING ENENTRY,R9         BY-NAME Q NODE                        05270000
+         ICM   R9,15,R.ENEHNBWD   LOCATE PREDECESSOR                    05280000
+         BNP   *+8                SKIP IF NOT ANOTHER ENTITY ENTRY      05290000
+         ST    R5,S.ENEHNFWD      ELSE INSERT ENTRY IN FWD CHAIN        05300000
+         BP    *+8                SKIP IF NOT THE ANCHOR                05310000
+         ST    R5,0(,R9)          ELSE RESET HEAD OF CHAIN              05320000
+         ICM   R9,15,R.ENEHNFWD   SUCCESSOR ENTRY?                      05330000
+         BZ    *+8                SKIP IF NOT                           05340000
+         ST    R5,S.ENEHNBWD      ELSE INSERT ENTRY IN BWD CHAIN        05350000
+                                                                        05360000
+ENAMDUP  DS    0H                                                       05370000
+                                                                        05380000
+*--------------------------------------------------------------         05390000
+*   REMOVE ENTRY FROM BY-TOKEN SYNONYM CHAIN                            05400000
+*--------------------------------------------------------------         05410000
+         ICM   R5,15,ENEHTBWD     TOKEN REAR ENTRY PRESENT?             05420000
+         BNP   *+10               HEAD OF LIST IF NONE                  05430000
+         MVC   R.ENEHTFWD,ENEHTFWD ELSE DECHAIN OUR ENTRY               05440000
+         BP    *+10               SKIP IF NOT LIST HEAD                 05450000
+         MVC   4(4,R5),ENEHTFWD   REANCHOR SYNONYM LIST                 05460000
+         ICM   R5,15,ENEHTFWD     SUCCESSOR ENTRY?                      05470000
+         BZ    *+10               SKIP IF NOT                           05480000
+         MVC   R.ENEHTBWD,ENEHTBWD DECHAIN OUR ENTRY                    05490000
+                                                                        05500000
+*--------------------------------------------------------------         05510000
+*   REMOVE ENTRY FROM GLOBAL ENTITY LIST                                05520000
+*--------------------------------------------------------------         05530000
+         ICM   R5,15,ENEQBWD      PREDECESSOR ENTRY PTR                 05540000
+         BZ    *+10               HEAD OF LIST IF NONE                  05550000
+         MVC   R.ENEQFWD,ENEQFWD  ELSE DECHAIN OUR ENTRY                05560000
+         BNZ   *+10               SKIP IF NOT LIST HEAD                 05570000
+         MVC   ENTQ,ENEQFWD       REANCHOR GLOBAL ENTITY LIST           05580000
+         ICM   R5,15,ENEQFWD      SUCCESSOR ENTRY?                      05590000
+         BZ    *+10               SKIP IF NOT                           05600000
+         MVC   R.ENEQBWD,ENEQBWD  DECHAIN OUR ENTRY                     05610000
+                                                                        05620000
+*--------------------------------------------------------------         05630000
+*   RELEASE ENTITY ENTRY STORAGE                                        05640000
+*--------------------------------------------------------------         05650000
+         LH    R2,ENELEN          ENTITY ENTRY LENGTH                   05660000
+         L     R3,ENTSQH          STORAGE SUBPOOL                       05670000
+                                                                        05680000
+         STGRETN ADDR=(R6),LEN=(R2),QH=(R3),MF=(E,DWORD)                05690000
+                                                                        05700000
+         LA    R15,RC00           SUCCESS                               05710000
+         SR    R1,R1              ENTITY NO LONGER EXISTS               05720000
+         B     RETURN             DONE                                  05730000
+         DROP  R6,R,S             ENENTRY, ENENTRY (AUX1, AUX2)         05740000
+                                                                        05750000
+         EJECT ,                                                        05760000
+***************************************************************         05770000
+*                                                                       05780000
+*   POST:  REPLACE USERDATA IN ENTITY ENTRY (R1)                        05790000
+*                                                                       05800000
+***************************************************************         05810000
+POST     DS    0H                                                       05820000
+         LR    R6,R1              ENTITY ENTRY                          05830000
+         USING ENENTRY,R6         ADDRESSABILITY                        05840000
+                                                                        05850000
+         ICM   R1,15,$ENTUSER     USERDATA SOURCE                       05860000
+         BZ    *+10               UNUSUAL REQUEST                       05870000
+         MVC   ENEUSER,0(R1)      REPLACE USERDATA                      05880000
+                                                                        05890000
+         LA    R15,RC00           SUCCESS                               05900000
+         LA    R1,ENETOKEN        RETURN TOKEN PTR                      05910000
+         B     RETURN             DONE                                  05920000
+         DROP  R6                 ENENTRY                               05930000
+                                                                        05940000
+         SPACE 3                                                        05950000
+***************************************************************         05960000
+*                                                                       05970000
+*   EXTRACT:  EXTRACT USERDATA FROM ENTITY ENTRY (R1)                   05980000
+*                                                                       05990000
+***************************************************************         06000000
+EXTRACT  DS    0H                                                       06010000
+         LR    R6,R1              ENTITY ENTRY                          06020000
+         USING ENENTRY,R6         ADDRESSABILITY                        06030000
+                                                                        06040000
+         ICM   R1,15,$ENTUSER     USERDATA TARGET                       06050000
+         BZ    *+10               UNUSUAL REQUEST                       06060000
+         MVC   0(L'ENEUSER,R1),ENEUSER  EXTRACT USERDATA                06070000
+                                                                        06080000
+         LA    R15,RC00           SUCCESS                               06090000
+         LA    R1,ENETOKEN        RETURN TOKEN PTR                      06100000
+         B     RETURN             DONE                                  06110000
+         DROP  R6                 ENENTRY                               06120000
+                                                                        06130000
+         EJECT ,                                                        06140000
+***************************************************************         06150000
+*                                                                       06160000
+*   TERM:  FREE ENTCNTL STRUCTURE AND ALL ENTITY ENTRIES                06170000
+*                                                                       06180000
+*   IF THE STORAGE POOL PROVIDED BY THE requester HAS BEEN              06190000
+*   DEDICATED FOR $ENTITY USE, ALL ACQUIRED STORAGE CAN BE              06200000
+*   FREED IN A SINGLE CALL.  OTHERWISE, RELEASE ALL RESIDUAL            06210000
+*   ENTITY ENTRIES ONE BY ONE.                                          06220000
+*                                                                       06230000
+***************************************************************         06240000
+TERM     DS    0H                                                       06250000
+         ICM   R7,15,0(R9)        LOCATE ENTITY CONTROL AREA            06260000
+         BZ    ERR_INIT           ASSERT ITS EXISTENCE                  06270000
+                                                                        06280000
+         USING ENTCNTL,R7         CAST TO STRUCTURE                     06290000
+         L     R3,ENTSQH          STORAGE SUBPOOL                       06300000
+         TM    ENTOPTS,$ENTOEXC   SUBPOOL DEDICATED TO $ENTITY?         06310000
+         BNO   TERMALL            NODES FREED INDIVIDUALLY OTHERWISE    06320000
+                                                                        06330000
+         STGTERM QH=(R3),MF=(E,DWORD)                                   06340000
+         B     TERMFIN            DONE                                  06350000
+                                                                        06360000
+*--------------------------------------------------------------         06370000
+*   FREE THE ENTITY CONTROL AREA AND ITS ENTRIES NODE BY NODE           06380000
+*--------------------------------------------------------------         06390000
+TERMALL  DS    0H                 RELEASE ENTITY ENTRY NODES            06400000
+         L     R5,ENTQ            ADDR OF FIRST ENTITY ENTRY            06410000
+         USING ENENTRY,R6         ENTRY FORMAT                          06420000
+                                                                        06430000
+TERMNEXT DS    0H                 RELEASE NEXT ENTITY ENTRY             06440000
+         LTR   R6,R5              ENTITIES REMAIN?                      06450000
+         BZ    TERMCNTL           DONE HERE IF NOT                      06460000
+         L     R5,ENEQFWD         LOCATE NEXT ENTITY                    06470000
+         LH    R2,ENELEN          ENTITY ENTRY LENGTH                   06480000
+                                                                        06490000
+         STGRETN ADDR=(R6),LEN=(R2),QH=(R3),MF=(E,DWORD)                06500000
+                                                                        06510000
+         B     TERMNEXT           AGAIN                                 06520000
+                                                                        06530000
+TERMCNTL DS    0H                 RELEASE ENTITY CONTROL AREA           06540000
+         LH    R2,ENTLEN          ENTCNTL LENGTH                        06550000
+                                                                        06560000
+         STGRETN ADDR=ENTCNTL,LEN=(R2),QH=(R3),MF=(E,DWORD)             06570000
+                                                                        06580000
+*--------------------------------------------------------------         06590000
+*   RESET THE ENTITY CONTROL AREA ANCHOR AND EXIT                       06600000
+*--------------------------------------------------------------         06610000
+TERMFIN  DS    0H                                                       06620000
+         XC    0(4,R9),0(R9)      RESET CONTROL AREA ANCHOR             06630000
+         LA    R15,RC00           NORMAL COMPLETION                     06640000
+         B     RETURN             FUNCTION COMPLETE                     06650000
+         DROP  R7,R6              ENTCNTL, ENENTRY                      06660000
+                                                                        06670000
+         EJECT ,                                                        06680000
+***************************************************************         06690000
+*                                                                       06700000
+*   RETURN COMPLETION STATUS TO CALLER                                  06710000
+*                                                                       06720000
+***************************************************************         06730000
+WRN_NF   DS    0H                 ENTITY NOT FOUND (DEL, POST, EXTR)    06740000
+         SR    R1,R1              NO TOKEN PTR RETURNED                 06750000
+         LA    R15,RC04                                                 06760000
+         B     RETURN                                                   06770000
+                                                                        06780000
+WRN_DUPL DS    0H                 ENTITY ALREADY EXISTS (ADD)           06790000
+         LA    R15,RC04           R1 CONTAINS TOKEN PTR                 06800000
+         B     RETURN                                                   06810000
+                                                                        06820000
+ERR_NAME DS    0H                 INVALID QUALIFIER OR ENTITY NAME      06830000
+         SR    R1,R1              NO TOKEN PTR RETURNED                 06840000
+         LA    R15,RC08                                                 06850000
+         B     RETURN                                                   06860000
+                                                                        06870000
+ERR_MISS DS    0H                 REQUIRED DATA NOT PROVIDED            06880000
+         SR    R1,R1              NO TOKEN PTR RETURNED                 06890000
+         LA    R15,RC12                                                 06900000
+         B     RETURN                                                   06910000
+                                                                        06920000
+ERR_INIT DS    0H                 UNPREPARED FOR REQUEST                06930000
+         SR    R1,R1              NO TOKEN PTR RETURNED                 06940000
+         LA    R15,RC16                                                 06950000
+                                                                        06960000
+RETURN   DS    0H                                                       06970000
+         L     R0,RSNCODE         REASON CODE                           06980000
+         #EXIT ,                                                        06990000
+                                                                        07000000
+*--------------------------------------------------------------         07010000
+*   CATASTOPHIC ERRORS                                                  07020000
+*--------------------------------------------------------------         07030000
+ERR_STG  DS    0H                                                       07040000
+         $ABEND ABE_STORAGE,(R2),DUMP=YES,                             X07050000
+               TITLE='STORAGE MANAGEMENT FAILURE'                       07060000
+                                                                        07070000
+         EJECT ,                                                        07080000
+***************************************************************         07090000
+*                                                                       07100000
+* ROUTINE:  HASHTOKN - GENERATE SLOT NUMBER FROM TOKEN                  07110000
+*                                                                       07120000
+* ON ENTRY:                                                             07130000
+*                                                                       07140000
+*    $ENTITY ENTRANCE LIST IS ADDRESSABLE                               07150000
+*                                                                       07160000
+*    R0 - NUMBER OF SLOTS AVAILABLE                                     07170000
+*                                                                       07180000
+* ON EXIT:                                                              07190000
+*                                                                       07200000
+*    R15 CONTAINS THE ZERO-RELATIVE SLOT NUMBER                         07210000
+*                                                                       07220000
+***************************************************************         07230000
+HASHTOKN DS    0H                                                       07240000
+         ST    R14,FWORD          SAVE RETURN REG                       07250000
+         LR    R14,R0             RETAIN NUMBER OF SLOTS                07260000
+                                                                        07270000
+         L     R15,$ENTTOKN       TOKEN ORIGIN                          07280000
+         L     R1,0(,R15)         TOKEN LEFT                            07290000
+         X     R1,4(,R15)         SMASH FROM TOKEN RIGHT                07300000
+                                                                        07310000
+         SR    R0,R0              PREPARE FOR DIVIDE                    07320000
+         DR    R0,R14             BY NUMBER OF MANAGED SLOTS            07330000
+         LR    R15,R0             RETURN SLOT NUMBER                    07340000
+                                                                        07350000
+         L     R14,FWORD          RESTORE RETURN ADDRESS                07360000
+         BR    R14                RETURN                                07370000
+                                                                        07380000
+         EJECT ,                                                        07390000
+***************************************************************         07400000
+*                                                                       07410000
+* ROUTINE:  SRCHTOKN - LOCATE ENTITY ENTRY BY TOKEN                     07420000
+*                                                                       07430000
+* ON ENTRY:                                                             07440000
+*                                                                       07450000
+*    R1 - ADDR OF ENTITY LIST ANCHOR WORD                               07460000
+*                                                                       07470000
+* ON EXIT:                                                              07480000
+*                                                                       07490000
+*    R15 CONTAINS ONE OF THE FOLLOWING RETURN CODES. THE                07500000
+*        CONDITION CODE IS SET ACCORDINGLY.                             07510000
+*                                                                       07520000
+*        RC00 - ENTITY ENTRY LOCATED, RETURNED VIA R1                   07530000
+*        RC04 - ENTITY ENTRY NOT MATCHED                                07540000
+*                                                                       07550000
+***************************************************************         07560000
+SRCHTOKN DS    0H                                                       07570000
+         ST    R14,FWORD          SAVE RETURN ADDRESS                   07580000
+         LA    R15,RC04           ASSUME NO MATCH POSSIBLE              07590000
+         ICM   R1,15,0(R1)        ENTITY ENTRIES PRESENT?               07600000
+         BZ    SRCHTRET           DONE IF NOT                           07610000
+                                                                        07620000
+E        USING ENENTRY,R1         ENTRY ADDRESSABILITY                  07630000
+         L     R14,$ENTTOKN       ADDR OF TOKEN PROVIDED BY requester   07640000
+                                                                        07650000
+SRCHTSYN DS    0H                                                       07660000
+         CLC   E.ENETOKEN,0(R14)  MATCHING TOKENS?                      07670000
+         BE    SRCHTHIT           DONE IF SO                            07680000
+         ICM   R1,15,E.ENEHTFWD   TRAVERSE SYNONYM CHAIN                07690000
+         BNZ   SRCHTSYN           UNTIL END ENCOUNTERED                 07700000
+         B     SRCHTRET           THEN FAIL                             07710000
+                                                                        07720000
+SRCHTHIT DS    0H                 MATCHING ENTRY ENCOUNTERED            07730000
+         LA    R15,RC00           INDICATE SUCCESS                      07740000
+                                                                        07750000
+SRCHTRET DS    0H                                                       07760000
+         L     R14,FWORD          RESTORE RETURN ADDRESS                07770000
+         LTR   R15,R15            REFLECT COMPLETION STATUS VIA CC      07780000
+         BR    R14                RETURN                                07790000
+         DROP  E                  ENENTRY                               07800000
+                                                                        07810000
+         EJECT ,                                                        07820000
+***************************************************************         07830000
+*                                                                       07840000
+* ROUTINE:  BLDQE - BUILD QUALIFIED ENTITY (QENTITY) NAME               07850000
+*                                                                       07860000
+* DESCRIPTION:                                                          07870000
+*                                                                       07880000
+*    THIS ROUTINE CONSTRUCTS A QUALIFIED ENTITY (QENTITY) NAME          07890000
+*    FROM THE ENTITY NAME AND THE OPTIONAL QNAME QUALIFIER              07900000
+*    PROVIDED BY THE CALLER.  THE RESULT IS EITHER THE                  07910000
+*    ENTITY NAME, IF QNAME IS OMITTED, OR QNAME.ENTITY IF A             07920000
+*    QNAME IS PROVIDED.                                                 07930000
+*                                                                       07940000
+* NOTES:                                                                07950000
+*                                                                       07960000
+*    VERY HIGH USE ROUTINE - NOT ALL MAINLINE REGS ARE SAVED            07970000
+*                                                                       07980000
+*                                                                       07990000
+* ON ENTRY:                                                             08000000
+*                                                                       08010000
+*    $ENTITY ENTRANCE LIST IS ADDRESSABLE                               08020000
+*                                                                       08030000
+*    R1 - ENTITY NAME CONSTRUCTION AREA                                 08040000
+*    R0 - MAX LENGTH OF ENTITY NAME                                     08050000
+*                                                                       08060000
+*                                                                       08070000
+* ON EXIT:                                                              08080000
+*                                                                       08090000
+*    R15 CONTAINS ONE OF THE FOLLOWING RETURN CODES. THE                08100000
+*        CONDITION CODE IS SET ACCORDINGLY.                             08110000
+*                                                                       08120000
+*        RC00 - QENTITY NAME BUILT, LENGTH RETURNED IN R0               08130000
+*                                                                       08140000
+*        RC04 - QENTITY NAME TOO LARGE FOR RETURN AREA OR               08150000
+*               OTHER QNAME / ENTITY NAME IRREGULARITY                  08160000
+*                                                                       08170000
+***************************************************************         08180000
+BLDQE    DS    0H                                                       08190000
+         STM   R14,R5,REGSAVE     PRESERVE MAINLINE REGS                08200000
+                                                                        08210000
+         SR    R3,R3              ASSUME NO QNAME, THEN TEST AND TRIM   08220000
+         ICM   R1,15,$ENTQNMA                                           08230000
+         BZ    BLDENAM                                                  08240000
+         ICM   R0,15,$ENTQNML                                           08250000
+         BZ    BLDENAM                                                  08260000
+                                                                        08270000
+         BAS   R14,TRIM           CALCULATE STRING LENGTH               08280000
+         LR    R3,R15             TRUE LENGTH OF QUALIFIER              08290000
+                                                                        08300000
+BLDENAM  DS    0H                                                       08310000
+         ICM   R0,15,$ENTNAML     QNAME PROVIDED?                       08320000
+         BZ    BLDQERR                                                  08330000
+         ICM   R1,15,$ENTNAMA     VALIDATE QNAME PTR                    08340000
+         BZ    BLDQERR                                                  08350000
+                                                                        08360000
+         BAS   R14,TRIM           CALCULATE STRING LENGTH               08370000
+         LTR   R4,R15             TRUE LENGTH OF ENTITY NAME            08380000
+         BNP   BLDQERR            IRREGULARITY                          08390000
+                                                                        08400000
+         LM    R0,R1,REGSAVE+8    RESTORE (LENGTH,AREA) PARMS           08410000
+         LA    R2,0(R3,R4)        LENGTH OF QUALIFIED NAME LESS '.'     08420000
+         CR    R2,R0              INCLUDE LENGTH OF SEPARATOR           08430000
+         BNL   BLDQERR            MAY NOT EXCEED SIZE OF RETURN AREA    08440000
+                                                                        08450000
+*--------------------------------------------------------------         08460000
+*   CONSTRUCT QUALIFIED ENTITY NAME                                     08470000
+*--------------------------------------------------------------         08480000
+         LTR   R0,R3              QNAME LENGTH INITIALIZES RET LENGTH   08490000
+         BZ    BLDQEQ             NOT PROVIDED                          08500000
+         LA    R0,1(,R3)          QNAME. LENGTH                         08510000
+         BCTR  R3,0               PREPARE FOR COPY                      08520000
+         L     R5,$ENTQNMA        LOCATE QNAME                          08530000
+         EX    R3,*+4             COPY QNAME                            08540000
+         MVC   0(*-*,R1),0(R5)    EX OBJECT                             08550000
+         LA    R1,1(R3,R1)        END OF QNAME                          08560000
+         MVI   0(R1),C'.'         SEPARATOR                             08570000
+         LA    R1,1(,R1)          UPDATE INSERTION PTR ACCORDINGLY      08580000
+                                                                        08590000
+BLDQEQ   DS    0H                                                       08600000
+         AR    R0,R4              RETAIN ENTITY NAME LENGTH             08610000
+         BCTR  R4,0               PREPARE FOR COPY                      08620000
+         L     R5,$ENTNAMA        LOCATE ENTITY NAME                    08630000
+         EX    R4,*+4             APPEND ENTITY NAME                    08640000
+         MVC   0(*-*,R1),0(R5)    EX OBJECT                             08650000
+         LA    R15,RC00           NORMAL COMPLETION                     08660000
+         B     BLDQEXIT           DONE                                  08670000
+                                                                        08680000
+BLDQERR  DS    0H                 QNAME OR ENTITY NAME IRREGULARITY     08690000
+         LA    R15,RC04           ASSUME RETURN AREA OVERFLOW           08700000
+                                                                        08710000
+BLDQEXIT DS    0H                 R0 CONTAINS QENTITY NAME LENGTH       08720000
+         L     R14,REGSAVE        RESTORE RETURN ADDRESS                08730000
+         LM    R1,R5,REGSAVE+12   RESTORE MAINLINE REGS                 08740000
+         LTR   R15,R15            REFLECT COMPLETION STATUS VIA CC      08750000
+         BR    R14                RETURN                                08760000
+                                                                        08770000
+         EJECT ,                                                        08780000
+***************************************************************         08790000
+*                                                                       08800000
+* ROUTINE:  HASHQE - GENERATE SLOT NUMBER FROM QENTITY NAME             08810000
+*                                                                       08820000
+* ON ENTRY:                                                             08830000
+*                                                                       08840000
+*    R0      - NUMBER OF SLOTS AVAILABLE (PASS LOG2N AND SHIFT) ??????? 08850000
+*                                                                       08860000
+*    QENAME  - QUALIFIED ENTITY NAME ORIGIN                             08870000
+*    QENAMEL - QUALIFIED ENTITY NAME LENGTH                             08880000
+*                                                                       08890000
+* ON EXIT:                                                              08900000
+*                                                                       08910000
+*    R15 CONTAINS THE ZERO-RELATIVE SLOT NUMBER SELECTED                08920000
+*                                                                       08930000
+***************************************************************         08940000
+HASHQE   DS    0H                                                       08950000
+         STM   R2,R5,REGSAVE+8    PRESERVE MAINLINE REGS                08960000
+         LR    R5,R0              RETAIN NUMBER OF SLOTS                08970000
+                                                                        08980000
+         LA    R1,QENAME          R1 <== QENTITY NAME ORIGIN            08990000
+         L     R0,QENAMEL         R0 <== QENTITY NAME LENGTH            09000000
+                                                                        09010000
+*--------------------------------------------------------------         09020000
+*   COMPUTE SIGNATURE (FORMERLY A SUBROUTINE)                           09030000
+*--------------------------------------------------------------         09040000
+         SR    R15,R15            INITIALIZE SIGNATURE                  09050000
+                                                                        09060000
+HASHLOOP DS    0H                 PROCESS STRING IN 4-BYTE CHUNKS       09070000
+         CH    R0,=H'4'           STANDARD CHUNK AVAILABLE?             09080000
+         BL    HASHLAST           ELSEWHERE IF NOT                      09090000
+         X     R15,0(,R1)         ROLL IN CHUNK                         09100000
+         LA    R1,4(,R1)          ADVANCE TO NEXT CHUNK                 09110000
+         SH    R0,=H'4'           ACCOUNT FOR CONSUMPTION               09120000
+         BP    HASHLOOP           AGAIN                                 09130000
+                                                                        09140000
+HASHLAST DS    0H                 PROCESS PARTIAL CHUNK < FOUR BYTES    09150000
+         LTR   R2,R0              ANYTHING LEFT TO DO?                  09160000
+         BNP   HASHFIN            DONE IF NOT                           09170000
+         BCTR  R2,0               CONVERT TO OFFSET                     09180000
+         SLL   R2,2               FETCH INSTS ARE RS                    09190000
+         EX    *-*,HASHFET(R2)    FETCH PARTIAL CHUNK (R3)              09200000
+         XR    R15,R0             ROLL INTO RESULT                      09210000
+                                                                        09220000
+HASHFIN  DS    0H                 HASH COMPLETE                         09230000
+                                                                        09240000
+*--------------------------------------------------------------         09250000
+*   COMPUTE SLOT NUMBER FROM SIGNATURE                                  09260000
+*--------------------------------------------------------------         09270000
+         LR    R1,R15             RETURNED                              09280000
+         SR    R0,R0              PREPARE FOR DIVIDE                    09290000
+         DR    R0,R5              DISTRIBUTE EVENLY OVER MANAGED SLOTS  09300000
+         LR    R15,R0             RETURN SLOT # (0-N)                   09310000
+                                                                        09320000
+         LM    R2,R5,REGSAVE+8    RESTORE MAINLINE REGS                 09330000
+         BR    R14                RETURN                                09340000
+                                                                        09350000
+*--------------------------------------------------------------         09360000
+*   LOCAL WORKAREAS                                                     09370000
+*--------------------------------------------------------------         09380000
+HASHFET  DS    0H                                                       09390000
+         ICM   R0,1,0(R1)         ONE BYTE                              09400000
+         ICM   R0,3,0(R1)         TWO BYTES                             09410000
+         ICM   R0,7,0(R1)         THREE BYTES                           09420000
+                                                                        09430000
+         EJECT ,                                                        09440000
+***************************************************************         09450000
+*                                                                       09460000
+* ROUTINE:  SRCHQE - LOCATE ENTITY ENTRY BY QENTITY NAME                09470000
+*                                                                       09480000
+* ON ENTRY:                                                             09490000
+*                                                                       09500000
+*    R1      - ADDR OF ENTITY LIST ANCHOR WORD                          09510000
+*    QENAME  - QUALIFIED ENTITY NAME ORIGIN                             09520000
+*    QENAMEL - QUALIFIED ENTITY NAME LENGTH                             09530000
+*                                                                       09540000
+* ON EXIT:                                                              09550000
+*                                                                       09560000
+*    R15 CONTAINS ONE OF THE FOLLOWING RETURN CODES. THE                09570000
+*        CONDITION CODE IS SET ACCORDINGLY.                             09580000
+*                                                                       09590000
+*        RC00 - ENTITY ENTRY LOCATED, RETURNED VIA R1                   09600000
+*        RC04 - ENTITY ENTRY NOT MATCHED                                09610000
+*                                                                       09620000
+***************************************************************         09630000
+SRCHQE   DS    0H                                                       09640000
+         STM   R0,R15,REGSAVE     SAVE MAINLINE REGS                    09650000
+         LA    R15,RC04           ASSUME NO MATCH POSSIBLE              09660000
+         ICM   R1,15,0(R1)        ENTITY ENTRIES PRESENT?               09670000
+         BZ    SRCHERET           DONE IF NOT                           09680000
+                                                                        09690000
+E        USING ENENTRY,R1         ENTRY ADDRESSABILITY                  09700000
+         L     R3,QENAMEL         LENGTH OF QUALIFIED NAME              09710000
+         LR    R4,R3              COPY FOR EX                           09720000
+         BCTR  R4,0               EX READY                              09730000
+                                                                        09740000
+SRCHESYN DS    0H                                                       09750000
+         CH    R3,E.ENENTLN       LENGTHS MATCH?                        09760000
+         BNE   SRCHEADV           ADVANCE IF NOT                        09770000
+         EX    R4,SRCHECLC        MATCHING NAMES?                       09780000
+         BE    SRCHEHIT           DONE IF SO                            09790000
+                                                                        09800000
+SRCHEADV DS    0H                                                       09810000
+         ICM   R1,15,E.ENEHNFWD   TRAVERSE SYNONYM CHAIN                09820000
+         BNZ   SRCHESYN           UNTIL END ENCOUNTERED                 09830000
+         B     SRCHERET           THEN FAIL                             09840000
+                                                                        09850000
+SRCHEHIT DS    0H                 MATCHING ENTRY ENCOUNTERED            09860000
+         LA    R15,RC00           INDICATE SUCCESS                      09870000
+                                                                        09880000
+SRCHERET DS    0H                                                       09890000
+         LM    R2,R14,REGSAVE+8   RESTORE MAINLINE REGS                 09900000
+         LTR   R15,R15            REFLECT COMPLETION STATUS VIA CC      09910000
+         BR    R14                RETURN                                09920000
+                                                                        09930000
+SRCHECLC CLC   E.ENENTITY(*-*),QENAME                                   09940000
+         DROP  E                  ENENTRY                               09950000
+                                                                        09960000
+         EJECT ,                                                        09970000
+***************************************************************         09980000
+*                                                                       09990000
+* ROUTINE:  TRIM - CALCULATE STRING LENGTH                              10000000
+*                                                                       10010000
+* ON ENTRY:                                                             10020000
+*                                                                       10030000
+*    R1      - ADDR OF STRING TO TRIM                                   10040000
+*    R0      - LEN  OF STRING                                           10050000
+*                                                                       10060000
+* ON EXIT:                                                              10070000
+*                                                                       10080000
+*    R15 - LENGTH OF STRING                                             10090000
+*                                                                       10100000
+***************************************************************         10110000
+TRIM     DS    0H                                                       10120000
+         STM   R2,R3,DWORD        PERSERVE REGISTER                     10130000
+                                                                        10140000
+         LR    R3,R1              STRING ADDRESS                        10150000
+         LTR   R15,R0             MAXIMUM STRING LENGTH                 10160000
+         BZ    TRIMRET            ZERO, LENGTH ALREADY SET              10170000
+                                                                        10180000
+         BCTR  R15,0              PREPARE FOR EXECUTE                   10190000
+         EX    R15,TRIMTST        SCAN STRING FOR NULL/BLANK            10200000
+         BC    HITS,TRIMNULL      SCAN TERMINATED                       10210000
+                                                                        10220000
+         LA    R15,1(,R15)        RESTORE MAXIMUM LENGTH                10230000
+         B     TRIMRET            RETURN                                10240000
+                                                                        10250000
+TRIMNULL DS    0H                                                       10260000
+         LR    R15,R1             GET END OF STRING ADDRESS             10270000
+         SR    R15,R3             CALC STRING LENGTH                    10280000
+                                                                        10290000
+TRIMRET  DS    0H                                                       10300000
+         LM    R2,R3,DWORD        RESTORE REGISTER                      10310000
+         BR    R14                RETURN                                10320000
+                                                                        10330000
+         EJECT ,                                                        10340000
+***************************************************************         10350000
+*                                                                       10360000
+*   LOCAL READ/ONLY DATA AREAS, ETC.                                    10370000
+*                                                                       10380000
+***************************************************************         10390000
+         LTORG ,                                                        10400000
+                                                                        10410000
+TRIMTST  TRT   0(*-*,R3),TRIMTAB  *** EX OBJECT FOR TRIM ***            10420000
+                                                                        10430000
+TRIMTAB  DC    X'FF',255AL1(0)    TRANSLATE TABLE FOR TRIM OPER         10440000
+         ORG   TRIMTAB+C' '                                             10450000
+         DC    X'FF'                                                    10460000
+         ORG   ,                                                        10470000
+                                                                        10480000
+         PRINT NOGEN                                                    10490000
+         ICVT  ,                                                        10500000
+         ITASK ,                                                        10510000
+         END   ,                                                        10520000
