@@ -1,0 +1,473 @@
+IUSRAPPL TITLE 'USER/APPLICATION PROCESS DRIVER'                        00010000
+**<DOC-ON>**************************************************            00020000
+*                                                                       00030000
+* ROUTINE: IUSRAPPL - User / Application Process Driver                 00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*   This routine is the process driver for a workbench/                 00080000
+*   runtime user.  The associated process is create when                00090000
+*   a NEWSESS function is received on a client session.                 00100000
+*   During initialization of this process,  an IUSER                    00110000
+*   block is allocated and chained to the ITASK and IPCB.               00120000
+*   All children PCBs will contain the address of the                   00130000
+*   IUSER block as well,  since this addr is propagated                 00140000
+*   during PROC create processing.                                      00150000
+*                                                                       00160000
+*   After initialization,  the user process driver awaits               00170000
+*   requests from the client.  This is accomplished by                  00180000
+*   receiving local task messages from the Xport receive                00190000
+*   processor.  An EPB using SCOPE=LOCAL is initialized                 00200000
+*   for PCB messages.                                                   00210000
+*                                                                       00220000
+*   When a message is received,  the RU transaction scheduler           00230000
+*   is called to process the request and schedule the                   00240000
+*   appropriate RU processing routine.                                  00250000
+*                                                                       00260000
+*   A resource manager is establish to enable proper                    00270000
+*   cleanup of the IUSER block and stop all associated                  00280000
+*   processes.                                                          00290000
+*                                                                       00300000
+* ON ENTRY:  R1 contains the address of the APPL block                  00310000
+*            associated with the USER session.                          00320000
+*                                                                       00330000
+* ON EXIT:   R15 contains one of the following return                   00340000
+*            codes:                                                     00350000
+*                                                                       00360000
+*               RC00 - User process successfully terminated             00370000
+*                                                                       00380000
+**<DOC-OFF>*************************************************            00390000
+                                                                        00400000
+         EJECT ,                                                        00410000
+************************************************************            00420000
+*                                                                       00430000
+* MAINTENANCE:                                                          00440000
+*                                                                       00450000
+*    08/03/93 R. Colmone                                                00460000
+*             Initial version                                           00470000
+*                                                                       00480000
+*    07/25/95 R. Colmone          Par# 134222                           00490000
+*             Obtain session token used as seed value for               00500000
+*             SLU sessions from IVUSER session token prefix             00510000
+*             for use by LU 6.2 primary sessions.                       00520000
+*                                                                       00530000
+*    12/08/95 R. Turgeon          Rel 2.1                               00540000
+*             Apply storage manager overhead to USRSTG                  00550000
+*             storage pool                                              00560000
+*                                                                       00570000
+************************************************************            00580000
+                                                                        00590000
+         EJECT                                                          00600000
+         $TASK DSECT=YES          $TASK   PARAMETER MAPPING             00610000
+                                                                        00620000
+         EJECT                                                          00630000
+         $PROC DSECT=YES          $PROC   PARAMETER MAPPING             00640000
+                                                                        00650000
+         EJECT                                                          00660000
+         $RESMGR DSECT=YES        $RESMGR PARAMETER MAPPING             00670000
+                                                                        00680000
+         EJECT                                                          00690000
+         TMSG  ,                  INTER TASK MESSAGE MAPPING            00700000
+                                                                        00710000
+         EJECT                                                          00720000
+         MSGCODES ,               MESSAGE CODES                         00730000
+                                                                        00740000
+         EJECT                                                          00750000
+         ABCODES ,                ABEND CODES                           00760000
+                                                                        00770000
+         EJECT                                                          00780000
+         EVCODES ,                EVENT CODES                           00790000
+                                                                        00800000
+         EJECT                                                          00810000
+         EQUS  ,                  GENERAL EQUATES                       00820000
+                                                                        00830000
+#USRBKSZ EQU   4096               IUSER STORAGE POOL BLKSIZE            00840000
+                                                                        00850000
+         EJECT                                                          00860000
+WORKAREA #WORK ,                                                        00870000
+                                                                        00880000
+REGSAVE1 DS    16F                REGISTER SAVE AREA                    00890000
+REGSAVE2 DS    16F                REGISTER SAVE AREA                    00900000
+                                                                        00910000
+RCVYADDR DS    A                  ADDR OF RECOVERY RETRY RTN            00920000
+APPL@    DS    A                  ADDR OF ASSOCIATED APPL BLOCK         00930000
+                                                                        00940000
+FLAGS    DS    X                  CONTROL FLAGS                         00950000
+$EPBINIT EQU   X'80'                MESSAGE EPB INITIALIZED             00960000
+$RECOVRY EQU   X'40'                PROCESS RECOVERY                    00970000
+                                                                        00980000
+MSGINFO  DS    0F                 MESSAGE BUFFER ADDRESS/LENGTH         00990000
+MSGLEN   DS    F                  LENGTH  OF MESSAGE BUFFER             01000000
+MSGADDR  DS    A                  ADDRESS OF MESSAGE BUFFER             01010000
+#DFTMSGL EQU   256                DEFAULT MESSAGE BUFFER LENGTH         01020000
+                                                                        01030000
+$TASKMFL $TASK MF=(L,*)           $TASK PLIST                           01040000
+$PROCMFL $PROC MF=(L,*)           $PROC PLIST                           01050000
+                                                                        01060000
+WORKLEN  #ENDWORK ,                                                     01070000
+                                                                        01080000
+         EJECT ,                                                        01090000
+IUSRAPPL #ENTER BASE=R12,PREG=R8,SAVE=(YES,NOFRAME)                     01100000
+                                                                        01110000
+         USING ITASK,R10          ADDRESSABILITY                        01120000
+         L     R9,TSKPCBC         ADDR OF CURRENT PROCESS               01130000
+         USING IPCB,R9            ADDRESSABILITY                        01140000
+                                                                        01150000
+         ST    R8,APPL@           SAVE APPL ADDRESS                     01160000
+         USING APPL,R8            ADDRESSABILITY                        01170000
+         L     R5,APLPSESS        ADDRESS OF PRIMARY SESSION BLOCK      01180000
+         USING PSESS,R5           ADDRESSABILITY                        01190000
+                                                                        01200000
+         EJECT ,                                                        01210000
+*--------------------------------------------------------------         01220000
+*  CREATE RECOVERY ENVIRONMENT                                          01230000
+*--------------------------------------------------------------         01240000
+         LA    R1,DEL_RCVY        ADDRESS OF RECOVERY RETRY             01250000
+         ST    R1,RCVYADDR        SAVE RETRY ADDRESS                    01260000
+                                                                        01270000
+         $RCVRY CREATE,RECOVRTN,PARM=(R13),MF=(E,MFE_LIST)              01280000
+                                                                        01290000
+*--------------------------------------------------------------         01300000
+*  ADD PCBPAGE RESOURCE CLEANUP ROUTINE                                 01310000
+*--------------------------------------------------------------         01320000
+         $RESMGR ADD,             ADD PCBPAGE CLEANUP RTN              +01330000
+               ROUTINE=*#RMXPAGE,                                      +01340000
+               OWNER=IPCB,                                             +01350000
+               TOKEN=PCBRMPAG,                                         +01360000
+               MF=(E,MFE_LIST)                                          01370000
+                                                                        01380000
+         EJECT ,                                                        01390000
+*--------------------------------------------------------------         01400000
+*  ALLOCATE AND INITIALIZE IUSER BLOCK                                  01410000
+*--------------------------------------------------------------         01420000
+         LA    R1,PROCSTOP        ADDRESS OF RECOVERY RETRY             01430000
+         ST    R1,RCVYADDR        SAVE RETRY ADDR                       01440000
+                                                                        01450000
+         STGGET USRLENG,QH=TSKSTG ALLOCATE IUSER BLOCK STG              01460000
+         BNZ   ABN_ALOC           ERROR, STORAGE ALLOCATION             01470000
+         LR    R7,R1              ADDRESS OF IUSER                      01480000
+         USING IUSER,R7           ADDRESSABILITY                        01490000
+                                                                        01500000
+         MVC   USRID,=CL8'IUSER'  CONTROL BLOCK ID                      01510000
+         MVC   USRLEN,=A(USRLENG) CONTROL BLOCK LENGTH                  01520000
+         MVC   USRAPPL,APPL@      ADDR OF APPL BLOCK                    01530000
+         ST    R10,USRTASK        ADDR OF USER ITASK                    01540000
+         ST    R9,USROPCB         ADDR OF USER IPCB                     01550000
+                                                                        01560000
+         L     R2,TSKIVUSR        ADDRESS OF VTAM USER BLOCK     134222 01570000
+         USING IVUSER,R2          TEMP ADDRESSABILITY            134222 01580000
+         MVC   USRPSTKN(4),IVUTK  COPY VTAM SESSION TOKEN PREFIX 134222 01590000
+         DROP  R2                 IVUSER                         134222 01600000
+                                                                        01610000
+         L     R2,PCBMPCB         ADDRESS OF PARENT PCB (XPORT)  134222 01620000
+M        USING IPCB,R2            XPORT IPCB (TEMP)              134222 01630000
+         MVC   USRXPWUT,M.PCBENTKN COPY XPORT PROCESS WULOC TKN  134222 01640000
+         DROP  M                  XPORT IPCB                     134222 01650000
+                                                                        01660000
+         L     R1,PSSCOMM@        ADDRESS OF IHXPSESS BLOCK      134222 01670000
+         USING XPSESS,R1          TEMP ADDRESSABILITY            134222 01680000
+         CLC   XPSID,=CL8'XP$SESS' $SESS XPORT SESSION?          134222 01690000
+         BNE   SESS_END           NO,  USE USER TOKEN            134222 01700000
+         MVC   USRPSTKN,XPSTOKN   COPY SESSTOKN                  134222 01710000
+         DROP  R1                 XPSESS                         134222 01720000
+SESS_END DS    0H                                                134222 01730000
+                                                                        01740000
+         ST    R7,PCBUSER         ADDR OF USER                          01750000
+                                                                        01760000
+         L     R2,=A(#USRBKSZ)    STORAGE POOL BLOCKSIZE LESS STG MGR   01770000
+         SH    R2,ICTOVSTG        OVERHEAD TO IMPROVE BLOCK FIT         01780000
+                                                                        01790000
+         STGINIT (R2),QH=USRSTG   INITIALIZE IUSER STGPOOL              01800000
+                                                                        01810000
+         BNZ   ABN_INIT           CRITICAL ERROR                        01820000
+                                                                        01830000
+*--------------------------------------------------------------         01840000
+*  ADD IUSER BLOCK TO TASK QUEUE                                        01850000
+*--------------------------------------------------------------         01860000
+         L     R1,TSKUSRQ+4       ADDR OF LAST IUSER                    01870000
+L        USING IUSER,R1           ADDRESSABILITY                        01880000
+         ST    R7,L.USRNEXT       ADD NEW IUSER TO USER QUEUE           01890000
+         ST    R7,TSKUSRQ+4       SET NEW END OF LIST ADDR              01900000
+         DROP  L                  IUSER                                 01910000
+                                                                        01920000
+*--------------------------------------------------------------         01930000
+*  ADD IUSER RESOURCE MANAGER EXIT ROUTINE                              01940000
+*--------------------------------------------------------------         01950000
+         $RESMGR ADD,             ADD IUSER RSRC MGR ROUTINE           +01960000
+               ROUTINE=*#RMXUSER,                                      +01970000
+               OWNER=IPCB,                                             +01980000
+               PARM=(R7),                                              +01990000
+               TOKEN=FWORD,                                            +02000000
+               USECOUNT=USRUSE,                                  144661+02010000
+               MF=(E,MFE_LIST)                                          02020000
+                                                                        02030000
+*--------------------------------------------------------------         02040000
+*  ADD RESOURCE MANAGER TO NOTIFY ASSOCIATED USER PCB'S OF TERM         02050000
+*--------------------------------------------------------------         02060000
+         $RESMGR ADD,             ADD IUSER STOP PCB ROUTINE           +02070000
+               ROUTINE=*#RMXUSTP,                                      +02080000
+               OWNER=IPCB,                                             +02090000
+               PARM=(R7),                                              +02100000
+               TOKEN=FWORD,                                            +02110000
+               MF=(E,MFE_LIST)                                          02120000
+                                                                        02130000
+         EJECT ,                                                        02140000
+*--------------------------------------------------------------         02150000
+*  WAIT FOR NEXT MESSAGE OR PROCESS TERMINATION REQUEST                 02160000
+*--------------------------------------------------------------         02170000
+WAIT     DS    0H                                                       02180000
+         TM    FLAGS,$EPBINIT     EPB INITIALIZED                       02190000
+         BZ    RESETEPB           NO, INITIALIZE EPB                    02200000
+         TM    PCBFLGS,PCB$STOP+PCB$CNCL  PROC NOTIFIED OF TERM         02210000
+         BNZ   PROCSTOP           YES,  TERMINATE                       02220000
+                                                                        02230000
+         $TASK WAIT,              WAIT FOR MESSAGE TO PROCESS          +02240000
+               MESSAGE=RESETEPB,                                       +02250000
+               CANCEL=PROCSTOP,                                        +02260000
+               STOP=PROCSTOP,                                          +02270000
+               MF=(E,$TASKMFL)                                          02280000
+                                                                        02290000
+         B     WAIT               UNKNOWN EVENT, WAIT FOR MSG           02300000
+                                                                        02310000
+         EJECT ,                                                        02320000
+*--------------------------------------------------------------         02330000
+*  INITIALIZE LOCAL PROCESS MESSAGE EPB                                 02340000
+*--------------------------------------------------------------         02350000
+RESETEPB DS    0H                                                       02360000
+         $TASK SETEPB,            (RE) INITIALIZE MESSAGE EPB          +02370000
+               EPB=PCBMEPB,                                            +02380000
+               ECODE=EC$MSG,                                           +02390000
+               SCOPE=LOCAL,                                            +02400000
+               MF=(E,$TASKMFL)                                          02410000
+                                                                        02420000
+         OI    FLAGS,$EPBINIT     MESSAGE EPB INITIALIZED               02430000
+                                                                        02440000
+         EJECT ,                                                        02450000
+*--------------------------------------------------------------         02460000
+*  RECEIVE MESSAGE                                                      02470000
+*--------------------------------------------------------------         02480000
+PROCMSG  DS    0H                                                       02490000
+         BAS   R14,RECVMSG        RECEIVE NEXT MESSAGE                  02500000
+         BNZ   WAIT               NONE, WAIT FOR NEXT EVENT             02510000
+         LR    R6,R1              ADDR OF MESSAGE HEADER                02520000
+         USING TMSGSTD,R6         ADDRESSABILITY                        02530000
+                                                                        02540000
+         LA    R0,ITM_HXP_RECV    XPORT RU TRANSACTION                  02550000
+         C     R0,TMSGTYPE        MESSAGE TYPE                          02560000
+         BE    SCHED_RU           YES, PROCESS RU MESSAGE               02570000
+         B     PROCMSG            RECEIVE NEXT MESSAGE                  02580000
+                                                                        02590000
+         EJECT ,                                                        02600000
+*--------------------------------------------------------------         02610000
+*  PROCESS XPORT RU TRANSACTION BY CALLING TRANSACTION SCHEDULER        02620000
+*--------------------------------------------------------------         02630000
+SCHED_RU DS    0H                                                       02640000
+         L     R0,TMSGW1          ADDR OF SESSION HANDLE                02650000
+         LA    R1,TMSGINFO        ADDR OF RU TRANSACTION                02660000
+                                                                        02670000
+         @CALL IXRUSCHD,CTYPE=CVT SCHEDULE RU TRANSACTION               02680000
+                                                                        02690000
+         B     PROCMSG            PROCESS NEXT MESSAGE                  02700000
+         DROP  R6                 TMSG                                  02710000
+                                                                        02720000
+         EJECT ,                                                        02730000
+*--------------------------------------------------------------         02740000
+*  CANCEL/STOP REQUEST RECEIVED,  RELEASE MESSAGE BUFFER                02750000
+*--------------------------------------------------------------         02760000
+PROCSTOP DS    0H                                                       02770000
+         LM    R0,R1,MSGINFO      ADDR/LEN 0F MESSAGE AREA              02780000
+         BAS   R14,MSGFREE        FREE MESSAGE BUFFER                   02790000
+                                                                        02800000
+*--------------------------------------------------------------         02810000
+*  DELETE RECOVERY ENVIRONMENT                                          02820000
+*--------------------------------------------------------------         02830000
+DEL_RCVY DS    0H                                                       02840000
+         $RCVRY DELETE,MF=(E,MFE_LIST)                                  02850000
+                                                                        02860000
+         LA    R15,RC00           NORMAL COMPLETION                     02870000
+         B     RETURN             RETURN                                02880000
+                                                                        02890000
+         EJECT ,                                                        02900000
+***************************************************************         02910000
+*                                                                       02920000
+*  RETURN                                                               02930000
+*                                                                       02940000
+***************************************************************         02950000
+                                                                        02960000
+RETURN   DS    0H                                                       02970000
+         LA    R15,RC00           NORMAL COMPLETION                     02980000
+         #EXIT ,                  RETURN                                02990000
+                                                                        03000000
+         EJECT ,                                                        03010000
+***************************************************************         03020000
+*                                                                       03030000
+*  CATASTROPHIC ERRORS                                                  03040000
+*                                                                       03050000
+***************************************************************         03060000
+                                                                        03070000
+ABN_ALOC DS    0H                                                       03080000
+         $ABEND ABE_STORAGE,TITLE='STORAGE ALLOCATION ERROR'            03090000
+                                                                        03100000
+ABN_INIT DS    0H                                                       03110000
+         $ABEND ABE_STORAGE,TITLE='UNABLE TO INITIALIZE IUSER POOL'     03120000
+                                                                        03130000
+         EJECT ,                                                        03140000
+***************************************************************         03150000
+*                                                                       03160000
+*  ROUTINE: RECVMSG - RECEIVE MESSAGE FROM PCB MESSAGE QUEUE            03170000
+*                                                                       03180000
+*  DESCRIPTION:                                                         03190000
+*                                                                       03200000
+*     THIS ROUTINE WILL RECEIVE A MESSAGE FROM THE LOCAL                03210000
+*     PCB MESSAGE QUEUE.  IF THE CURRENT OR DEFAULT BUFFER              03220000
+*     SIZE IS INSUFFICIENT TO RECEIVE THE MESSAGE,  THE                 03230000
+*     MESSAGE BUFFER WILL BE FREED AND REALLOCATED WITH A               03240000
+*     LARGER BUFFER SIZE AS SPECIFIED BY THE $TRECV SERVICE.            03250000
+*                                                                       03260000
+*  ENTRY: N/A                                                           03270000
+*                                                                       03280000
+*  EXIT:  R15 CONTAINS ONE OF THE FOLLOWING RETURN CODES:               03290000
+*                                                                       03300000
+*             R15 = RC00 - MESSAGE RECEIVED (R1 = MSG HEADER)           03310000
+*                   RC04 - MESSAGE NOT AVAILABLE                        03320000
+*                                                                       03330000
+***************************************************************         03340000
+RECVMSG  DS    0H                                                       03350000
+         STM   R0,R15,REGSAVE1    SAVE CALLER'S REGISTERS               03360000
+                                                                        03370000
+         ICM   R0,15,MSGADDR      MESSAGE BUFFER AVAILABLE              03380000
+         BNZ   RECEIVE            YES, CONTINUE WITH RECEIVE            03390000
+                                                                        03400000
+         LA    R2,#DFTMSGL        ASSUME DEFAULT MESSAGE LENGTH         03410000
+                                                                        03420000
+MSGALLOC DS    0H                                                       03430000
+         STGGET (R2),QH=TSKSTG    GET AREA FOR MESSAGE                  03440000
+         BNZ   ABN_ALOC           ALLOCATION ERROR                      03450000
+         ST    R2,MSGLEN          SAVE MESSAGE LENGTH                   03460000
+         ST    R1,MSGADDR         SAVE MESSAGE ADDRESS                  03470000
+                                                                        03480000
+RECEIVE  DS    0H                                                       03490000
+         $TRECV (*MSGADDR,*MSGLEN),  RECEIVE MESSAGE                   +03500000
+               SCOPE=PCB,                                              +03510000
+               MF=(E,MFE_LIST)                                          03520000
+                                                                        03530000
+         B     *+4(R15)           BRANCH ON RETURN CODE                 03540000
+         B     RECV_RET           RETURN - MESSAGE RECEIVED             03550000
+         B     RECV_RET           RETURN - MSG NOT AVAIL                03560000
+         B     RECV_BUF           BUFFER TO SMALL, REALLOCATE           03570000
+                                                                        03580000
+RECV_BUF DS    0H                                                       03590000
+         LR    R2,R1              LENGTH OF REQUIRED BUFFER             03600000
+         LM    R0,R1,MSGINFO      ADDRESS/LENGTH OF MESSAGE             03610000
+         BAS   R14,MSGFREE        FREE MESSAGE BUFFER                   03620000
+         B     MSGALLOC           REALLOCATE MESSAGE BUFFER             03630000
+                                                                        03640000
+RECV_RET DS    0H                                                       03650000
+         L     R1,MSGADDR         ADDRESS OF MESSAGE BUFFER             03660000
+         LM    R2,R14,REGSAVE1+8  RESTORE CALLER'S REGISTERS            03670000
+         BR    R14                RETURN                                03680000
+                                                                        03690000
+         EJECT ,                                                        03700000
+***************************************************************         03710000
+*                                                                       03720000
+*  ROUTINE: MSGFREE - FREE MESSAGE BUFFER STORAGE                       03730000
+*                                                                       03740000
+*  DESCRIPTION:                                                         03750000
+*                                                                       03760000
+*     THIS ROUTINE WILL FREE THE MESSAGE BUFFER STORAGE                 03770000
+*     PROVIDE IN R1/R0.                                                 03780000
+*                                                                       03790000
+*  ENTRY: R1 = ADDRESS OF MESSAGE BUFFER                                03800000
+*         R0 = LENGTH  OF MESSAGE BUFFER                                03810000
+*                                                                       03820000
+*  EXIT:  N/A                                                           03830000
+*                                                                       03840000
+***************************************************************         03850000
+MSGFREE  DS    0H                                                       03860000
+         STM   R0,R15,REGSAVE2    SAVE CALLER'S REGISTER                03870000
+                                                                        03880000
+         LTR   R2,R1              ADDRESS OF MESSAGE BUFFER             03890000
+         BZ    FREE_RET           NONE, RETURN                          03900000
+         LR    R3,R0              LENGTH  OF MESSAGE BUFFER             03910000
+                                                                        03920000
+         STGRETN ADDR=(R2),LEN=(R3),QH=TSKSTG                           03930000
+                                                                        03940000
+FREE_RET DS    0H                                                       03950000
+         LM    R0,R15,REGSAVE2    RESTORE CALLER'S REGISTER             03960000
+         BR    R14                RETURN                                03970000
+                                                                        03980000
+         EJECT ,                                                        03990000
+***************************************************************         04000000
+*                                                                       04010000
+*  ROUTINE: RECOVRTN - RECOVERY ROUTINE EXIT                            04020000
+*                                                                       04030000
+*  DESCRIPTION:                                                         04040000
+*                                                                       04050000
+*    THIS ROUTINE IS AN ABEND RECOVERY EXIT.  IF AN ABEND               04060000
+*    OCCURS WHILE THE RECOVERY ENVIRONMENT IS ACTIVE,  THIS             04070000
+*    ROUTINE WILL RECEIVE CONTROL AND ATTEMPT TO RESTORE                04080000
+*    THE ENVINRONMENT AND SET THE RETRY ADDRESS TO THE                  04090000
+*    CURRENT RESUME POINT SPECIFIED IN THE WORKAREA.                    04100000
+*                                                                       04110000
+*  ENTRY:  R13 - ADDRESS OF SAVE AREA                                   04120000
+*          R1  - PARAMETER LIST ADDRESS SPECIFIED IN $RCVRY             04130000
+*                (ADDRESS OF WORKAREA)                                  04140000
+*          R14 - RETURN ADDRESS                                         04150000
+*                                                                       04160000
+*  EXIT:   R15 CONTAINS THE ADDRESS OF THE RETRYRTN OR                  04170000
+*          TO PERCOLATE THE ABEND.                                      04180000
+*                                                                       04190000
+***************************************************************         04200000
+RECOVRTN DS    0H                                                       04210000
+         PUSH  USING              PRESERVE USING ENVIRONMENT            04220000
+         DROP  R13                WORKAREA                              04230000
+         STM   R14,R12,12(R13)    SAVE RECOVRTN REGISTERS               04240000
+         CR    R0,R10             RUNNING UNDER PROPER ITASK?           04250000
+         BNE   RECPERC            NO, PERCOLATE ABEND                   04260000
+                                                                        04270000
+         LR    R3,R1              RESTORE ORIGINAL WORKAREA ADDR        04280000
+W        USING WORKAREA,R3        ADDRESSABILITY                        04290000
+                                                                        04300000
+         OI    W.FLAGS,$RECOVRY   PROCESS ENTERED RECOVERY              04310000
+                                                                        04320000
+         L     R9,TSKPCBC         ADDR OF CURRENT PROCESS               04330000
+         USING IPCB,R9            TEMP ADDRESSABILITY                   04340000
+         L     R7,PCBUSER         ADDR OF IUSER                         04350000
+         ST    R7,TSKERCVR+(R7*4)    RESTORE                            04360000
+         ST    R9,TSKERCVR+(R9*4)    REQUIRED                           04370000
+         ST    R12,TSKERCVR+(R12*4)  ENVIRONMENT                        04380000
+         ST    R3,TSKERCVR+(R13*4)   REGISTERS                          04390000
+                                                                        04400000
+         L     R15,W.RCVYADDR     ADDRESS OF RECOVERY RESUME            04410000
+         B     REC_RET            RETURN                                04420000
+                                                                        04430000
+RECPERC  DS    0H                                                       04440000
+         SR    R15,R15            NO RETRY,  PERCOLATE                  04450000
+                                                                        04460000
+REC_RET  DS    0H                                                       04470000
+         L     R14,12(,R13)       RESTORE RETURN ADDRESS                04480000
+         LM    R0,R12,20(R13)     RESTORE REGISTERS                     04490000
+         BR    R14                RETURN                                04500000
+         POP   USING              RESTORE USING ENVIRONMENT             04510000
+                                                                        04520000
+         EJECT ,                                                        04530000
+***************************************************************         04540000
+*                                                                       04550000
+*  CONSTANTS AND LITERALS                                               04560000
+*                                                                       04570000
+***************************************************************         04580000
+                                                                        04590000
+         LTORG ,                                                        04600000
+                                                                        04610000
+         PRINT NOGEN                                                    04620000
+                                                                        04630000
+         ICVT  ,                                                        04640000
+         IVUSER ,                                                134222 04650000
+         ITASK ,                                                        04660000
+         IPCB  ,                                                        04670000
+         IUSER ,                                                        04680000
+         PSESS ,                                                        04690000
+         XPSESS ,                                                       04700000
+         APPL  ,                                                        04710000
+         XPORTHDR HDRTYPE=COMMON                                        04720000
+         END   ,                                                        04730000

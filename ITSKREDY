@@ -1,0 +1,481 @@
+ITSKREDY TITLE '- MARK WORKUNIT READY TO DISPATCH'                      00010000
+**<DOC-ON>******************************************************        00020000
+*                                                                       00030000
+* ROUTINE: ITSKREDY - Mark workunit ready to dispatch                   00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    The function of this routine is to mark workunits                  00080000
+*    dispatchable and add them to the appropriate dispatch              00090000
+*    queue. This routine is called for two types of requests:           00100000
+*                                                                       00110000
+*        1) If an ECB address is provided, the ECB is posted            00120000
+*           to its associated workunit and the workunit is              00130000
+*           subsequently test for dispatchability. If the               00140000
+*           workunit is ready for dispatch,  the workunit               00150000
+*           is added to the dispatch queue for the ITASK.               00160000
+*                                                                       00170000
+*        2) If a PCB address is provided,  the PCB workunit             00180000
+*           is tested for immediate dispatchability.  If the            00190000
+*           workunit is ready for dispatch, the workunit                00200000
+*           is added to the dispatch queue for the ITASK.               00210000
+*                                                                       00220000
+*    In either case, if a workunit is marked dispatchable               00230000
+*    and the associated ITASK is not the current ITASK,  then           00240000
+*    the ITASK is marked dispatchable and is added to the               00250000
+*    server dispatch queue.                                             00260000
+*                                                                       00270000
+*    When an ECB address is specified,  the ECB is checked              00280000
+*    to see if it is contained within an EPB or if it's                 00290000
+*    a remote ECB.  If remote,  the remote EPB list associated          00300000
+*    assocaited with the task owning the events table is                00310000
+*    searched to located the associated EPB.                            00320000
+*                                                                       00330000
+*    A workunit may become dispatchable if the TASK/PCB is              00340000
+*    being cancelled/stopped and the workunit is ready to be            00350000
+*    notified of this event.  It will also become dispatchable          00360000
+*    if there are completed events posted to the workunit               00370000
+*    and the workunit is not waiting on a specific EPB.  If             00380000
+*    the workunit is waiting on a specific EPB,  only that event        00390000
+*    completion will allow the workunit to become dispatchable.         00400000
+*                                                                       00410000
+* ON ENTRY:                                                             00420000
+*                                                                       00430000
+*    R1 Contains the address of the parameter list as follows:          00440000
+*                                                                       00450000
+*        +0 - Address of completed event ECB                            00460000
+*        +4 - Address of PCB workunit to test for dispatchability       00470000
+*                                                                       00480000
+* ON EXIT:                                                              00490000
+*                                                                       00500000
+*    R15 Contains one of the following return codes:                    00510000
+*                                                                       00520000
+*        RC00 - Normal Completion                                       00530000
+*                                                                       00540000
+*        RC08 - Service failure                                         00550000
+*               R0 = RSN04 - EPB not located for remote ECB             00560000
+*                                                                       00570000
+* MODE:                                                                 00580000
+*                                                                       00590000
+*    TASK                                                               00600000
+*    APF/NON-APF                                                        00610000
+*    SUP/PROB                                                           00620000
+*    AMODE 31, RMODE ANY                                                00630000
+*                                                                       00640000
+**<DOC-OFF>*****************************************************        00650000
+                                                                        00660000
+         EJECT ,                                                        00670000
+****************************************************************        00680000
+*                                                                       00690000
+* MAINTENANCE:                                                          00700000
+*                                                                       00710000
+*   04/22/93 Ron Colmone                                                00720000
+*            Initial Version                                            00730000
+*                                                                       00740000
+*   12/28/94 Ron Colmone          Par# 159456                           00750000
+*            Added support for task manager server.                     00760000
+*                                                                       00770000
+****************************************************************        00780000
+                                                                        00790000
+         EJECT ,                                                        00800000
+         @EPB  TYPE=DSECT         EVENT PROCESS BLOCK                   00810000
+                                                                        00820000
+         EJECT ,                                                        00830000
+         XEPB  ,                  EXTENDED EPB                          00840000
+                                                                        00850000
+         EJECT ,                                                        00860000
+         EVCODES ,                EVENT CODES                           00870000
+                                                                        00880000
+         EJECT ,                                                        00890000
+         EQUS  ,                  GENERAL EQUATES                       00900000
+                                                                        00910000
+         TRACODES ,               TRACE CLASS CODES                     00920000
+                                                                        00930000
+         EJECT ,                                                        00940000
+         #WORK LENGTH=256         READ/WRITE WORKAREA                   00950000
+DISPPCB  DS    A                  PCB  ADDR TO TEST DISPATCHABLE        00960000
+DISPTASK DS    A                  TASK ADDR TO MAKE DISPATCHABLE        00970000
+                                                                        00980000
+WRKFLGS  DS    X                  GENERAL FLAGS                         00990000
+$NOPCB   EQU   X'80'              NO PCB ASSOCIATED WITH EPB            01000000
+$EPBCNCL EQU   X'40'              EVENT CANCELLED                       01010000
+                                                                        01020000
+         #ENDWORK                 END OF WORKAREA                       01030000
+                                                                        01040000
+         EJECT ,                                                        01050000
+ITSKREDY #ENTER BASE=R12,         ENTRY LINKAGE                        +01060000
+               PREG=R8,                                                +01070000
+               WAPASS=YES                                               01080000
+                                                                        01090000
+         USING ITASK,R10          LIFETIME ADDRESSABILITY               01100000
+                                                                        01110000
+         LM    R8,R9,0(R8)        OBTAIN PARAMETERS              159456 01120000
+         ST    R9,DISPPCB         SAVE ADDR OF WORKUNIT TO TEST  159456 01130000
+                                                                        01140000
+         LTR   R8,R8              NOTIFICATION OF COMPLETED EVNT 159456 01150000
+         BZ    REDY_PCB           NO, CHECK FOR READY WORKUNIT   159456 01160000
+                                                                        01170000
+         EJECT ,                                                        01180000
+*---------------------------------------------------------------        01190000
+* Obtain the address of the EPB associated with the posted              01200000
+* ECB.  By architecture,  an EPB must be double word aligned            01210000
+* and the ECB is at offset +4.  Therefore, if the specified             01220000
+* ECB address is on a doubleword boundary,  it must be a                01230000
+* remote ECB.  Otherwise, if the 4 bytes preceeding the ECB             01240000
+* are the EPB eyecatcher, the EPB is local.                             01250000
+*---------------------------------------------------------------        01260000
+         $TRACE TRC_TASKREADY,4   ALLOCATE TRACE ENTRY                  01270000
+         BNZ   *+8                NO ACTIVE                             01280000
+         ST    R8,0(,R1)          UPDATE TRACE FOR COMPLETED EVENT      01290000
+                                                                        01300000
+         N     R8,=X'7FFFFFFF'    REMOVE HIGH ORDER BIT                 01310000
+                                                                        01320000
+         LA    R0,$$CNCL          EVENT CANCEL CODE                     01330000
+         CLM   R0,7,1(R8)         EVENT CANCELLED?                      01340000
+         BNE   *+8                NO, CONTINUE                          01350000
+         OI    WRKFLGS,$EPBCNCL   INDICATED EVENT CANCELLED             01360000
+                                                                        01370000
+         TM    =X'07',*-*         TEST DOUBLE WORD ALIGNMENT            01380000
+         EX    R8,*-4                                                   01390000
+         BZ    RMT_ECB            YES, MUST BE REMOTE ECB               01400000
+                                                                        01410000
+         LR    R6,R8              ADDR OF ECB                           01420000
+         SH    R6,=AL2(EPBECB-EPB) ADDR OF EPB                          01430000
+         USING EPB,R6             ESTABLISH ADDRESSABILITY              01440000
+                                                                        01450000
+         CLC   EPBID,$EPBID       VALID EPB                             01460000
+         BE    EPB_QUE            YES,  QUEUE EPB TO PCB                01470000
+                                                                        01480000
+*---------------------------------------------------------------        01490000
+* Posted ECB is not contained within an EPB.  Attempt to locate         01500000
+* the EPB on the ITASK remote EPB list.  The Remote EPB list            01510000
+* is on the ITASK associated with the events table.                     01520000
+*---------------------------------------------------------------        01530000
+RMT_ECB  DS    0H                                                       01540000
+         LR    R4,R10             ASSUME CURRENT TASK            159456 01550000
+         TM    TSKFLGS3,TSK3$AFF  TCB AFFINITY?                  159456 01560000
+         BO    *+8                YES, SKIP SERVER TASK LOCATE   159456 01570000
+         L     R4,TSKSVTSK        ADDRESS OF SERVER ITASK        159456 01580000
+E        USING ITASK,R4           TEMP ADDRESSABILITY            159456 01590000
+                                                                        01600000
+         LA    R3,E.TSKEPBS       ADDRESS OF REMOTE EPB LIST     159456 01610000
+         SH    R3,=AL2(EPBNEXT-EPB)                              159456 01620000
+Q        USING EPB,R3             ADDRESSABILITY                 159456 01630000
+                                                                        01640000
+RMT_NEXT DS    0H                                                       01650000
+         ICM   R6,15,Q.EPBNEXT    ADDR OF NEXT EPB                      01660000
+         BZ    REDY_PCB           NO EPB AVAILABLE, LOC READY PCBS      01670000
+         USING EPB,R6             ADDRESSABILITY                        01680000
+         C     R8,EPBECB          REMOTE ECB ADDR MATCH ECB?            01690000
+         BE    RMT_REMV           YES REMOVE EPB FROM REMOTE LIST       01700000
+         LR    R3,R6              ADDR OF NEXT REMOTE EPB               01710000
+         B     RMT_NEXT           CHECK NEXT EPB                        01720000
+                                                                        01730000
+RMT_REMV DS    0H                                                       01740000
+         MVC   Q.EPBNEXT,EPBNEXT  REMOVE EPB FROM RMT LIST              01750000
+         XC    EPBNEXT,EPBNEXT    CLEAR RMT LIST NEXT PTR               01760000
+         DROP  Q,E                EPB (QUEUE),  ITASK (EVENTS)          01770000
+                                                                        01780000
+         EJECT ,                                                        01790000
+*---------------------------------------------------------------        01800000
+* Locate the workunit associated with the EPB and add it the            01810000
+* completed events list for the workunit.                               01820000
+*---------------------------------------------------------------        01830000
+EPB_QUE  DS    0H                                                       01840000
+         TM    WRKFLGS,$EPBCNCL   EVENT CANCELLED?                      01850000
+         BO    EPB_CNCL           YES, DISCARD NOTIFICATION             01860000
+                                                                        01870000
+         TM    EPBFLGS,EPB$TASK   TASK MANAGER EVENT?            159456 01880000
+         BO    EPB_TASK           YES, ATTACH EPB TO ITASK       159456 01890000
+                                                                        01900000
+         L     R5,EPBWU@          ADDR OF ASSOCIATED WORKUNIT    159456 01910000
+         USING IPCB,R5            ESTABLISH ADDRESSABILITY              01920000
+         TM    EPBFLGS,EPB$FLSH   PROCESS TERMINATED?                   01930000
+         BO    EPB_CNCL           YES, PROCESS NO LONGER AVAILABLE      01940000
+         TM    PCBFLGS2,PCB2$END  PROCESS TERMINATED?                   01950000
+         BO    EPB_CNCL           YES, PROCESS NO LONGER AVAILABLE      01960000
+                                                                        01970000
+         C     R6,PCBREPB         IS EPB ALREADY POSTED/RESUMING        01980000
+         BE    REDY_PCB           YES,  DON'T ADD TO LIST AGAIN         01990000
+                                                                        02000000
+         LA    R3,PCBEPB          ADDR OF READY EPB LIST                02010000
+         SH    R3,=AL2(EPBNEXT-EPB)                                     02020000
+Q        USING EPB,R3             ADDRESSABILITY                        02030000
+                                                                        02040000
+EPB_NEXT DS    0H                                                       02050000
+         ICM   R0,15,Q.EPBNEXT    LAST COMPLETED EPB FOR PCB            02060000
+         BZ    EPB_ADD            ADD EPB TO LIST                       02070000
+         CR    R0,R6              IS EPB ALREADY ON READY LIST          02080000
+         BE    REDY_PCB           YES,  GO MARK PCB READY               02090000
+         LR    R3,R0              ADDR OF NEXT EPB IN LIST              02100000
+         B     EPB_NEXT           GET NEXT EPB                          02110000
+                                                                        02120000
+EPB_ADD  DS    0H                                                       02130000
+         ST    R6,Q.EPBNEXT       ADD EPB TO LIST                       02140000
+         ST    R5,DISPPCB         ADDRESS OF PCB TO CHECK FOR READY     02150000
+         B     REDY_PCB           TEST FOR READY PCB                    02160000
+         DROP  Q                  EPB                                   02170000
+                                                                        02180000
+*---------------------------------------------------------------        02190000
+* Completed event is associated with an ITASK workunit.  Verify         02200000
+* resume EPB is the specific EPB the task manager is waiting            02210000
+* for event completion. If so, reset task dispatchability.              02220000
+* If EPBWU@ is not associated with the current ITASK, then              02230000
+* make server aware of its dispatchability.                             02240000
+*---------------------------------------------------------------        02250000
+EPB_TASK DS    0H                                                       02260000
+         LA    R0,EPB             ADDR OF EPB                           02270000
+         L     R4,EPBWU@          ADDRESS OF ITASK WORKUNIT      159456 02280000
+T        USING ITASK,R4           TEMP ITASK ADDRESSABILITY      159456 02290000
+                                                                        02300000
+         ICM   R1,15,T.TSKREPB@   ADDRESS OF SPECIFIC EPB        159456 02310000
+         BZ    EPB_DISP           NONE, MARK TASK DISPATCHABLE   159456 02320000
+         CR    R1,R0              SPECIFIC EPB POSTED?           159456 02330000
+         BNE   RETURN             NO,  DISCARD EVENT????????     159456 02340000
+                                                                        02350000
+EPB_DISP DS    0H                                                159456 02360000
+         NI    T.TSKFLGS,FF-TSK$NDSP  RESET NON DISPATCH FLAGS   159456 02370000
+         OI    WRKFLGS,$NOPCB     INDICATE NO PCB ASSOC W/ EPB   159456 02380000
+         ST    R0,T.TSKREPB@      SET TASKMGR RESUME EPB ADDRESS 159456 02390000
+                                                                        02400000
+         ST    R4,DISPTASK        ADDRESS OF TASK TO DISPATCH    159456 02410000
+         B     REDY_TSK           NOTIFY SERVER OF READY TASK    159456 02420000
+                                                                        02430000
+         DROP  T                  ITASK                          159456 02440000
+                                                                        02450000
+         EJECT ,                                                        02460000
+*---------------------------------------------------------------        02470000
+*  EPB event has been marked cancelled.  Discard notification           02480000
+*  of event completion.  If this is an XEPB,  the flag XEPB             02490000
+*  for subsequent deletion.                                             02500000
+*---------------------------------------------------------------        02510000
+EPB_CNCL DS    0H                                                       02520000
+         TM    EPBFLGS,EPB$XND    EXTENDED EPB?                         02530000
+         BZ    RETURN             NO, RETURN NORMAL                     02540000
+                                                                        02550000
+         $XEPB LDELETE,XEPB=(R6)  MARK XEPB AS DELETED                  02560000
+         B     RETURN             RETURN NORMAL                         02570000
+                                                                        02580000
+         DROP  R6                 EPB                                   02590000
+                                                                        02600000
+         EJECT ,                                                        02610000
+*---------------------------------------------------------------        02620000
+*  Determine if the PCB workunit address specified in DISPPCB           02630000
+*  is dispatchable.                                                     02640000
+*---------------------------------------------------------------        02650000
+REDY_PCB DS    0H                                                       02660000
+         ICM   R5,15,DISPPCB      PCB TO TEST DISPATCHABILITY    159456 02670000
+         BZ    RETURN             NONE, RETURN NORMAL            159456 02680000
+         USING IPCB,R5            ESTABLISH ADDRESSABILITY       159456 02690000
+         L     R4,PCBTASK         ADDRESS OF OWNING ITASK        159456 02700000
+T        USING ITASK,R4           ADDRESSABILITY                 159456 02710000
+                                                                        02720000
+         TM    PCBFLGS2,PCB2$FLS  PROCESS ALREADY DRAINING?             02730000
+         BO    REDY_WAI           YES, CHECK IF PROCESS WAITING         02740000
+         TM    PCBFLGS2,PCB2$TRM  IS PROCESS IN TERM STATUS             02750000
+         BO    REDY_WAI           YES, CHECK IF PROCESS WAITING         02760000
+         TM    PCBFLGS2,PCB2$DRN  IS PROCESS DRAIN REQUESTED?           02770000
+         BO    POST_DRN           YES, POST PCB AS DRAINING             02780000
+         TM    T.TSKFLGS2,TSK2$DRN IS ITASK DRAINING?            159456 02790000
+         BO    POST_DRN           YES, POST PCB AS DRAINING             02800000
+                                                                        02810000
+REDY_WAI DS    0H                                                       02820000
+         TM    PCBDPFLG,PCBDPFLG_READY  PCB ALREADY AWAITING DISP?      02830000
+         BO    RETURN             YES, NO NEED FOR DISPATCH             02840000
+         TM    PCBFLGS,PCB$WAIT   PCB CURRENTLY WAITING?                02850000
+         BZ    RETURN             NO,  NO NEED FOR DISPATCH             02860000
+                                                                        02870000
+         EJECT ,                                                        02880000
+*---------------------------------------------------------------        02890000
+*  Check to see if the task or process has been cancelled and not       02900000
+*  yet notified of the event.  If so,  post the cancel event status     02910000
+*  to the PCB is the PCB is not waiting for the completion of           02920000
+*  a specific event or if CANCEL= was specified on the $TASK WAIT       02930000
+*  request.                                                             02940000
+*---------------------------------------------------------------        02950000
+         TM    T.TSKFLGS,TSK$CNCL TASK CANCELLED?                159456 02960000
+         BO    PND_CNCL           YES, CHECK IF PCB ALREADY NOTIFIED    02970000
+         TM    PCBFLGS,PCB$PCNL   PROCESS PENDING CANCEL?               02980000
+         BZ    REDY_STP           NO, CHECK STOP                        02990000
+                                                                        03000000
+PND_CNCL DS    0H                                                       03010000
+         TM    PCBFLGS,PCB$CNCL   PROCESS ALREADY POSTED?               03020000
+         BO    REDY_STP           YES,  CHECK FOR STOP EVENT            03030000
+         ICM   R0,15,PCBWEPB      SPECIFIC EPB SPECIFIED?               03040000
+         BZ    POST_CNL           NO, MARK EPB READY FOR CANCEL         03050000
+         ICM   R0,15,PCBCNL@      YES, CHECK FOR CANCEL= OPERAND        03060000
+         BNZ   POST_CNL           CANCEL= SPECIFIED,  NOTIFY CNCL       03070000
+                                                                        03080000
+*---------------------------------------------------------------        03090000
+*  Check to see if the task or process has been stopped and not         03100000
+*  yet notified of the event.  If so,  post the stop event status       03110000
+*  to the PCB is the PCB is not waiting for the completion of           03120000
+*  a specific event or if STOP= was specified on the $TASK WAIT         03130000
+*  request.                                                             03140000
+*---------------------------------------------------------------        03150000
+REDY_STP DS    0H                                                       03160000
+         TM    T.TSKFLGS,TSK$STOP TASK STOPPED?                  159456 03170000
+         BO    PND_STOP           YES, CHECK IF PCB ALREADY NOTIFIED    03180000
+         TM    PCBFLGS,PCB$PSTP   PROCESS PENDING STOP?                 03190000
+         BZ    REDY_EVN           NO, CHECK FOR COMPLETED EVENTS        03200000
+                                                                        03210000
+PND_STOP DS    0H                                                       03220000
+         TM    PCBFLGS,PCB$STOP   PROCESS ALREADY POSTED?               03230000
+         BO    REDY_EVN           YES, CHECK FOR READY EVENT            03240000
+         ICM   R0,15,PCBWEPB      SPECIFIC EPB SPECIFIED?               03250000
+         BZ    POST_STP           NO, MARK EPB READY FOR STOP           03260000
+         ICM   R0,15,PCBSTP@      YES,  CHECK FOR STOP= OPERAND         03270000
+         BNZ   POST_STP           STOP= SPECIFIED, NOTIFY STOP          03280000
+                                                                        03290000
+         EJECT ,                                                        03300000
+*---------------------------------------------------------------        03310000
+* Check to see if the PCB workunit has any completed events             03320000
+* posted to it.  If so,  verify if the workunit is waiting              03330000
+* for the completion of a specific event and if that event              03340000
+* has completed.                                                        03350000
+*---------------------------------------------------------------        03360000
+REDY_EVN DS    0H                                                       03370000
+         LA    R2,PCBEPB          ADDR OF EPB LIST                      03380000
+         SH    R2,=AL2(EPBNEXT-EPB) OFFSET TO NEXT POINTER              03390000
+P        USING EPB,R2             PREV EPB ADDRESSABILITY               03400000
+                                                                        03410000
+REDY_EVX DS    0H                                                       03420000
+         ICM   R1,15,P.EPBNEXT    NEXT COMPLETED EVENT BLOCK            03430000
+         BZ    RETURN             END OF LIST, CHECK NEXT PCB           03440000
+Q        USING EPB,R1             TEMP ADDRESSABILITY                   03450000
+                                                                        03460000
+         TM    Q.EPBFLGS,EPB$FLSH EVENT FLUSHED                         03470000
+         BO    REDY_RMV           YES, REMOVE FROM QUEUE                03480000
+                                                                        03490000
+         ICM   R0,15,PCBWEPB      WAITING FOR SPECIFIC EVENT?           03500000
+         BZ    REDY_RMV           NO,  REMOVE EPB FROM CMPL LIST        03510000
+         CR    R0,R1              SPECIFIC EVENT COMPLETED?             03520000
+         BE    REDY_RMV           YES, REMOVE EPB FROM CMPL LIST        03530000
+         LR    R2,R1              ADDR OF NEXT EPB                      03540000
+         B     REDY_EVX           CHECK NEXT EPB IN CMPL LIST           03550000
+                                                                        03560000
+REDY_RMV DS    0H                                                       03570000
+         C     R1,PCBWEPB         WAIT SPEC EPB FLUSHED                 03580000
+         BNE   *+10               NO, CONTINUE                          03590000
+         XC    PCBWEPB,PCBWEPB    RESET SPECIFIC EVENT ADDR             03600000
+                                                                        03610000
+         MVC   P.EPBNEXT,Q.EPBNEXT REMOVE FROM COMPLETED EPB LIST       03620000
+         TM    Q.EPBFLGS,EPB$FLSH EVENT FLUSHED                         03630000
+         BO    REDY_EVX           YES, CHECK NEXT EVENT                 03640000
+                                                                        03650000
+         ST    R1,PCBREPB         SAVE READY EPB ADDRESS                03660000
+         MVC   PCBREVCD,Q.EPBEVNT SAVE COMPLETED EVENT CODE             03670000
+         B     POST_RDY           POST PCB READY                        03680000
+                                                                        03690000
+         DROP  P,Q                PREV, QUEUE EPB                       03700000
+                                                                        03710000
+*-------------------------------------------------------------          03720000
+* Mark PCB dispatchable with appropriate status                         03730000
+*-------------------------------------------------------------          03740000
+POST_CNL DS    0H                                                       03750000
+         LA    R0,EC$CNCL         CANCEL EVENT                          03760000
+         ST    R0,PCBREVCD        SET COMPLETED EVENT CODE              03770000
+         OI    PCBFLGS,PCB$CNCL    INDICATE PROCESS CANCELLED           03780000
+         NI    PCBFLGS,FF-PCB$PCNL RESET PENDING CANCEL                 03790000
+         B     POST_RDY           POST PCB READY                        03800000
+                                                                        03810000
+POST_STP DS    0H                                                       03820000
+         LA    R0,EC$STOP         STOP EVENT                            03830000
+         ST    R0,PCBREVCD        SET COMPLETED EVENT CODE              03840000
+         OI    PCBFLGS,PCB$STOP    INDICATE PROCESS TERMINATING         03850000
+         NI    PCBFLGS,FF-PCB$PSTP RESET PENDING STOP                   03860000
+         B     POST_RDY            POST PCB READY                       03870000
+                                                                        03880000
+POST_DRN DS    0H                                                       03890000
+         OI    PCBFLGS2,PCB2$DRN  MARK PROCESS DRAINING                 03900000
+         B     POST_RDY           POST PCB READY                        03910000
+                                                                        03920000
+POST_RDY DS    0H                                                159456 03930000
+         @CALL ITSKDPNQ,(T.TSKDISPQ,IPCB),CTYPE=CVT,MF=(E,MFE_LIST)     03940000
+                                                                        03950000
+         ST    R4,DISPTASK        ADDRESS OF ITASK TO DISP       159456 03960000
+                                                                        03970000
+         DROP  T                  ITASK                          159456 03980000
+                                                                        03990000
+         EJECT ,                                                        04000000
+*-------------------------------------------------------------          04010000
+* If ITASK associated with event is not the current ITASK,              04020000
+* then mark ITASK dispatchable and add to server dispatch               04030000
+* queue.                                                                04040000
+*-------------------------------------------------------------          04050000
+REDY_TSK DS    0H                                                159456 04060000
+         ICM   R4,15,DISPTASK     ADDRESS OF TASK TO DISPATCH    159456 04070000
+         BZ    RETURN             NONE, RETURN                   159456 04080000
+         CR    R4,R10             WORKUNIT ASSOC WITH CURR ITASK 159456 04090000
+         BE    RETURN             YES, CONTINUE                  159456 04100000
+T        USING ITASK,R4           ADDRESSABILITY                 159456 04110000
+                                                                        04120000
+         LR    R2,R4              ASSUME SERVER TASK             159456 04130000
+         CLI   T.TSKTYPE,TSKT$SRV ADDRESS OF SERVER              159456 04140000
+         BE    *+8                YES, CONTINUE                  159456 04150000
+         L     R2,T.TSKSVTSK      ADDRESS OF SERVER TASK         159456 04160000
+                                                                        04170000
+         LTR   R2,R2              SERVER AVAILABLE               159456 04180000
+         BZ    RETURN             NO, ALL DONE                   159456 04190000
+S        USING ITASK,R2           ADDRESSABILITY (SERVER ITASK)  159456 04200000
+                                                                        04210000
+         L     R6,S.TSKSRV        ADDRESS OF SERVER EXTENSION    159456 04220000
+         USING SERVERX,R6         ADDRESSABILITY                 159456 04230000
+                                                                        04240000
+         @CALL ITSKDPNQ,(SRVDISPQ,T.ITASK),CTYPE=CVT,MF=(E,MFE_LIST)    04250000
+                                                                        04260000
+         B     RETURN             RETURN NORMAL                  159456 04270000
+                                                                        04280000
+         DROP  R6,S,T             SERVERX, ITASK                 159456 04290000
+                                                                        04300000
+         EJECT ,                                                        04310000
+****************************************************************        04320000
+*                                                                       04330000
+*  ERROR RETURN                                                         04340000
+*                                                                       04350000
+****************************************************************        04360000
+                                                                        04370000
+ERR_RMT  DS    0H                                                       04380000
+         LA    R0,RSN04           UNABLE TO LOCATE RMT EPB              04390000
+         B     RET08              FAILURE                               04400000
+                                                                        04410000
+         EJECT ,                                                        04420000
+****************************************************************        04430000
+*                                                                       04440000
+*  RETURN                                                               04450000
+*                                                                       04460000
+****************************************************************        04470000
+                                                                        04480000
+RETURN   DS    0H                                                       04490000
+         LA    R15,RC00           NORMAL COMPLETION                     04500000
+         B     RET_EXIT           RETURN                                04510000
+                                                                        04520000
+RET04    DS    0H                                                       04530000
+         LA    R15,RC04           NO PCB ASSOCIATED WITH EPB            04540000
+         B     RET_EXIT           RETURN                                04550000
+                                                                        04560000
+RET08    DS    0H                                                       04570000
+         LA    R15,RC08           SERVICE FAILURE                       04580000
+         B     RET_EXIT           RETURN                                04590000
+                                                                        04600000
+RET_EXIT DS    0H                                                       04610000
+         #EXIT ,                  RETURN                                04620000
+                                                                        04630000
+         EJECT ,                                                        04640000
+****************************************************************        04650000
+*                                                                       04660000
+*  CONSTANTS AND LITERALS                                               04670000
+*                                                                       04680000
+****************************************************************        04690000
+$EPBID   DC    CL4'EPB'           EVENT PROCESS BLOCK ID                04700000
+                                                                        04710000
+         LTORG ,                                                        04720000
+                                                                        04730000
+         PRINT NOGEN                                                    04740000
+         ICVT  ,                                                        04750000
+         ITASK ,                                                        04760000
+         IPCB  ,                                                        04770000
+         SERVERX ,                                                      04780000
+         PRINT GEN                                                      04790000
+                                                                        04800000
+         END   ,                                                        04810000

@@ -1,0 +1,814 @@
+ITVBRBLD TITLE '- BUILD TVBR VECTOR'                                    00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE:  ITVBRBLD - Build TVBR vector                                00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This routine is used to map a subset of the VDB variables          00080000
+*    represented by the $NAVPARM provided as input to the               00090000
+*    current screen set and regions defined against that screen         00100000
+*    set.                                                               00110000
+*                                                                       00120000
+*    VDB Variables of interest are those residing in "wrap"             00130000
+*    regions and those residing in repeating regions - either           00140000
+*    those that explicitly repeat or those that are children of         00150000
+*    repeating regions.                                                 00160000
+*                                                                       00170000
+*    A data structure referred to as the TVBR (traverse                 00180000
+*    variables by region) is constructed to serve as linkage            00190000
+*    between the VDB column/variable $NAVPARM entries and their         00200000
+*    locations in the region-tiled presentation space.                  00210000
+*                                                                       00220000
+*                                                                       00230000
+* NOTES:                                                                00240000
+*                                                                       00250000
+*    The TVBR vectpr is allocated in process owned $GETSTOR             00260000
+*    storage when RC00 is returned.  No storage is retained if          00270000
+*    an error completion code is returned.                              00280000
+*                                                                       00290000
+*    TVBR entries are ordered.  Refer to the TVBRVEC mapping            00300000
+*    for details.                                                       00310000
+*                                                                       00320000
+*                                                                       00330000
+* ON ENTRY:                                                             00340000
+*                                                                       00350000
+*    R0 - addr of a screen (set) STN                                    00360000
+*    R1 - addr of $NAVPARM                                              00370000
+*                                                                       00380000
+*                                                                       00390000
+* ON EXIT:                                                              00400000
+*                                                                       00410000
+*    R15 contains one of the following return codes                     00420000
+*                                                                       00430000
+*        RC00 - TVBR created representing vars in screen set            00440000
+*               has been anchored in $NAVPARM.IXR@TVBR                  00450000
+*                                                                       00460000
+*               R0 - number of TVBR managed variables                   00470000
+*               R1 - addr of the TVBR vector (TVBRVEC)                  00480000
+*                                                                       00490000
+*        RC04 - Either no VDB variables reside on the screen            00500000
+*               (set) named, or none of variables residing on           00510000
+*               the screen (set) reside in repeating regions            00520000
+*                                                                       00530000
+*        RC08 - Invalid $NAVPARM (a variety of validations)             00540000
+*                                                                       00550000
+*        RC12 - the named screen (set) descriptor could not             00560000
+*               be acquired                                             00570000
+*                                                                       00580000
+*               R0 - ILOCSSET failure code                              00590000
+*                                                                       00600000
+*        RC16 - TVBR variable entry could not be created                00610000
+*                                                                       00620000
+*               R0 - diagnostic code                                    00630000
+*                                                                       00640000
+*        RC20 - Storage management failure                              00650000
+*                                                                       00660000
+**<DOC-OFF>****************************************************         00670000
+                                                                        00680000
+         EJECT                                                          00690000
+***************************************************************         00700000
+*                                                                       00710000
+* MAINTENANCE:                                                          00720000
+*                                                                       00730000
+*    01/XX/93 R. TURGEON                                                00740000
+*             Initial version                                           00750000
+*                                                                       00760000
+*    11/05/93 R. COLMONE                                                00770000
+*             Environmental conversion                                  00780000
+*                                                                       00790000
+*    05/10/95 R. Turgeon    Rel 2.0.0 - Table select                    00800000
+*             Performance oriented improvements made possible           00810000
+*             by changes to initial $NAVPARM construction and           00820000
+*             column/variable entry ordering.                           00830000
+*                                                                       00840000
+***************************************************************         00850000
+                                                                        00860000
+         EJECT                                                          00870000
+WORKAREA #WORK ,                       READ  / WRITE WORKAREA           00880000
+                                                                        00890000
+FLAGS    DS    X                       LOCAL CONTROL FLAGS              00900000
+FWRAP    EQU   X'80'                      VARIABLES RESIDE IN WRAP RGNS 00910000
+                                                                        00920000
+@TVBR    DS    A                       ADDR OF TVBR BLOCK IN PROGRESS   00930000
+@TVBRVAR DS    A                       NEXT AVAILABLE TVBR VAR SLOT     00940000
+@TVBREND DS    A                       ADDR LAST TVBR VAR SLOT          00950000
+@SCRNSET DS    A                       ADDR OF SCREEN SET NAME          00960000
+@STN     DS    A                       ADDR OF SCREEN/SET STN ENTRY     00970000
+@EXRGNET DS    A                       ADDR SCREEN(SET) DESCRIPTOR      00980000
+                                                                        00990000
+SRGLVLMN DS    H                       $NAVPARM MIN RGN NESTING DEPTH   01000000
+SRGLVLMX DS    H                       $NAVPARM MAX RGN NESTING DEPTH   01010000
+SRGNMAXP DS    A                       ADDR OF MAX NESTED DEPTH RGNTRY  01020000
+                                                                        01030000
+#ENTRIES DS    F                       # VARIABLE ENTRIES CONSTRUCTED   01040000
+#RPTRGNS DS    F                       # CONTAINER REPEATING REGIONS    01050000
+                                                                        01060000
+STATREGS DS    4F                      R14-R1 RETAINED OVER SERVICE RTN 01070000
+REGSAVE  DS    16F                     LOCAL RTN SAVEAREA #1            01080000
+REGSAVE2 DS    16F                     LOCAL RTN SAVEAREA #2            01090000
+REGSAVE3 DS    16F                     LOCAL RTN SAVEAREA #3            01100000
+                                                                        01110000
+WORKLEN  #ENDWORK ,                                                     01120000
+                                                                        01130000
+         EJECT                                                          01140000
+         $NAVPARM ,                    SQL QUERY NAVIGATION PLIST       01150000
+                                                                        01160000
+         EJECT                                                          01170000
+         TVBRVEC  ,                    TRANSVERSE VARS BY RGN VECTOR    01180000
+                                                                        01190000
+         EJECT                                                          01200000
+         ICATALOG REGION               PROJECT CATALOG TABLE FORMATS    01210000
+                                                                        01220000
+         EJECT                                                          01230000
+         EXRGNET ,                     SCREEN SET DESCRIPTOR            01240000
+                                                                        01250000
+         EJECT                                                          01260000
+         REGION ,                      REGION DEFINITION BLOCKS         01270000
+                                                                        01280000
+         EJECT                                                          01290000
+         NAV   ,                       NAVIGATION DATA STRUCTURES       01300000
+                                                                        01310000
+         EJECT                                                          01320000
+         EQUS  ,                       GENERAL EQUATES                  01330000
+                                                                        01340000
+         EJECT                                                          01350000
+ITVBRBLD #ENTER PREG=(R8,R2)                                            01360000
+                                                                        01370000
+         USING ITASK,R10               STDENV                           01380000
+                                                                        01390000
+         EJECT                                                          01400000
+***************************************************************         01410000
+*                                                                       01420000
+*   Identify and validate the screen(set) provided by caller            01430000
+*                                                                       01440000
+***************************************************************         01450000
+         USING $NAVPARM,R8             NAVPARM FORMAT                   01460000
+         USING NVSTN,R2                STN ADDRESSABILITY               01470000
+                                                                        01480000
+         ST    R2,@STN                 RETAIN STN ENTRY ADDRESS         01490000
+         LA    R1,NVSTSSN              SCREEN SET NAME                  01500000
+         TM    0(R1),BF                MEMBER OF SCREEN SET?            01510000
+         BNZ   *+8                     RETAIN NAME IF SO                01520000
+         LA    R1,NVSTNAME             ELSE USE UNADORNED SCREEN NAME   01530000
+         ST    R1,@SCRNSET             SAVE SCREEN SET NAME ADDR        01540000
+                                                                        01550000
+         @CALL ILOCSSET,CTYPE=CVT      LOC SCREEN SET DESCRIPTOR (R1)   01560000
+                                                                        01570000
+         CH    R15,=AL2(RC04)          STRUCTURES PRESENT AND VALID?    01580000
+         BE    WRN_CPT                 NO ASSOCIATED REGIONS, ETC.      01590000
+         BH    ERR_SSET                SCREEN SET RGNS IN ERROR         01600000
+         ST    R1,@EXRGNET             SAVE SCREEN SET DESCRIPTOR       01610000
+         DROP  R2                      NVSTN                            01620000
+                                                                        01630000
+         EJECT                                                          01640000
+***************************************************************         01650000
+*                                                                       01660000
+*   Count the VDB variables defined against the given screen or         01670000
+*   screen set.  Then, count the number of mutually repeating           01680000
+*   regions spanned by those variables.  If no repeating                01690000
+*   regions contain VDB variables (explicitly or implicitly)            01700000
+*   and if no wrap regions (spanning a presentation space via           01710000
+*   a scroll operation) are present, TVBR resources are not             01720000
+*   required to extract variables from the presentation space.          01730000
+*                                                                       01740000
+*   Otherwise, Allocate a TVBRVEC having one linkage entry for          01750000
+*   each variable tallied, plus one entry for each explictly            01760000
+*   repeating container region.                                         01770000
+*                                                                       01780000
+***************************************************************         01790000
+         LA    R1,$NAVPARM             R1 <== NAVPARM ORIGIN            01800000
+         L     R0,@SCRNSET             R0 <== SCREEN SET NAME           01810000
+         LA    R15,NAVPLINK            REGION/VAR ASSOCIATION ROUTINE   01820000
+         BAS   R14,NAVPSCAN            SCAN THE NAVPARM                 01830000
+         LTR   R15,R15                 NAVPARM IS VALID?                01840000
+         BNZ   ERR_NAVP                FAIL OTHERWISE                   01850000
+                                                                        01860000
+         LTR   R1,R1                   # VARS RESIDING ON SCREEN SET    01870000
+         BZ    WRN_CPT                 NO WORK OUTSTANDING              01880000
+         ST    R1,#ENTRIES             RETAIN VARIABLE COUNT            01890000
+                                                                        01900000
+*--------------------------------------------------------------         01910000
+*   TALLY EXPLICITLY REPEATING RGNS AND USE OF WRAP RGNS                01920000
+*--------------------------------------------------------------         01930000
+         L     R7,SRGNMAXP             DEEPEST REGION CONTAINING VAR    01940000
+         USING RGNTRY,R7               REGION DEFINITION FORMAT         01950000
+         SR    R1,R1                   # CONTAINER RPT RGNS             01960000
+                                                                        01970000
+RSCAN1   DS    0H                                                       01980000
+         TM    RGNFLAG1,RGRPTRGN       EXPLICIT REPEATER?               01990000
+         BNO   *+8                     SKIP IF NOT                      02000000
+         LA    R1,1(,R1)               UPDATE ENTRY RQMT COUNT          02010000
+                                                                        02020000
+         TM    RGNFLAG1,RGWRPRGN+RGWRPGRP   WRAP REGION / WRAP GROUP?   02030000
+         BZ    *+8                     SKIP IF NOT                      02040000
+         OI    FLAGS,FWRAP             INDICATE WRAP IMPLICATIONS       02050000
+                                                                        02060000
+         ICM   R7,15,RGNPAR            WALK UPWARDS THRU PARENTAGE      02070000
+         BNZ   RSCAN1                  REGION SCAN                      02080000
+         DROP  R7                      RGNTRY                           02090000
+                                                                        02100000
+*--------------------------------------------------------------         02110000
+*   TVBR ASSISTANCE NEEDED ONLY IF REPEATING OR WRAP REGIONS            02120000
+*--------------------------------------------------------------         02130000
+         ST    R1,#RPTRGNS             RPT RGNS IN PATH                 02140000
+         LTR   R1,R1                   ANY REPEATING VARIABLES?         02150000
+         BNZ   ALLOCTVB                TVBR ASSISTANCE NOT REQUIRED     02160000
+         TM    FLAGS,FWRAP             VARIABLES IN WRAP GROUP?         02170000
+         BNO   WRN_CPT                 SKIP IF NOT                      02180000
+                                                                        02190000
+*--------------------------------------------------------------         02200000
+*   ACQUIRE STORAGE FOR TVBR VECTOR                                     02210000
+*--------------------------------------------------------------         02220000
+ALLOCTVB DS    0H                                                       02230000
+         L     R3,#RPTRGNS             # EXPLICITLY REPEATING RGNS      02240000
+         A     R3,#ENTRIES             PLUS NUMBER OF VARIABLES         02250000
+         MH    R3,=AL2(TVVLN)          LENGTH OF EACH TVBR VAR ENTRY    02260000
+         LA    R3,TVBRVFXL(,R3)        TOTAL LENGTH REQ FOR TVBR        02270000
+                                                                        02280000
+         $GETSTOR (R3),COND=YES        ALLOCATE TVBRVEC                 02290000
+         BNZ   ERR_STG                 FAIL OTHERWISE                   02300000
+                                                                        02310000
+         LR    R4,R1                   ACQUIRED STORAGE                 02320000
+         ST    R4,@TVBR                LOCAL TVBR VECTOR LOCATOR        02330000
+         USING TVBRVEC,R4              FORMAT                           02340000
+                                                                        02350000
+*--------------------------------------------------------------         02360000
+*   INITIALIZE THE TVBR VECTOR PREFIX                                   02370000
+*--------------------------------------------------------------         02380000
+         MVC   TVBREYE,=CL8'TVBRVEC'   EYECATCHER                       02390000
+         ST    R3,TVBLENG              LENGTH OF TVBR VECTOR            02400000
+         ST    R8,TVBNAVP              NAVPARM INTERFACE BLOCK          02410000
+         MVC   TVBSTN,@STN             RETAIN SCREEN/SET STN ADDR       02420000
+         L     R2,@SCRNSET             ADDRESS OF SCREEN SET NAME       02430000
+         MVC   TVBSSET,0(R2)           SCREEN / SCREEN SET NAME         02440000
+                                                                        02450000
+         L     R0,#RPTRGNS             # EXPLICITLY REPEATING RGNS      02460000
+         A     R0,#ENTRIES             PLUS NUMBER OF VARIABLES         02470000
+         ST    R0,TVBNVARS             TOTAL NUMBER OF TVBR ENTRIES     02480000
+                                                                        02490000
+         L     R1,@EXRGNET             SCREEN SET DESCRIPTOR ADDRESS    02500000
+         USING EXRGNET,R1              SHORT TERM ADDRESSABILITY        02510000
+         ST    R1,TVBEXNET             SAVE PTR TO SCREEN SET DESC      02520000
+                                                                        02530000
+I        USING TVIMAGE,TVBISTD         DEFINE STANDARD (SCREEN) IMAGE   02540000
+         LA    R0,EXRNROOT             RGN DEFINITION TREE BASE         02550000
+         ST    R0,I.TVIRGNTR           SAVE FOR DRAWING SERVICES        02560000
+                                                                        02570000
+I        USING TVIMAGE,TVBIWRAP        POSSIBLE DEF OF WRAP IMAGE       02580000
+         ICM   R15,15,EXRNWRAP         WRAP IMAGING REQUIRED?           02590000
+         BZ    *+8                     SKIP IF NOT                      02600000
+         ST    R15,I.TVIRGNTR          TILING RGN BASE FOR WRAP IMAGE   02610000
+         DROP  R1,I                    EXRGNET, STANDARD IMAGE          02620000
+                                                                        02630000
+         EJECT                                                          02640000
+***************************************************************         02650000
+*                                                                       02660000
+*   Construct TVBR variable and repeating region entries. First         02670000
+*   create skeletal entries for each repeating region lying in          02680000
+*   the path spanned from the most deeply nested region that            02690000
+*   contains a variable, up to the presentation space (level0)          02700000
+*   itself.                                                             02710000
+*                                                                       02720000
+***************************************************************         02730000
+         LA    R3,TVVAR                FIRST SLOT IN TVBR VAR ARRAY     02740000
+         ST    R3,@TVBRVAR             INITIALIZE FREE TVBR SLOT PTR    02750000
+         ICM   R0,15,#RPTRGNS          REPEATING RGNS RELEVANT?         02760000
+         BZ    RSCAN2X                 DONE IF NOT                      02770000
+                                                                        02780000
+         L     R7,SRGNMAXP             DEEPEST REGION CONTAINING VAR    02790000
+         USING RGNTRY,R7               REGION DEFINITION FORMAT         02800000
+                                                                        02810000
+RSCAN2   DS    0H                                                       02820000
+         TM    RGNFLAG1,RGRPTRGN       EXPLICT REPEATER?                02830000
+         BNO   RSCAN2A                 SKIP IF NOT                      02840000
+         LA    R0,TVBRVEC              R0 <== TVBR VECTOR BASE          02850000
+         LA    R1,RGNTRY               R1 <== REGION ENTRY              02860000
+         BAS   R14,INITNTRY            INITIALIZATION OF TVBR ENTRY     02870000
+                                                                        02880000
+RSCAN2A  DS    0H                      ADVANCE TO NEXT ENTRY            02890000
+         TM    RGNFLAG1,RGRPTPAR       SOME PARENT REGION REPEATS?      02900000
+         BNO   RSCAN2X                 DONE IF NOT                      02910000
+         L     R7,RGNPAR               WALK UPWARDS THRU PARENTAGE      02920000
+         B     RSCAN2                  REGION SCAN                      02930000
+                                                                        02940000
+RSCAN2X  DS    0H                      ALL REPEATING RGN ENTRIES CPT    02950000
+         DROP  R7                      RGNTRY                           02960000
+                                                                        02970000
+*--------------------------------------------------------------         02980000
+*   CREATE A TVBR ENTRY FOR EACH NAVPARM VAR IN THIS SCREEN SET         02990000
+*--------------------------------------------------------------         03000000
+         L     R0,@SCRNSET             R0 <== SCREEN SET NAME           03010000
+         LA    R1,$NAVPARM             R1 <== NAVPARM ORIGIN            03020000
+         LA    R15,BLDVARE             ADD TVBR ENTRY FOR MATCHING VARS 03030000
+         BAS   R14,NAVPSCAN            SCAN THE NAVPARM                 03040000
+         LTR   R15,R15                 SUCCESS?                         03050000
+         BNZ   ERR_SERV                TVBR VAR BUILDER FAILED          03060000
+                                                                        03070000
+         EJECT                                                          03080000
+***************************************************************         03090000
+*                                                                       03100000
+*   Identify scrolling screen sets by determining first whether         03110000
+*   a scroll-down operation is defined.  If so, also ensure             03120000
+*   that an End Vertical Scroll region is defined.  Without             03130000
+*   one, there is no mechanism to break the execution time              03140000
+*   scrolling loop.  The End Vertical Scroll region must exist,         03150000
+*   minimally, on the 'standard' image.                                 03160000
+*                                                                       03170000
+***************************************************************         03180000
+         L     R6,@STN                 SCREEN SET STN                   03190000
+         USING NVSTN,R6                LOCATE STN                       03200000
+         ICM   R5,15,NVSCROLL          SCROLL OPERATIONS DEFINED?       03210000
+         BZ    FINVSEND                DONE HERE IF NOT                 03220000
+         USING NVUSUCC,R5              EXAMINE SCROLL TYPES             03230000
+                                                                        03240000
+         LA    R3,NVUENTRY+(NVUENTLN*(NVUESCRD-1))                      03250000
+         USING NVUENTRY,R3             VERTICAL SCROLL (DOWN) OPERATION 03260000
+         CLI   NVUESAID,0              SCROLL DOWN DEFINED?             03270000
+         BE    FINVSEND                DONE HERE IF NOT                 03280000
+         OI    TVBRSTAT,TVB$VDEF       INDICATE VERT SCROLL DEFINED     03290000
+         DROP  R3,R5,R6                NVUENTRY, NVUSUCC, NVSTN         03300000
+                                                                        03310000
+*--------------------------------------------------------------         03320000
+*   DETERMINE WHETHER END-OF-SCROLL IS DEFINED                          03330000
+*--------------------------------------------------------------         03340000
+I        USING TVIMAGE,TVBISTD         REFERENCE STANDARD IMAGE         03350000
+         L     R3,I.TVIRGNTR           REGION TREE ROOT                 03360000
+         LA    R3,RGTROOT-RGNTREE(,R3) CONTAINER REGION                 03370000
+         USING RGNTRY,R3               REGION DEFINITION                03380000
+                                                                        03390000
+LOCVSEND DS    0H                                                       03400000
+         ICM   R2,15,RGNSRGN           ASSOCIATED SYSREGION ENTRY       03410000
+         USING SYSRGN,R2               FORMAT                           03420000
+         BZ    LOCVSADV                NO ASSOCIATED SYSRGN             03430000
+         CLI   SRAVREND,FALSE          VERT SCROLL TERMINATOR?          03440000
+         BNE   FNDVSEND                DEFINITION LOCATED               03450000
+                                                                        03460000
+LOCVSADV DS    0H                                                       03470000
+         ICM   R3,15,RGNNEXT           SCAN ALL REGIONS UNTIL HIT       03480000
+         BNZ   LOCVSEND                AGAIN                            03490000
+         B     FINVSEND                NO VERT-END-SCROLL DEFINED       03500000
+                                                                        03510000
+FNDVSEND DS    0H                      SCROLL DEFINITION INCLUDES DLM   03520000
+         OI    TVBRSTAT,TVB$EOVR       ALLOW VERTICAL SCROLLING         03530000
+         DROP  R3,R2,I                 RGNTRY, SYSRGN, STANDARD IMAGE   03540000
+                                                                        03550000
+FINVSEND DS    0H                                                       03560000
+                                                                        03570000
+         EJECT                                                          03580000
+***************************************************************         03590000
+*                                                                       03600000
+*   Sort variable entries into relative nesting depth sequence          03610000
+*                                                                       03620000
+***************************************************************         03630000
+         L     R3,TVBNVARS             # VAR ENTRIES                    03640000
+         BCTR  R3,0                    N-1 SORT PASSES                  03650000
+         LTR   R3,R3                   SINGLE VARIABLE?                 03660000
+         BNP   SORTFIN                 NO SORT REQUIRED                 03670000
+                                                                        03680000
+         LA    R6,TVVLN                LENGTH OF EACH ENTRY             03690000
+         L     R7,@TVBREND             ADDR OF LAST VAR ENTRY           03700000
+                                                                        03710000
+SORTPASS DS    0H                                                       03720000
+         LR    R1,R7                   ASSUME BOTTOM ENTRY IN POSITION  03730000
+         LA    R5,TVVAR                FIRST ENTRY                      03740000
+         USING TVVAR,R5                MOVE BASE TO VARIABLE ENTRY      03750000
+                                                                        03760000
+SORTLOOP DS    0H                      SORT SEQUENCE, SEE NOTES         03770000
+         CLC   TVVOLVL,TVVOLVL-TVVAR(R1)                                03780000
+         BL    SORTADV                 BRANCH IF ORDER IS PROPER        03790000
+         BH    SORTCHG                 IMMEDIATE INTERCHANGE            03800000
+                                                                        03810000
+         CLC   TVVORPT,TVVORPT-TVVAR(R1)                                03820000
+         BL    SORTADV                                                  03830000
+         BH    SORTCHG                                                  03840000
+                                                                        03850000
+         CLC   TVVRGNTY,TVVRGNTY-TVVAR(R1)                              03860000
+         BL    SORTADV                                                  03870000
+         BH    SORTCHG                                                  03880000
+                                                                        03890000
+         CLC   TVVOVAR,TVVOVAR-TVVAR(R1)                                03900000
+         BL    SORTADV                                                  03910000
+                                                                        03920000
+SORTCHG  DS    0H                      ENTRY EXCHANGE REQUIRED          03930000
+         LR    R1,R5                   ELSE REPLACE HIGH SCORE          03940000
+                                                                        03950000
+SORTADV  DS    0H                                                       03960000
+         BXLE  R5,R6,SORTLOOP          MAKE COMPLETE PASS               03970000
+                                                                        03980000
+         CR    R1,R7                   INTERCHANGE REQUIRED?            03990000
+         BE    SORTNEXT                SKIP IF NOT                      04000000
+         XC    0(TVVLN,R1),0(R7)       ELSE INTERCHANGE                 04010000
+         XC    0(TVVLN,R7),0(R1)                                        04020000
+         XC    0(TVVLN,R1),0(R7)                                        04030000
+                                                                        04040000
+SORTNEXT DS    0H                      PREPARE FOR NEXT PASS            04050000
+         SR    R7,R6                   LAST ENTRY NOW UNMOVEABLE        04060000
+         BCT   R3,SORTPASS             N-1 REPETITIONS                  04070000
+                                                                        04080000
+SORTFIN  DS    0H                                                       04090000
+         L     R5,@TVBREND             LOCATE LAST VARIABLE ENTRY       04100000
+         MVI   TVVSTAT,TVVS$END        TAG IT FOR EASE OF SCAN          04110000
+         DROP  R5                      TVVAR                            04120000
+                                                                        04130000
+         EJECT                                                          04140000
+***************************************************************         04150000
+*                                                                       04160000
+*   Group all TVVAR entries having same host region                     04170000
+*                                                                       04180000
+***************************************************************         04190000
+         L     R0,TVBNVARS             NUMBER OF VARIABLE ENTRIES       04200000
+         BCTR  R0,0                    MINUS ONE                        04210000
+         LTR   R0,R0                   SINGLE VARIABLE ENTRY?           04220000
+         BNP   NORMRET                 NO USEFUL WORK OUTSTANDING       04230000
+                                                                        04240000
+         LA    R5,TVVAR                FIRST ENTRY                      04250000
+         USING TVVAR,R5                MOVE BASE TO VARIABLE ENTRY      04260000
+         LA    R6,TVVLN                LENGTH OF EACH ENTRY             04270000
+         L     R7,@TVBREND             ADDR OF LAST VAR ENTRY           04280000
+                                                                        04290000
+         LR    R1,R5                   PRESERVE TOP OF TVVAR ORG        04300000
+         SR    R0,R0                   OFFSET NOT YET POSTED            04310000
+         SR    R2,R2                   NO CURRENT RGN ESTABLISHED       04320000
+                                                                        04330000
+GROUPASS DS    0H                                                       04340000
+         C     R2,TVVRGNTY             SAME HOST REGION?                04350000
+         BE    GROUPOST                REUSE CURR OFFSET IF SO          04360000
+         LR    R0,R5                   FIRST VAR THIS LEVEL             04370000
+         SR    R0,R1                   CONVERT ADDR TO OFFSET           04380000
+         L     R2,TVVRGNTY             IDENTIFY HOST REGION             04390000
+                                                                        04400000
+GROUPOST DS    0H                                                       04410000
+         STH   R0,TVVLVORG             ALLOWS RELOC OF TOP OF LVL       04420000
+         BXLE  R5,R6,GROUPASS          ASSOC ALL VARS                   04430000
+         DROP  R5                      TVVAR                            04440000
+                                                                        04450000
+         EJECT                                                          04460000
+***************************************************************         04470000
+*                                                                       04480000
+*   Return completion status to caller                                  04490000
+*                                                                       04500000
+***************************************************************         04510000
+NORMRET  DS    0H                                                       04520000
+         MVC   IXR@TVBR,@TVBR          TVBR CHECKPOINTED IN NAVPARM     04530000
+         L     R0,TVBNVARS             NUMBER OF VARIABLES AFFECTED     04540000
+         LA    R1,TVBRVEC              RETURN TVBR PTR                  04550000
+         LA    R15,RC00                INDICATE SUCCESS                 04560000
+         B     EXIT                    DONE                             04570000
+                                                                        04580000
+WRN_CPT  DS    0H                      EITHER NO VARS MATCH THE SCREEN  04590000
+         LA    R15,RC04                SET, OR THE SCREEN SET DOES NOT  04600000
+         SR    R0,R0                   REQUIRE REGION PROCESSING        04610000
+         B     FRE_TVBR                                                 04620000
+                                                                        04630000
+ERR_NAVP DS    0H                      NAVPARM IS NOT VALID             04640000
+         LA    R15,RC08                                                 04650000
+         SR    R0,R0                                                    04660000
+         B     FRE_TVBR                                                 04670000
+                                                                        04680000
+ERR_SSET DS    0H                      SCREEN SET IN ERROR              04690000
+         LR    R0,R15                  SERVICE ROUTINE RETCODE          04700000
+         LA    R15,RC12                R0 CONTAINS ILOCSSET RETCODE     04710000
+         B     FRE_TVBR                                                 04720000
+                                                                        04730000
+ERR_SERV DS    0H                      RETURN AND REASON CODES PROVIDED 04740000
+         LR    R0,R15                  SERVICE ROUTINE RETCODE          04750000
+         LA    R15,RC16                INDICATE FAILURE                 04760000
+         B     FRE_TVBR                                                 04770000
+                                                                        04780000
+ERR_STG  DS    0H                      INSUFFICIENT STORAGE             04790000
+         LA    R15,RC20                                                 04800000
+                                                                        04810000
+*--------------------------------------------------------------         04820000
+*   IF ERRORS ENCOUNTERED, FREE THE TVBR VECTOR WE ALLOCATED            04830000
+*--------------------------------------------------------------         04840000
+FRE_TVBR DS    0H                                                       04850000
+         ICM   R4,15,@TVBR             TVBR CREATED?                    04860000
+         BZ    EXIT                    SKIP RELEASE IF NOT              04870000
+         STM   R14,R1,STATREGS         PRESERVE COMPLETION STATUS       04880000
+                                                                        04890000
+         $RETSTOR (R4)                                                  04900000
+                                                                        04910000
+         LM    R14,R1,STATREGS         PRESERVE COMPLETION STATUS       04920000
+         DROP  R4,R8                   TVBRVEC, $NAVPARM                04930000
+                                                                        04940000
+*--------------------------------------------------------------         04950000
+*   RETURN TO CALLER                                                    04960000
+*--------------------------------------------------------------         04970000
+EXIT     DS    0H                                                       04980000
+         #EXIT ,                       RETURN                           04990000
+                                                                        05000000
+         EJECT                                                          05010000
+***************************************************************         05020000
+*                                                                       05030000
+* ROUTINE:  NAVPSCAN - Select column/variable for screen set            05040000
+*                                                                       05050000
+* DESCRIPTION:                                                          05060000
+*                                                                       05070000
+*    Visit each $NAVPARM column/variable entry that contains a          05080000
+*    screen set identifier matching that of the callers                 05090000
+*    argument. For each match found, invoke the processing              05100000
+*    routine provided.  Finally, return the number of all               05110000
+*    $NAVPARM variables that reside on the named screen set.            05120000
+*                                                                       05130000
+*                                                                       05140000
+* ON ENTRY:                                                             05150000
+*                                                                       05160000
+*    R1  - addr of $NAVPARM                                             05170000
+*    R0  - addr of screen(set) name                                     05180000
+*    R15 - exit routine EPA or zero                                     05190000
+*                                                                       05200000
+*                                                                       05210000
+* ON EXIT:                                                              05220000
+*                                                                       05230000
+*    R15 contains one of the following return codes                     05240000
+*                                                                       05250000
+*          RC00 - completed without error                               05260000
+*          RC04 - invalid $NAVPARM                                      05270000
+*          RCXX - exit routine ended with error                         05280000
+*                                                                       05290000
+*    R0  - exit routine reason code or zero                             05300000
+*                                                                       05310000
+*    R1  - number of variables from the given screen(set)               05320000
+*                                                                       05330000
+***************************************************************         05340000
+NAVPSCAN DS    0H                                                       05350000
+         STM   R0,R15,REGSAVE          SAVE MAINLINE REGS               05360000
+         LR    R8,R1                   NAVPARM                          05370000
+         USING $NAVPARM,R8             ADDRESSABILITY                   05380000
+         LR    R2,R0                   SCREEN SET NAME PTR              05390000
+         LR    R3,R15                  PROCESSING ROUTINE OR ZERO       05400000
+                                                                        05410000
+         SR    R7,R7                   NUMBER OF ENTRIES PROCESSED      05420000
+         LH    R6,IXRNVARS             TOTAL NUMBER OF ENTRIES          05430000
+         LTR   R6,R6                   REASONABLE?                      05440000
+         BNP   NAVP_INV                FAIL IF NOT                      05450000
+                                                                        05460000
+*--------------------------------------------------------------         05470000
+*    SCAN ALL NAVPARM ENTRIES FOR THOSE MATCHING SCREEN(SET)            05480000
+*--------------------------------------------------------------         05490000
+         L     R5,IXREPOFF             OFFSET TO COL/VAR ENTRY ARRAY    05500000
+         LA    R5,$NAVPARM(R5)         CONVERT TO ADDRESS               05510000
+         USING IXRCOLDF,R5             ENTRY FORMAT                     05520000
+                                                                        05530000
+NAVPVAR  DS    0H                      PROCESS VARIABLE                 05540000
+         CLC   IXRSCRNM,0(R2)          MATCHING SCREEN(SET) NAME?       05550000
+         BNE   NAVPNEXT                SKIP IF NOT                      05560000
+         LA    R7,1(,R7)               TALLY MATCHING ENTRIES           05570000
+                                                                        05580000
+*--------------------------------------------------------------         05590000
+*   INVOKE SERVICE ROUTINE FOR MATCHING NAVPARM VARS                    05600000
+*--------------------------------------------------------------         05610000
+         LA    R0,$NAVPARM             R0 <== NAVPARM PREFIX            05620000
+         LR    R1,R5                   R1 <== NAVPARM VAR ENTRY         05630000
+         LTR   R15,R3                  PROCESSING ROUTINE PROVIDED?     05640000
+         BZ    NAVPNEXT                SKIP IF NOT                      05650000
+         BASR  R14,R15                 PROCESS ENTRY                    05660000
+         LTR   R15,R15                 ERROR RETURN/REASON ENCOUNTERED? 05670000
+         BNZ   NAVPRET                 TERMINATE SCAN IF SO             05680000
+                                                                        05690000
+*--------------------------------------------------------------         05700000
+*   PROCESS ALL NAVPARM COLUMN/VARIABLE ENTRIES                         05710000
+*--------------------------------------------------------------         05720000
+NAVPNEXT DS    0H                                                       05730000
+         LA    R5,IXRCDLEN(,R5)        ADVANCE TO NEXT VARIABLE ENTRY   05740000
+         BCT   R6,NAVPVAR              PROCESS NEXT VARIABLE            05750000
+                                                                        05760000
+*--------------------------------------------------------------         05770000
+*   RETURN COMPLETION STATUS TO CALLER                                  05780000
+*--------------------------------------------------------------         05790000
+         LA    R15,RC00                NORMAL RC                        05800000
+         LA    R0,RSN00                NORMAL RSN                       05810000
+         B     NAVPRET                 DONE                             05820000
+                                                                        05830000
+NAVP_INV DS    0H                      INVALID NAVPARM                  05840000
+         LA    R15,RC04                                                 05850000
+         SR    R0,R0                                                    05860000
+                                                                        05870000
+NAVPRET  DS    0H                      COMPLETE / TERMINATED            05880000
+         LR    R1,R7                   NUMBER OF MATCHING VARS          05890000
+         LM    R2,R14,REGSAVE+8        RESTORE MAINLINE REGS            05900000
+         BR    R14                     DONE                             05910000
+         DROP  R5,R8                   IXRCOLDF, $NAVPARM               05920000
+                                                                        05930000
+         EJECT                                                          05940000
+***************************************************************         05950000
+*                                                                       05960000
+* ROUTINE: NAVPLINK - identify region R ENTRIES TO REGION DEFS          05970000
+*                                                                       05980000
+* DESCRIPTION:                                                          05990000
+*                                                                       06000000
+*    This routine is invoked as a NAVPSCAN exit routine to              06010000
+*    acquire the number of $NAVPARM variables associated with a         06020000
+*    screen (set) and the configuration of the regions                  06030000
+*    containing those variables.  Common SRG* data items are            06040000
+*    updated to convey the following:                                   06050000
+*                                                                       06060000
+*      - lowest  (outermost) region nesting depth of any var            06070000
+*      - highest (innermost) region nesting depth of any var            06080000
+*      - addr of region definition of (some) highest depth var          06090000
+*                                                                       06100000
+*                                                                       06110000
+* ON ENTRY:                                                             06120000
+*                                                                       06130000
+*    R0 - addr of $NAVPARM                                              06140000
+*    R1 - addr of a $NAVPARM column/variable entry (IXRCOLDF)           06150000
+*                                                                       06160000
+*                                                                       06170000
+* ON EXIT:                                                              06180000
+*                                                                       06190000
+*    R15 contains zero                                                  06200000
+*                                                                       06210000
+***************************************************************         06220000
+NAVPLINK DS    0H                                                       06230000
+         STM   R0,R15,REGSAVE2         NAVPARM SCAN ROUTINE EXIT        06240000
+                                                                        06250000
+         LR    R8,R0                   NAVPARM BASE                     06260000
+         USING $NAVPARM,R8                                              06270000
+                                                                        06280000
+         LR    R5,R1                   NAVPARM VAR ENTRY                06290000
+         USING IXRCOLDF,R5                                              06300000
+                                                                        06310000
+         USING RGNTRY,R7               STRUCTURE                        06320000
+         ICM   R7,15,IXRRGNTY          REGION TREE ENTRY IF SUBRGN      06330000
+         BNZ   NVPFOUND                                                 06340000
+                                                                        06350000
+         L     R3,@EXRGNET                                              06360000
+E        USING EXRGNET,R3              REGION TREE DESCRIPTOR           06370000
+T        USING RGNTREE,E.EXRNROOT      REGION TREE ROOT                 06380000
+         LA    R7,T.RGTROOT            REGION TREE ROOT, WHOLE PSPACE   06390000
+         DROP  T,E                     RGNTREE, EXRGNET                 06400000
+                                                                        06410000
+*--------------------------------------------------------------         06420000
+*   IDENTIFY BOUNDARY REGIONS AND VARIABLE NESTING LEVELS               06430000
+*--------------------------------------------------------------         06440000
+NVPFOUND DS    0H                                                       06450000
+         SR    R0,R0                   PREPARE FOR INSERT               06460000
+         BCTR  R0,0                    ONE'S COMPLEMENT                 06470000
+         ICM   R0,1,RGNSCOR#+(RGSLVL-RGNSCORE) COMPLEMENTED NEST LVL    06480000
+         LCR   R0,R0                   ACQUIRE DEPTH RELATIVE TO ONE    06490000
+                                                                        06500000
+         CH    R0,SRGLVLMN             FIRST RGN NEST LEVEL W/ VAR?     06510000
+         BNL   *+8                     SKIP IF NOT                      06520000
+         STH   R0,SRGLVLMN             LOW WATERMARK LEVEL NUMBER       06530000
+                                                                        06540000
+         CH    R0,SRGLVLMX             HIGHEST RGN NEST LEVEL W/ VAR?   06550000
+         BNH   *+12                    SKIP IF NOT                      06560000
+         STH   R0,SRGLVLMX             HIGH WATERMARK LEVEL NUMBER      06570000
+         ST    R7,SRGNMAXP             SAVE PTR TO DEFINITION           06580000
+         DROP  R7,R5,R8                RGNTYR, IXRCOLDF, NAVPARM        06590000
+                                                                        06600000
+*--------------------------------------------------------------         06610000
+*   RETURN TO CALLER                                                    06620000
+*--------------------------------------------------------------         06630000
+         SR    R15,R15                 SUCCESS                          06640000
+         LM    R0,R14,REGSAVE2         RESTORE MAINLINE REGS            06650000
+         BR    R14                                                      06660000
+                                                                        06670000
+         EJECT                                                          06680000
+***************************************************************         06690000
+*                                                                       06700000
+* ROUTINE: BLDVARE - Build TVBR variable entry                          06710000
+*                                                                       06720000
+* DESCRIPTION:                                                          06730000
+*                                                                       06740000
+*    Format a TVBR entry in the next available slot denoted             06750000
+*    by the global @TVBRVAR ptr.  Information summarizing the           06760000
+*    associated region definition is inserted in the entry              06770000
+*    using the INITNTRY routine .                                       06780000
+*                                                                       06790000
+*                                                                       06800000
+* ON ENTRY:                                                             06810000
+*                                                                       06820000
+*    R0 - addr of $NAVPARM                                              06830000
+*    R1 - addr of available $NAVPARM column/variable entry              06840000
+*                                                                       06850000
+*                                                                       06860000
+* ON EXIT:                                                              06870000
+*                                                                       06880000
+*    R15 contains one of the following return codes                     06890000
+*                                                                       06900000
+*        RC00 - TVBR variable entry created without error               06910000
+*        RC04 - region associated with variable is not defined          06920000
+*                                                                       06930000
+***************************************************************         06940000
+BLDVARE  DS    0H                                                       06950000
+         STM   R0,R15,REGSAVE2         NAVPARM SCAN PROCESSING RTN      06960000
+                                                                        06970000
+         LR    R8,R0                   NAVPARM BASE                     06980000
+         USING $NAVPARM,R8                                              06990000
+                                                                        07000000
+         LR    R5,R1                   NAVPARM VAR ENTRY                07010000
+         USING IXRCOLDF,R5                                              07020000
+                                                                        07030000
+*--------------------------------------------------------------         07040000
+*   CONSTRUCT TVBR VAR ENTRY DESCRIBING CURRENT NAVPARM VAR             07050000
+*--------------------------------------------------------------         07060000
+         L     R0,@TVBR                R0 <== TVBR VECTOR BASE          07070000
+         L     R1,IXRRGNTY             R1 <== REGION DEFINITION         07080000
+         BAS   R14,INITNTRY            INITIALIZATION OF TVBR ENTRY     07090000
+                                                                        07100000
+         LR    R3,R1                   RETURN ALLOCATED/FORMATTED SLOT  07110000
+         USING TVVAR,R3                TIGHTEN ADDRESSABILITY           07120000
+         ST    R5,TVVCOLDF             NAVPARM ENTRY PTR                07130000
+         MVI   TVVOVAR,TRUE            VARIABLE DEFINED IN THIS ENTRY   07140000
+         DROP  R3,R5,R8                TVVAR, IXRCOLDF, NAVPARM         07150000
+                                                                        07160000
+*--------------------------------------------------------------         07170000
+*   RETURN VAR ENTRY COMPLETION STATUS                                  07180000
+*--------------------------------------------------------------         07190000
+         LA    R15,RC00                SUCCESS                          07200000
+         B     BLDVXIT                 DONE                             07210000
+                                                                        07220000
+BLDVNRGN DS    0H                                                       07230000
+         LA    R15,RC04                NAMED REGION NOT DEFINED         07240000
+                                                                        07250000
+BLDVXIT  DS    0H                                                       07260000
+         LM    R0,R14,REGSAVE2         RESTORE MAINLINE REGS            07270000
+         BR    R14                                                      07280000
+                                                                        07290000
+         EJECT                                                          07300000
+***************************************************************         07310000
+*                                                                       07320000
+* ROUTINE: INITNTRY - Initialize a TVBRVEC entry                        07330000
+*                                                                       07340000
+* DESCRIPTION:                                                          07350000
+*                                                                       07360000
+*    Format a TVBR entry in the next available slot as denoted          07370000
+*    by the global @TVBRVAR ptr.  Information summarizing the           07380000
+*    associated region definition is inserted in the entry.             07390000
+*                                                                       07400000
+*                                                                       07410000
+* ON ENTRY:                                                             07420000
+*                                                                       07430000
+*    R0 - addr of TVBR vector base                                      07440000
+*    R1 - addr of RGNTRY                                                07450000
+*                                                                       07460000
+*                                                                       07470000
+* ON EXIT:                                                              07480000
+*                                                                       07490000
+*    R1 - addr of newly allocated / formatted TVBR entry (TVVAR)        07500000
+*                                                                       07510000
+***************************************************************         07520000
+INITNTRY DS    0H                                                       07530000
+         STM   R0,R15,REGSAVE3         PRESERVE MAINLINE REGS           07540000
+                                                                        07550000
+         LR    R4,R0                   TVBR BASE                        07560000
+         USING TVBRVEC,R4                                               07570000
+                                                                        07580000
+         LR    R7,R1                   ASSOCIATED RGN DEFINITION        07590000
+         USING RGNTRY,R7                                                07600000
+                                                                        07610000
+*--------------------------------------------------------------         07620000
+*   ACQUIRE FREE TVBR ENTRY SLOT, RESET FOR NEXT REQUEST                07630000
+*--------------------------------------------------------------         07640000
+         L     R3,@TVBRVAR             FREE TVBR ENTRY SLOT             07650000
+         USING TVVAR,R3                TVBR ENTRY FORMAT                07660000
+         ST    R3,@TVBREND             RETAIN ADDR OF LAST ENTRY        07670000
+         LA    R0,TVVAR+TVVLN          PREPARE FOR NEXT CALL            07680000
+         ST    R0,@TVBRVAR             SAVE UPDATED ENTRY PTR           07690000
+                                                                        07700000
+*--------------------------------------------------------------         07710000
+*   TVBR ENTRY COMMON FORMATTING                                        07720000
+*--------------------------------------------------------------         07730000
+         ST    R7,TVVRGNTY             REGION ESTABLISHED FOR VAR       07740000
+                                                                        07750000
+         TM    RGNFLAG1,RGRPTRGN       REGION REPEATS DIRECTLY?         07760000
+         BNO   *+8                     SKIP IF NOT                      07770000
+         MVI   TVVORPT,TRUE            INDICATE DIRECTLY REPEATING RGN  07780000
+                                                                        07790000
+         MVI   FWORD,TVBIFSTD          ASSUME RGN MEMBER OF STD IMAGE   07800000
+         TM    RGNFLAG1,RGWRPGRP       REGION MEMBER OF WRAP GROUP?     07810000
+         BNO   *+8                     SKIP IF NOT                      07820000
+         MVI   FWORD,TVBIFWRP          WRAP IMAGE REGION                07830000
+                                                                        07840000
+         OC    TVBITYPS,FWORD          MASK DENOTES ALL MANAGED TYPES   07850000
+         OC    TVVITYPE,FWORD          TAG VARIABLE ENTRY APPROPRIATELY 07860000
+                                                                        07870000
+         SR    R0,R0                   PREPARE FOR INSERT               07880000
+         BCTR  R0,0                    ONE'S COMPLEMENT                 07890000
+         ICM   R0,1,RGNSCOR#+(RGSLVL-RGNSCORE) COMPLEMENTED NEST LVL    07900000
+         LCR   R0,R0                   ACQUIRE DEPTH RELATIVE TO ONE    07910000
+         STC   R0,TVVOLVL              RETAIN FOR SEQUENCING            07920000
+                                                                        07930000
+*--------------------------------------------------------------         07940000
+*   ADVANCE TVBR FREE SLOT PTR TO NEXT ENTRY                            07950000
+*--------------------------------------------------------------         07960000
+         LA    R1,TVVAR                RETURN ACQUIRED/FORMATTED ENTRY  07970000
+         SR    R15,R15                 RETURN CODES NOT DEFINED         07980000
+         LM    R2,R14,REGSAVE3+8       RESTORE MAINLINE REGS            07990000
+         BR    R14                     RETURN                           08000000
+         DROP  R3,R4,R7                TVVAR, TVBRVEC, RGNTRY           08010000
+                                                                        08020000
+         EJECT                                                          08030000
+***************************************************************         08040000
+*                                                                       08050000
+*   LOCAL READ ONLY STORAGE                                             08060000
+*                                                                       08070000
+***************************************************************         08080000
+         LTORG ,                                                        08090000
+                                                                        08100000
+         PRINT NOGEN                                                    08110000
+         ICVT  ,                                                        08120000
+         ITASK ,                                                        08130000
+         END   ,                                                        08140000

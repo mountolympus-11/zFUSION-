@@ -1,0 +1,228 @@
+ITXPISRT TITLE '- ADD ENTRY TO TXP BUFFER'                              00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE: ITXPISRT - ADD ENTRY TO TXP BUFFER                           00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    THIS ROUTINE IS USED TO INSERT A DATA AREA PROVIDED BY THE         00080000
+*    REQUESTOR INTO THE BULK STORAGE AREA OF THE CURRENT TXP            00090000
+*    BUFFER.  IF A STORAGE LENGTH IS PROVIDED WITHOUT A USER            00100000
+*    DATA AREA DESIGNATED, A CLEARED STORAGE EXTENT OF THE              00110000
+*    GIVEN SIZE IS ALLOCATED AND RETURNED TO THE REQUESTOR              00120000
+*    FOR SUBSEQUENT CUSTOM FORMATTING.                                  00130000
+*                                                                       00140000
+*    OPTIONALLY, AN INSERT REQUEST CAN INCLUDE A FUNCTION               00150000
+*    AND SUBFUNCTION CODE WHEN AN ARRAY OF FUNCTION RESPONSES           00160000
+*    IS MANAGED IN A SINGLE TXP BUFFER.  UPON RECEIPT OF A              00170000
+*    NEW (NON-ZERO) FUNCTION AND SUBFUNCTION, THE NEXT ELEMENT          00180000
+*    OF THE FUNCTION ARRAY IS INITIALIZED WITH THE GIVEN CODES          00190000
+*    AND THE OFFSET TO THE BULK STORAGE FREE AREA IS INSERTED           00200000
+*    IN THE FUNCTION ARRAY ENTRY, SIMPLFYING LOCATOR LOGIC              00210000
+*    FOR THE INTENDED RECEIVER.                                         00220000
+*                                                                       00230000
+*    TO PROVIDE TXP BUFFER MANAGEMENT FOR RU'S CREATED AS               00240000
+*    INDEPENDENT PROCESSES, PARTICULARLY FOR CONVERSATIONAL             00250000
+*    PROCESSES, THE INSERT LOGIC EXAMINES THE PCB OF THE PARENT         00260000
+*    PROCESS FOR AN ACTIVE TXP BUFFER ANCHOR IF ONE IS NOT              00270000
+*    ASSOCIATED WITH THE CURRENT PROCESS AT ENTRY.                      00280000
+*                                                                       00290000
+*    WHEN AN OUT-OF-SPACE CONDITION IS ENCOUNTERED AND EXPAND=NO        00300000
+*    IS SPECIFIED, THE INSERT FAILS WITH RC04 (OVERFLOW) AND            00310000
+*    THE TXP BUFFER REMAINS UNCHANGED.  IF EXPAND=YES IS                00320000
+*    SPECIFIED, THE INSERT WILL ALWAYS SUCCEED BUT THE TXP              00330000
+*    BUFFER MAY BE REALLOCATED (MOVED), AS INDICATED BY THE             00340000
+*    RC00/RSN04 COMBINATION.  ANY ADDRESSABILITY TO THE PRIOR           00350000
+*    TXP BUFFER MAINTAINED BY THE CALLER MUST BE REESTABLISHED.         00360000
+*    THE $XPBUFR ADDPTR,REMPTR SERVICES CAN BE USED TO ASSIST.          00370000
+*                                                                       00380000
+*                                                                       00390000
+* ON ENTRY:                                                             00400000
+*                                                                       00410000
+*    R1  CONTAINS THE ADDR OF A PARAMETER LIST CONSTRUCTED AS           00420000
+*        FOLLOWS:                                                       00430000
+*                                                                       00440000
+*        +00 - BLOCK ADDRESS OR ZERO FOR SPACE RESERVATION ONLY.        00450000
+*              THE HIGH ORDER BIT, IF SET, INDICATES EXPAND=YES         00460000
+*                                                                       00470000
+*        +04 - BLOCK LENGTH                                             00480000
+*        +08 - FUNCTION CODE OR ZERO IF ONLY/CONTINUATION               00490000
+*        +12 - SUBFUNCTION CODE                                         00500000
+*                                                                       00510000
+*                                                                       00520000
+* ON EXIT:                                                              00530000
+*                                                                       00540000
+*    R15 CONTAINS ONE OF THE FOLLOWING RETURN CODES.                    00550000
+*    R0  MAY CONTAIN A REASON CODE.                                     00560000
+*                                                                       00570000
+*        RC00 - ENTRY ADDED TO TXP BUFFER, THE STORAGE AREA             00580000
+*               EXTENT ADDRESS IS RETURNED IN R1                        00590000
+*                                                                       00600000
+*               RSN00 - NO TXP BUFFER REALLOCATION OCCURRED             00610000
+*               RSN04 - THE TXP BUFFER WAS REALLOCATED / MOVED          00620000
+*                                                                       00630000
+*        RC04 - BULK STORAGE AREA OVERFLOW                              00640000
+*                                                                       00650000
+*        RC08 - FUNCTION ARRAY OVERFLOW                                 00660000
+*                                                                       00670000
+*        RC12 - TXP BUFFER NOT ALLOCATED                                00680000
+*                                                                       00690000
+**<DOC-OFF>****************************************************         00700000
+                                                                        00710000
+         EJECT                                                          00720000
+         #WORK ,                                                        00730000
+                                                                        00740000
+EXPAND   DS    F                  HIGH ORDER BIT SET IF EXPAND=YES      00750000
+RSNCODE  DS    F                  REASON CODE                           00760000
+                                                                        00770000
+         #ENDWORK ,                                                     00780000
+                                                                        00790000
+         EJECT                                                          00800000
+         TXPHDR ,                 TXP BUFFER                            00810000
+                                                                        00820000
+         EJECT                                                          00830000
+         REQHDR ,                 TRANSMISSION DESCRIPTOR               00840000
+                                                                        00850000
+         EJECT                                                          00860000
+         EQUS  ,                                                        00870000
+                                                                        00880000
+         EJECT ,                                                        00890000
+ITXPISRT #ENTER PREG=R8                                                 00900000
+                                                                        00910000
+         USING ITASK,R10          STDENV                                00920000
+         USING IPCB,R9                                                  00930000
+                                                                        00940000
+         L     R9,TSKPCBC         PROCESS MODE                          00950000
+                                                                        00960000
+         EJECT                                                          00970000
+*--------------------------------------------------------------         00980000
+*   FETCH PASSED PARAMETERS - LOCATE TXP BUFFER                         00990000
+*--------------------------------------------------------------         01000000
+         LM    R3,R6,0(R8)        FETCH PASSED PARAMETERS               01010000
+         ST    R3,EXPAND          R3 <== ENTRY ORIGIN ADDR / EXPAND     01020000
+         LA    R3,0(,R3)          SANITIZE                              01030000
+                                                                        01040000
+*                                 R4 <== ENTRY LENGTH                   01050000
+*                                 R5 <== FUNCTION CODE OR ZERO          01060000
+*                                 R6 <== SUBFUNCTION CODE               01070000
+                                                                        01080000
+         USING TXPHDR,R8          TXP BUFFER PREFIX                     01090000
+         ICM   R8,15,PCBXPBUF     TXP BUFFER ANCHORED IN PCB            01100000
+         BNZ   ISRT_GO            LOCATED IN CURRENT PCB                01110000
+         ICM   R9,15,PCBMPCB      ELSE EXAMINE PARENT PCB               01120000
+         BZ    ERR_REQ            INVALID REQUEST IF NOT AVAILABLE      01130000
+         ICM   R8,15,PCBXPBUF     TXP BUFFER ANCHOR IN PARENT PCB       01140000
+         BZ    ERR_REQ            INVALID REQUEST                       01150000
+         DROP  R9                 PCB                                   01160000
+                                                                        01170000
+*--------------------------------------------------------------         01180000
+*   IF NEW FUNCTION, ADD ENTRY TO FUNCTION ARRAY IF PRESENT             01190000
+*--------------------------------------------------------------         01200000
+ISRT_GO  DS    0H                                                       01210000
+         ICM   R7,15,TXPSFNXT     FUNCTION ARRAY ALLOCATED?             01220000
+         BZ    NO_FA              SKIP IF NOT                           01230000
+         LTR   R5,R5              FUNCTION CODE PROVIDED?               01240000
+         BZ    NO_FA              SKIP IF NOT                           01250000
+                                                                        01260000
+         USING TSFHDR,R7          FUNCTION ARRAY ENTRY FORMAT           01270000
+         LH    R2,TXPSFENT        FUNCTION ARRAY ENTRY COUNT            01280000
+         LA    R2,1(,R2)          ACCOUNT FOR NEW ENTRY                 01290000
+         CH    R2,TXPSFLIM        ONE ENTRY USED FOR DLM                01300000
+         BH    ERR_FA             FUNCTION ARRAY OVERFLOW               01310000
+         STH   R2,TXPSFENT        ELSE UPDATE PREFIX ACCORDINGLY        01320000
+         L     R15,TXPSFORG       FUNCTION ARRAY PREFIX IS ENTRY COUNT  01330000
+         ST    R2,0(,R15)         ACCOUNT FOR THIS ENTRY                01340000
+                                                                        01350000
+         STH   R5,TSFFUNC         POST FUNCTION                         01360000
+         STH   R6,TSFSUBF         POST SUBFUNCTION                      01370000
+                                                                        01380000
+         L     R0,TXPAVAIL        FREE STORAGE ORIGIN                   01390000
+         S     R0,TXPSFORG        DISPLACEMENT TO FUNCTION ENTRY        01400000
+         ST    R0,TSFDISPL        SIMPLIFIES RESULT SCAN                01410000
+         LA    R7,TSFNEXT         FA ENTRY FOR NEXT PASS                01420000
+         ST    R7,TXPSFNXT        UPDATE POSITION ACCORDINGLY           01430000
+         DROP  R7                 TSFHDR                                01440000
+NO_FA    DS    0H                                                       01450000
+                                                                        01460000
+*--------------------------------------------------------------         01470000
+*   IF BULK STORAGE NOT AVAIL, REALLOC IF EXPAND=YES                    01480000
+*--------------------------------------------------------------         01490000
+SPCALLOC DS    0H                                                       01500000
+         C     R4,TXPAVREM        SUFFICIENT SPACE REMAINS?             01510000
+         BNH   SPCFMT             FORMAT IT IF SO                       01520000
+         ICM   R0,15,EXPAND       EXPAND=YES?                           01530000
+         BNM   ERR_BULK                                                 01540000
+                                                                        01550000
+         $XPBUFR REALLOC,SIZE=(R4)                                      01560000
+         BNZ   ERR_BULK                                                 01570000
+                                                                        01580000
+         LR    R8,R1              REFRESH TXP PREFIX PTR                01590000
+         MVC   RSNCODE,=A(RSN04)  INDICATE REALLOCATION OCCURRED        01600000
+         B     SPCALLOC           TRY AGAIN                             01610000
+                                                                        01620000
+*--------------------------------------------------------------         01630000
+*   ACQUIRE AND FORMAT SPACE                                            01640000
+*--------------------------------------------------------------         01650000
+SPCFMT   DS    0H                                                       01660000
+         L     R1,TXPXPH          LOCATE TRANSMISSION SECTION ORIGIN    01670000
+         USING REQHDR,R1          PREPARE FOR LENGTH UPDATE             01680000
+         LH    R0,REQHLEN         ACCOUNT FOR NEW BLOCK                 01690000
+         AR    R0,R4                                                    01700000
+         STH   R0,REQHLEN                                               01710000
+         DROP  R1                 REQHDR                                01720000
+                                                                        01730000
+         LTR   R3,R3              BLOCK PROVIDED TO COPY?               01740000
+         BZ    SPCUPDAT           SPACE RESERVATION ONLY                01750000
+                                                                        01760000
+         L     R14,TXPAVAIL       FREE STORAGE PTR                      01770000
+         LR    R15,R4             BLOCK LENGTH PARM                     01780000
+         LR    R0,R3              BLOCK ORIGIN PARM                     01790000
+         LR    R1,R15             SOURCE LENGTH = TARGET LENGTH         01800000
+         MVCL  R14,R0             COPY, UPDATING FREE PTR AND LENGTH    01810000
+                                                                        01820000
+SPCUPDAT DS    0H                 UPDATE FREE SPACE PTR & LENGTH        01830000
+         L     R0,TXPAVREM        FREE SPACE PRIOR TO INSERTION         01840000
+         SR    R0,R4              ACCOUNT FOR ALLOCATION                01850000
+         ST    R0,TXPAVREM        SAVE UPDATED LENGTH                   01860000
+                                                                        01870000
+         L     R1,TXPAVAIL        R1 <== ASSIGNED STORAGE PTR           01880000
+         LA    R2,0(R4,R1)        IDENTIFY NEXT FREE AREA               01890000
+         ST    R2,TXPAVAIL        SAVE PTR FOR NEXT REQ                 01900000
+                                                                        01910000
+*--------------------------------------------------------------         01920000
+*   RETURN COMPLETION STATUS TO REQUESTOR                               01930000
+*--------------------------------------------------------------         01940000
+         LA    R15,RC00           NORMAL COMPLETION                     01950000
+         L     R0,RSNCODE         REFLECT ADDITIONAL CONCERNS           01960000
+         B     EXIT               DONE                                  01970000
+                                                                        01980000
+ERR_BULK DS    0H                 BULK STORAGE AREA OVERFLOW            01990000
+         LA    R15,RC04                                                 02000000
+         SR    R0,R0                                                    02010000
+         B     EXIT                                                     02020000
+                                                                        02030000
+ERR_FA   DS    0H                 FUNCTION ARRAY OVERFLOW               02040000
+         LA    R15,RC08                                                 02050000
+         SR    R0,R0                                                    02060000
+         B     EXIT                                                     02070000
+                                                                        02080000
+ERR_REQ  DS    0H                 TXP BUFFER NOT AVAILABLE              02090000
+         LA    R15,RC12                                                 02100000
+         SR    R0,R0                                                    02110000
+                                                                        02120000
+EXIT     DS    0H                                                       02130000
+         #EXIT ,                                                        02140000
+                                                                        02150000
+         EJECT ,                                                        02160000
+***************************************************************         02170000
+*                                                                       02180000
+*   LOCAL READ/ONLY STORAGE AREAS                                       02190000
+*                                                                       02200000
+***************************************************************         02210000
+         LTORG ,                                                        02220000
+                                                                        02230000
+         PRINT NOGEN                                                    02240000
+         ICVT  ,                                                        02250000
+         ITASK ,                                                        02260000
+         IPCB  ,                                                        02270000
+         END   ,                                                        02280000

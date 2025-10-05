@@ -1,0 +1,569 @@
+IVDBGET  TITLE '- ACQUIRE USE OF VDB TABLE DEFINITION'                  00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE: IVDBGET - Acquire use of VDB table definition                00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This routine serves as a bridge between the VDB SQL                00080000
+*    processor and the VDB table definition LOAD facility.  It          00090000
+*    provides a mechanism for maintaining VDB table definitions         00100000
+*    over a series of SQL requests without requiring frequent           00110000
+*    reloads.                                                           00120000
+*                                                                       00130000
+*    A binary tree of RVD (VDB table reference) entries mapped          00140000
+*    by VDBREFNT is used to anchor both short and long term             00150000
+*    requests for VDB table definitions (PRJEXRTR).  RVDs serve         00160000
+*    as an anchor for the VDB table definitions proper, as well         00170000
+*    as a collection point for table access statistics, etc.            00180000
+*    The binary tree provides ordering and efficient searching          00190000
+*    by table name.  RVDs are also enqueued in an unordered             00200000
+*    list (PRJEXRFQ) to simplify serial scan.                           00210000
+*                                                                       00220000
+*    RVDs are anchored in the IPROJ and are intertask shared.           00230000
+*    Locks are not required to access the RVD tree/list                 00240000
+*    because, once created, they exist for the life of the              00250000
+*    project.  However, the usual CS/CDS logic is required to           00260000
+*    add to the structures and to attach and/or delete the              00270000
+*    associated VDB table definitions.                                  00280000
+*                                                                       00290000
+*                                                                       00300000
+* NOTES:                                                                00310000
+*                                                                       00320000
+*    The RVD btree anchored in PRJEXRTR is ordered on VDB               00330000
+*    table name.  Given any particular RVD instance, including          00340000
+*    the complete tree root at *PRJEXRTR, the RVDLEFT subtree           00350000
+*    contains definitions for table names lower in the                  00360000
+*    collating sequence and RVDRIGHT contains those higher.             00370000
+*                                                                       00380000
+*    PRJIRVDB, the current VDBCACHE value, must be updated              00390000
+*    anytime that an inactive entry is activated.  The first            00400000
+*    VDB load does not constitute an "activation".                      00410000
+*                                                                       00420000
+*                                                                       00430000
+* ON ENTRY:                                                             00440000
+*                                                                       00450000
+*    R0  contains the address of a 256 byte workarea or zero            00460000
+*                                                                       00470000
+*    R1  points to a parameter list described by the VDBGETP            00480000
+*        mapping                                                        00490000
+*                                                                       00500000
+*                                                                       00510000
+* ON EXIT:                                                              00520000
+*                                                                       00530000
+*    R15 and R0 contain a return code / reason code pair                00540000
+*        usually reflected directly from IVDBLOAD.  Refer to            00550000
+*        that module for detailed descriptions.  If a storage           00560000
+*        failure occurs, RC16 is used compatibly with IVDBLOAD.         00570000
+*        Return codes RC20 and beyond are local to this service.        00580000
+*                                                                       00590000
+*        RC00 - VDB definition returned via VDBLRET                     00600000
+*                                                                       00610000
+*               R0 - number of columns                                  00620000
+*               R1 - addr of the VDBLRET return area                    00630000
+*                                                                       00640000
+*        RC04 - ref IVDBLOAD                                            00650000
+*                                                                       00660000
+*        RC08 - ref IVDBLOAD                                            00670000
+*                                                                       00680000
+*        RC12 - ref IVDBLOAD                                            00690000
+*                                                                       00700000
+*        RC16 - storage not available                                   00710000
+*                                                                       00720000
+*        RC20 - invalid DML statement type code (VDBLOADP)              00730000
+*                                                                       00740000
+*        RC24 - IVDBXREF encountered error, messages returned           00750000
+*                                                                       00760000
+*               R0 - IVDBXREF completion code                           00770000
+*                                                                       00780000
+**<DOC-OFF>****************************************************         00790000
+                                                                        00800000
+         EJECT                                                          00810000
+***************************************************************         00820000
+*                                                                       00830000
+* MAINTENANCE:                                                          00840000
+*                                                                       00850000
+*    08/28/95 R. Turgeon                                                00860000
+*             Initial version                                           00870000
+*                                                                       00880000
+***************************************************************         00890000
+                                                                        00900000
+         EJECT                                                          00910000
+         #WORK LENGTH=256                                               00920000
+                                                                        00930000
+FLAGS    DS    X             FLAG BYTE                                  00940000
+F$RNALO  EQU   X'80'            VDBREFNT ALLOCATED                      00950000
+F$RNUSE  EQU   X'40'            VDBREFNT USED (POSTED TO IPROJ)         00960000
+F$VLOAD  EQU   X'20'            VDBLRET (VDBLOAD) CONSTRUCTED           00970000
+F$VLUSE  EQU   X'10'            VDBLRET ATTACHED TO VDBREFNT            00980000
+                                                                        00990000
+@RNODE   DS    A             CANDIDATE VDBREFNT NODE ADDR               01000000
+@RANCHOR DS    A             ADDR OF VDBREFNT NODE ANCHOR WORD          01010000
+@ALOLRET DS    A             ALLOCATED VDBLOAD / VDBLRET RETURN AREA    01020000
+@USELRET DS    A             POSTED (USED) VDBLOAD / VDBLRET RET AREA   01030000
+                                                                        01040000
+@MSGA    DS    A             MESSAGE CONSTRUCTION BUFFER ADDR           01050000
+@MSGL    DS    F             MESSAGE CONSTRUCTION BUFFER LENGTH         01060000
+$VDBLOAD DS    XL(PVDBPLN)   MODIFIABLE COPY OF VDBLOADP REQUEST BLOCK  01070000
+                                                                        01080000
+RETREGS  DS    3F            R15-R1 STAGED FOR RETURN                   01090000
+                                                                        01100000
+         #ENDWORK ,                                                     01110000
+                                                                        01120000
+         EJECT                                                          01130000
+         VDBGETP ,           REQUEST LIST                               01140000
+                                                                        01150000
+         EJECT                                                          01160000
+         VDBLOADP ,          IVDBLOAD REQUEST / RETURN LISTS            01170000
+                                                                        01180000
+         EJECT                                                          01190000
+         VDBREFNT ,          VDB TABLE DEF REFERENCE ENTRY              01200000
+                                                                        01210000
+         EJECT                                                          01220000
+         IPROJ ,             PROJECT                                    01230000
+                                                                        01240000
+         EJECT                                                          01250000
+         EQUS ,                                                         01260000
+                                                                        01270000
+         EJECT                                                          01280000
+IVDBGET  #ENTER BASE=R12,PREG=R8,WAPASS=YES                             01290000
+                                                                        01300000
+         USING ITASK,R10          ITASK ADDRESSABILITY                  01310000
+                                                                        01320000
+         EJECT                                                          01330000
+***************************************************************         01340000
+*                                                                       01350000
+*   General initialization, locate the IPROJ                            01360000
+*                                                                       01370000
+***************************************************************         01380000
+                                                                        01390000
+         USING VDBGETP,R8         ENTRANCE LIST                         01400000
+         L     R1,GVDBLOAD        VDB LOAD PLIST                        01410000
+         MVC   $VDBLOAD,0(R1)     WORKING/MODIFIABLE COPY               01420000
+         MVC   @MSGA,GVDBMSGA     MESSAGE CONSTRUCTION AREA             01430000
+         MVC   @MSGL,GVDBMSGL     MESSAGE CONSTRUCTION AREA LENGTH      01440000
+                                                                        01450000
+         LA    R8,$VDBLOAD        LIFE OF FUNCTION VDB LOAD PLIST       01460000
+         USING VDBLOADP,R8        ONGOING REF AND POSSIBLE UPDATE       01470000
+                                                                        01480000
+         L     R2,TSKPCBC         ADDRESS OF CURRENT PCB                01490000
+         USING IPCB,R2            IPCB ADDRESSABILITY                   01500000
+                                                                        01510000
+         L     R9,PCBUSER         ADDRESS OF IUSER BLOCK                01520000
+         USING IUSER,R9                                                 01530000
+                                                                        01540000
+         L     R7,USRPROJ         ADDRESS OF IPROJ                      01550000
+         USING IPROJ,R7           LIFE OF FUNCTION                      01560000
+         DROP  R2,R9              IPCB, IUSER                           01570000
+                                                                        01580000
+         EJECT                                                          01590000
+***************************************************************         01600000
+*                                                                       01610000
+*   Locate an RVD (ref VDBREFNT) that represents the named              01620000
+*   VDB table.  If not found, a new RVD is created for enqueue          01630000
+*   in the proper position in the btree and in the unordered            01640000
+*   list.                                                               01650000
+*                                                                       01660000
+***************************************************************         01670000
+                                                                        01680000
+RVDSCAN  DS    0H                                                       01690000
+         NI    FLAGS,FF-F$RNUSE-F$VLUSE  RVD AND VDBLRET UNCOMMITTED    01700000
+                                                                        01710000
+         BAS   R14,LOCRVD         RETURN MATCHING RVD ENTRY             01720000
+         BZ    MATCHED            R1 <== MATCHING RVD                   01730000
+                                                                        01740000
+*--------------------------------------------------------------         01750000
+*   RVD not found for table, create one                                 01760000
+*--------------------------------------------------------------         01770000
+                                                                        01780000
+         ST    R1,@RANCHOR        RETAIN RVD ANCHOR ADDRESS (**RVD)     01790000
+                                                                        01800000
+         ICM   R1,15,@RNODE       NONZERO IF RVD PREV ALLOCATED         01810000
+         BNZ   MATCHED            RVD ALLOCATED BUT NOT YET USED        01820000
+                                                                        01830000
+         BAS   R14,ALLOCRVD       ALLOCATE AN RVD                       01840000
+         BNZ   ERR_STG            ATTRIBUTE TO STORAGE FAILURE IF NOT   01850000
+         ST    R1,@RNODE          RETAIN PTR TO ACQUIRED STORAGE        01860000
+         OI    FLAGS,F$RNALO      INDICATE RVD ALLOCATE OCCURRED        01870000
+                                                                        01880000
+MATCHED  DS    0H                 MATCHING RVD DELIVERED IN R1          01890000
+                                                                        01900000
+         EJECT                                                          01910000
+***************************************************************         01920000
+*                                                                       01930000
+*   The RVD representing a particular VDB table has been                01940000
+*   acquired or built.  Now, locate the table definition                01950000
+*   associated with the DML statement type.  The table                  01960000
+*   definition is loaded if it is not already available.                01970000
+*                                                                       01980000
+***************************************************************         01990000
+                                                                        02000000
+         LR    R9,R1              RVD ENTRY                             02010000
+         USING VDBREFNT,R9                                              02020000
+                                                                        02030000
+         LA    R2,0               SELECT?                               02040000
+         CLI   PVDBQTYP,C'S'                                            02050000
+         BE    QTYPE                                                    02060000
+                                                                        02070000
+         LA    R2,1               INSERT?                               02080000
+         CLI   PVDBQTYP,C'I'                                            02090000
+         BE    QTYPE                                                    02100000
+                                                                        02110000
+         LA    R2,2               UPDATE?                               02120000
+         CLI   PVDBQTYP,C'U'                                            02130000
+         BE    QTYPE                                                    02140000
+                                                                        02150000
+         LA    R2,3               DELETE?                               02160000
+         CLI   PVDBQTYP,C'D'                                            02170000
+         BNE   ERR_QTYP           ERROR OTHERWISE                       02180000
+                                                                        02190000
+QTYPE    DS    0H                                                       02200000
+         MH    R2,=AL2(RVDELN)    OFFSET TO DML ORIENTED INFO           02210000
+         LA    R6,RVDLOAD(R2)     ADDR OF DML SECTION ENTRY             02220000
+         USING RVDENTRY,R6                                              02230000
+                                                                        02240000
+         SR    R15,R15            PREPARE FOR RX CLEAR                  02250000
+         ST    R15,RVDELRU        NOW IS VERY RECENT USE                02260000
+                                                                        02270000
+*--------------------------------------------------------------         02280000
+*   attempt shared access of existing table description                 02290000
+*--------------------------------------------------------------         02300000
+                                                                        02310000
+         L     R1,RVDREFS         NUMBER OF TABLE REFERENCES            02320000
+         LA    R0,1(,R1)          ACCOUNT FOR THIS REFERENCE            02330000
+         CS    R1,R0,RVDREFS      SWAP IT IN                            02340000
+         BNE   *-8                PERSISTENCE                           02350000
+                                                                        02360000
+LOCKER   DS    0H                                                       02370000
+         ICM   R1,15,RVDELRET     TABLE DESCRIPTION AVAILABLE?          02380000
+         BZ    LOADVDB            LOAD IT IF NOT                        02390000
+                                                                        02400000
+         L     R0,RVDEUSE         CURRENT USE COUNT                     02410000
+         LR    R2,R0              ACCOUNT FOR THIS USE                  02420000
+         LA    R2,1(,R2)                                                02430000
+         LR    R3,R1                                                    02440000
+         CDS   R0,R2,RVDESYNC     NONZERO USE, LOCK THE TABLE DESC      02450000
+         BNE   LOCKER             THIS SHOULD DRAIN QUICKLY             02460000
+                                                                        02470000
+         ST    R1,@USELRET        RETAIN PTR TO POSTED TABLE DESC       02480000
+                                                                        02490000
+*---------------------------------------------------------------        02500000
+*   If inactive entry is activated, VDBCACHE stats update req'd         02510000
+*---------------------------------------------------------------        02520000
+                                                                        02530000
+         LTR   R0,R0              INACTIVE ENTRY BECOMES ACTIVE?        02540000
+         BNZ   NORMRET            SKIP IF REUSE, RVD AND VDBDEF EXIST   02550000
+                                                                        02560000
+LRUAGE   DS    0H                                                       02570000
+         L     R2,PRJIRVDB        CURRENT VDBCACHE STG COMMITMENT       02580000
+         LR    R0,R2              PREPARE FOR UPDATE                    02590000
+         S     R0,RVDESIZE        ACCOUNT FOR CURRENT AS NEWLY ACTIVE   02600000
+         CS    R2,R0,PRJIRVDB     UPDATE TOTAL INACTIVE                 02610000
+         BNE   LRUAGE             PERSISTENT UPDATE                     02620000
+         B     NORMRET            DONE, RVD AND VDBDEF EXIST            02630000
+                                                                        02640000
+         EJECT                                                          02650000
+****************************************************************        02660000
+*                                                                       02670000
+*   Invoke IVDBLOAD, IVDBXREF to prepare a new table description        02680000
+*                                                                       02690000
+****************************************************************        02700000
+                                                                        02710000
+LOADVDB  DS    0H                                                       02720000
+         TM    FLAGS,F$VLOAD      VDB LOAD PERFORMED PREVIOUSLY?        02730000
+         BO    LINKVDB            RETRY THE LINKUP IF SO                02740000
+                                                                        02750000
+         L     R1,RVDLCALL        NUMBER OF VDB LOAD REQUESTS           02760000
+         LA    R0,1(,R1)          ACCOUNT FOR THIS REQUEST              02770000
+         CS    R1,R0,RVDLCALL     UPDATE STATISTICS                     02780000
+         BNE   *-8                PERSISTENCE                           02790000
+                                                                        02800000
+         LA    R0,RVDESREQ        VDB LOAD BUFFER RECOMMENDATIONS       02810000
+         ST    R0,PVDBSREQ        INFO WAS RETAINED FROM LAST LOAD      02820000
+                                                                        02830000
+         @CALL IVDBLOAD,CTYPE=CVT,MF=(E,VDBLOADP)                       02840000
+                                                                        02850000
+         LTR   R15,R15            NORMAL COMPLETION?                    02860000
+         BNZ   EXIT               REFLECT ERROR IF NOT                  02870000
+                                                                        02880000
+         OI    FLAGS,F$VLOAD      CONSTRUCTED ON BEHALF OF THIS REQ     02890000
+         ST    R1,@ALOLRET        TABLE DESCRIPTION                     02900000
+                                                                        02910000
+         @CALL IVDBXREF,(*@ALOLRET,*@MSGA,*@MSGL),                     X02920000
+               CTYPE=CVT,MF=(E,MFE_LIST)                                02930000
+                                                                        02940000
+         LTR   R15,R15            TABLE IS USABLE?                      02950000
+         BNZ   ERR_XREF           REQUEST FAILED IF NOT                 02960000
+                                                                        02970000
+*---------------------------------------------------------------        02980000
+*   Post completed table description, it may not stick                  02990000
+*---------------------------------------------------------------        03000000
+                                                                        03010000
+LINKVDB  DS    0H                                                       03020000
+         L     R0,RVDEUSE         USE COUNT                             03030000
+         SR    R1,R1              VDB LOAD NOT YET POSTED               03040000
+                                                                        03050000
+         LR    R2,R0              CURRENT USE COUNT                     03060000
+         LA    R2,1(,R2)          ACCOUNT FOR THIS REQUEST              03070000
+         L     R3,@ALOLRET        TABLE DESCRIPTION                     03080000
+         CDS   R0,R2,RVDESYNC     NONZERO USE, LOCK THE TABLE DESC      03090000
+         BNE   LOCKER             THIS SHOULD DRAIN QUICKLY             03100000
+                                                                        03110000
+         ST    R3,@USELRET        RETAIN PTR TO POSTED TABLE DESC       03120000
+         OI    FLAGS,F$VLUSE      RETAINING THIS TABLE DESCRIPTION      03130000
+                                                                        03140000
+         USING VDBLRET,R3         TABLE DESCRIPTION RETURN AREA         03150000
+         MVC   RVDESREQ(LVDBSRQL),LVDBSREQ   REALLOCATION INFO          03160000
+         SR    R0,R0              SIZE OF TABLE DESCRIPTION             03170000
+         AL    R0,LVDBSRQ1                                              03180000
+         AL    R0,LVDBSRQ2                                              03190000
+         AL    R0,LVDBSRQ3                                              03200000
+         AL    R0,LVDBSRQ4                                              03210000
+         ST    R0,RVDESIZE        SAVE SUMMARY IN RVD                   03220000
+         DROP  R3,R6,R9           VDBLRET, RVDENTRY, VDBREFNT           03230000
+                                                                        03240000
+         EJECT                                                          03250000
+***************************************************************         03260000
+*                                                                       03270000
+*   Add the new RVD into the approp subtree and unordered list          03280000
+*   if it was newly allocated by this invokation.  Delay of the         03290000
+*   swap-in until after successful VDBLOAD and VDBXREF ensure           03300000
+*   that a malicious run-time program cannot flood memory by            03310000
+*   generating SQL requests with rolling, invalid VDB table             03320000
+*   names.                                                              03330000
+*                                                                       03340000
+***************************************************************         03350000
+                                                                        03360000
+         ICM   R1,15,@RNODE       NEW RVD PENDING BTREE INSERTION?      03370000
+         BZ    NORMRET            DONE IF NOT                           03380000
+         L     R3,@RANCHOR        ADDR OF RVD ANCHOR WORD               03390000
+                                                                        03400000
+         SR    R0,R0              MUST ENSURE WE STILL OWN THE SUBTREE  03410000
+         CS    R0,R1,0(R3)        INSERT OURSELF IN DESIGNATED POSITION 03420000
+         BNE   RVDSCAN            COLLISION, TRY AGAIN FROM TOP         03430000
+                                                                        03440000
+         OI    FLAGS,F$RNUSE      RVD ADDED TO BTREE                    03450000
+                                                                        03460000
+         USING VDBREFNT,R1        TEMPORARY ADDRESSABILITY              03470000
+         L     R0,PRJEXRFQ        ANCHOR OF UNORDERED RVD LIST          03480000
+         ST    R0,RVDNEXT         ADD TO FRONT OF LIST                  03490000
+         CS    R0,R1,PRJEXRFQ     UPDATE ANCHOR ACCORDINGLY             03500000
+         BNE   *-8                UNTIL IT STICKS                       03510000
+         DROP  R1                 VDBREFNT                              03520000
+                                                                        03530000
+         L     R15,PRJEXRCT       RVD COUNTER                           03540000
+         LA    R14,1(,R15)        ACCOUNT FOR ADDITION                  03550000
+         CS    R15,R14,PRJEXRCT   INCREMENT REFERENCED VDB TABLE COUNT  03560000
+         BNE   *-8                PERSISTENT UPDATE                     03570000
+                                                                        03580000
+         EJECT                                                          03590000
+****************************************************************        03600000
+*                                                                       03610000
+*   Normal and abnormal termination                                     03620000
+*                                                                       03630000
+****************************************************************        03640000
+                                                                        03650000
+NORMRET  DS    0H                                                       03660000
+         LA    R15,RC00           NORMAL COMPLETION                     03670000
+         L     R1,@USELRET               R1 <== TABLE DESC (VDBLRET)    03680000
+         LH    R0,LVDB#COL-VDBLRET(,R1)  R0 <== COLUMN COUNT            03690000
+         B     EXIT                                                     03700000
+                                                                        03710000
+ERR_STG  DS    0H                 STORAGE NOT AVAILABLE                 03720000
+         LR    R0,R15             STORAGE SERVICE RETCODE AS RSNCODE    03730000
+         LA    R15,RC16           VDBLOAD COMPATIBLE FAILURE INDICATOR  03740000
+         B     EXIT                                                     03750000
+                                                                        03760000
+ERR_QTYP DS    0H                 INVALID OR OMITTED DML STATEMENT TYPE 03770000
+         SR    R0,R0              RSN CODE UNDEFINED                    03780000
+         LA    R15,RC20           LOCAL COMPLETION CODE                 03790000
+         B     EXIT                                                     03800000
+                                                                        03810000
+ERR_XREF DS    0H                 TABLE COLUMN/VARIABLE XREF FAILURE    03820000
+         LR    R0,R15             IVDBXREF RETCODE AS LOCAL RSNCODE     03830000
+         LA    R15,RC24           LOCAL COMPLETION CODE                 03840000
+                                                                        03850000
+*--------------------------------------------------------------         03860000
+*   Release residual storage, etc.                                      03870000
+*--------------------------------------------------------------         03880000
+                                                                        03890000
+EXIT     DS    0H                                                       03900000
+         STM   R15,R1,RETREGS                                           03910000
+                                                                        03920000
+         TM    FLAGS,F$RNALO+F$RNUSE                                    03930000
+         BNM   FREERVD            SKIP IF NO RESIDUAL RVD               03940000
+                                                                        03950000
+         $RETSTOR *@RNODE,QHDR=0                                        03960000
+                                                                        03970000
+FREERVD  DS    0H                                                       03980000
+                                                                        03990000
+         TM    FLAGS,F$VLOAD+F$VLUSE                                    04000000
+         BNM   FREELRET           SKIP IF NO RESIDUAL VDB LOAD RESULT   04010000
+                                                                        04020000
+         L     R1,@ALOLRET        R1 <== TABLE DESC (VDBLRET)           04030000
+         @CALL IVDBRET,CTYPE=CVT,WKA=0                                  04040000
+                                                                        04050000
+FREELRET DS    0H                                                       04060000
+                                                                        04070000
+         LM    R15,R1,RETREGS     RESTORE STATUS REGS                   04080000
+                                                                        04090000
+*--------------------------------------------------------------         04100000
+*   Return completion status to caller                                  04110000
+*--------------------------------------------------------------         04120000
+                                                                        04130000
+         #EXIT                                                          04140000
+                                                                        04150000
+         EJECT                                                          04160000
+***************************************************************         04170000
+*                                                                       04180000
+* ROUTINE:  LOCRVD - Search RVD tree by table name                      04190000
+*                                                                       04200000
+* DESCRIPTION:                                                          04210000
+*                                                                       04220000
+*    This routine is used to search an RVD (ref VDBREFNT)               04230000
+*    tree for the occurrence of the VDB table referenced in             04240000
+*    the VDBLOADP parameter list.                                       04250000
+*                                                                       04260000
+*    The RVD tree is a binary tree.  The left subtree of the            04270000
+*    the current RVD contains entries for tables whose names            04280000
+*    are "smaller" than the current.  The right subtree contains        04290000
+*    entries for those table names "bigger" than the current,           04300000
+*    etc.                                                               04310000
+*                                                                       04320000
+*                                                                       04330000
+* NOTES:                                                                04340000
+*                                                                       04350000
+*    The standard register savearea is used in this routine to          04360000
+*    minimize workarea size requirements.                               04370000
+*                                                                       04380000
+*                                                                       04390000
+* ON ENTRY:                                                             04400000
+*                                                                       04410000
+*    R1  contains the address of the root RVD entry (VDBREFNT)          04420000
+*                                                                       04430000
+*    VDBLOADP is addressable                                            04440000
+*                                                                       04450000
+*                                                                       04460000
+* ON EXIT:                                                              04470000
+*                                                                       04480000
+*    R15 contains one of the following return codes                     04490000
+*        The condition code is set accordingly                          04500000
+*                                                                       04510000
+*        RC00 - RVD (VDBREFNT) located and returned via R1              04520000
+*                                                                       04530000
+*        RC04 - RVD entry not matched                                   04540000
+*                                                                       04550000
+*               R1 contains the address of the left or right            04560000
+*                  RVD subtree ptr to which a new RVD can be            04570000
+*                  attached                                             04580000
+*                                                                       04590000
+***************************************************************         04600000
+                                                                        04610000
+LOCRVD   DS    0H                                                       04620000
+         STM   R14,R12,12(R13)    PRESERVE MAINLINE REGS                04630000
+                                                                        04640000
+         LA    R15,RC00           PRESUME SUCCESS                       04650000
+         L     R3,PVDBTABL        LOCATE TABLE NAME                     04660000
+                                                                        04670000
+         LA    R2,PRJEXRTR        RVD TREE ROOT - PREPARE FOR EXIT      04680000
+         ICM   R1,15,0(R2)        Begin tree search                     04690000
+         BZ    LOCMISS            RVD NOT MATCHED                       04700000
+                                                                        04710000
+R        USING VDBREFNT,R1        CURRENT ENTRY                         04720000
+                                                                        04730000
+*--------------------------------------------------------------         04740000
+*   Search the ordered btree for a matching RVD entry                   04750000
+*--------------------------------------------------------------         04760000
+                                                                        04770000
+LOCSRCH  DS    0H                                                       04780000
+         CLC   R.RVDTBLNM,0(R3)   MATCHING TABLE NAME?                  04790000
+         BE    LOCXIT             RETURN CURRENT RVD IF SO              04800000
+         LA    R2,R.RVDLEFT       ASSUME LEFT SUBTREE                   04810000
+         BH    *+8                IT CONTAINS THE SMALLER NAMES         04820000
+         LA    R2,R.RVDRIGHT      ELSE RIGHT SUBTREE FOR BIGGER NAMES   04830000
+                                                                        04840000
+         ICM   R1,15,0(R2)        ADVANCE DOWN THE APPROPRIATE SUBTREE  04850000
+         BNZ   LOCSRCH            AND CONTINUE THE SEARCH               04860000
+                                                                        04870000
+*--------------------------------------------------------------         04880000
+*   Return matching RVD (*RVD) or RVD subtree root addr (**RVD)         04890000
+*--------------------------------------------------------------         04900000
+                                                                        04910000
+LOCMISS  DS    0H                 MATCHING RVD NOT FOUND                04920000
+         LR    R1,R2              RETURN SUBTREE ANCHOR WORD            04930000
+         LA    R15,RC04           INDICATE NOMATCH                      04940000
+                                                                        04950000
+LOCXIT   DS    0H                                                       04960000
+         L     R14,12(,R13)       RESTORE RETURN ADDRESS                04970000
+         LM    R2,R12,28(R13)     RESTORE MAINLINE REGS                 04980000
+         LTR   R15,R15            REFLECT COMPLETION STATUS VIA CC      04990000
+         BR    R14                RETURN                                05000000
+         DROP  R                  VDBREFNT                              05010000
+                                                                        05020000
+         EJECT                                                          05030000
+***************************************************************         05040000
+*                                                                       05050000
+* ROUTINE:  ALLOCRVD - Allocate and format an RVD entry                 05060000
+*                                                                       05070000
+* DESCRIPTION:                                                          05080000
+*                                                                       05090000
+*    This routine is used to allocate and format a VDBREFNT             05100000
+*    entry.  Storage is acquired via $GETSTOR and is unowned.           05110000
+*                                                                       05120000
+*                                                                       05130000
+* ON ENTRY:                                                             05140000
+*                                                                       05150000
+*    VDBLOADP is addressable                                            05160000
+*                                                                       05170000
+*                                                                       05180000
+* ON EXIT:                                                              05190000
+*                                                                       05200000
+*    R15 contains one of the following return codes                     05210000
+*        The condition code is set accordingly                          05220000
+*                                                                       05230000
+*        RC00 - RVD entry returned via R1                               05240000
+*                                                                       05250000
+*        RCnn - storage failure return code                             05260000
+*                                                                       05270000
+***************************************************************         05280000
+                                                                        05290000
+ALLOCRVD DS    0H                                                       05300000
+         ST    R14,FWORD          PRESERVE RETURN ADDRESS               05310000
+                                                                        05320000
+         $GETSTOR RVDBREFL,QHDR=0,COND=YES                              05330000
+                                                                        05340000
+         BNZ   ALLOCXIT           STORAGE NOT AVAILABLE, ETC.           05350000
+                                                                        05360000
+*--------------------------------------------------------------         05370000
+*   Format an RVD                                                       05380000
+*--------------------------------------------------------------         05390000
+                                                                        05400000
+R        USING VDBREFNT,R1                                              05410000
+         MVC   R.RVDEYE,=C'RVD '  EYECATCHER                            05420000
+         L     R15,PVDBTABL       TABLE NAME                            05430000
+         MVC   R.RVDTBLNM,0(R15)                                        05440000
+         DROP  R                  VDBREFNT                              05450000
+                                                                        05460000
+         SR    R15,R15            SUCCESS                               05470000
+                                                                        05480000
+ALLOCXIT DS    0H                                                       05490000
+         L     R14,FWORD          RESTORE RETURN ADDR                   05500000
+         LTR   R15,R15            REFLECT COMPLETION STATUS VIA CC      05510000
+         BR    R14                RETURN                                05520000
+                                                                        05530000
+         EJECT                                                          05540000
+***************************************************************         05550000
+*                                                                       05560000
+*   Local read only storage                                             05570000
+*                                                                       05580000
+***************************************************************         05590000
+                                                                        05600000
+         LTORG ,                                                        05610000
+                                                                        05620000
+         EJECT                                                          05630000
+         PRINT NOGEN                                                    05640000
+         ICVT  ,                                                        05650000
+         ITASK ,                                                        05660000
+         IPCB  ,                                                        05670000
+         IUSER ,                                                        05680000
+         END   ,                                                        05690000

@@ -1,0 +1,1162 @@
+IVARMGR  TITLE 'INTEGRATOR - VARIABLE AND VARIABLE POOL MANAGER'        00010000
+**<DOC-ON>************************************************************* 00020000
+*                                                                       00030000
+* ROUTINE: IVARMGR - INTEGRATOR VARIABLE AND VARIABLE POOL MANAGER      00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    THIS ROUTINE IS CALLED TO 1) CREATE A VARIABLE POOL                00080000
+*                              2) DESTROY A VARIABLE POOL               00090000
+*                              3) PUT (OR REPLACE) A VARIABLE IN A POOL 00100000
+*                              4) GET A VARIABLE FROM A POOL            00110000
+*                                                                       00120000
+* ON ENTRY:                                                             00130000
+*                                                                       00140000
+*    R15 = ENTRY POINT ADDRESS                                          00150000
+*    R14 = RETURN      ADDRESS                                          00160000
+*    R13 = SAVE AREA   ADDRESS                                          00170000
+*    R01 = PARM LIST   ADDRESS                                          00180000
+*                                                                       00190000
+* ON EXIT:                                                              00200000
+*                                                                       00210000
+*    R15 = GENERAL RETURN CODE                                          00220000
+*                                                                       00230000
+*        =  0 --> UNSUCCESSFUL                                          00240000
+*                                                                       00250000
+*        =  1 --> SUCCESSFUL                                            00260000
+*                                                                       00270000
+*    R00 = 0                                                            00280000
+*    R01 = 0                                                            00290000
+*                                                                       00300000
+*    ALL OTHER REGISTERS ARE RESTORED.                                  00310000
+*                                                                       00320000
+**<DOC-OFF>************************************************************ 00330000
+                                                                        00340000
+***************************************************************         00350000
+*                                                                       00360000
+* MAINTENANCE:                                                          00370000
+*                                                                       00380000
+*    10/24/94 R. TURGEON                                                00390000
+*             REDUCE SIZE OF $ENTITY WORKAREA AND RESTRUCTURE           00400000
+*             THE #WORK WORKING STORAGE AREA ACCORDINGLY.               00410000
+*                                                                       00420000
+*    11/14/94 Su-fen Wu  Par# 155040                                    00430000
+*             Use MVCL in stead of MVC in blanking out the variable.    00440000
+*                                                                       00450000
+*    01/21/95 R. Turgeon                                                00460000
+*             Replace MVCL used to clear WORKAREA with an XC            00470000
+*             requiring movement of WRK256 (used only for $ENTITY)      00480000
+*             out of the local working storage area.  STROBE            00490000
+*             analysis portrays the MVCL in this very active            00500000
+*             routine as a hot spot.                                    00510000
+*                                                                       00520000
+***************************************************************         00530000
+                                                                        00540000
+         EJECT ,                                                        00550000
+         EQUS  ,                  GENERAL EQUATES                       00560000
+                                                                        00570000
+RICVT    EQU   R11                                                      00580000
+RITASK   EQU   R10                                                      00590000
+RVMLIST  EQU   R9                                                       00600000
+RVMPOOL  EQU   R8                                                       00610000
+RVMVAR   EQU   R7                                                       00620000
+RQH      EQU   R6                                                       00630000
+                                                                        00640000
+         USING ICVT,RICVT         ESTABLISH ADDRESSABILITY              00650000
+         USING ITASK,RITASK       ESTABLISH ADDRESSABILITY              00660000
+         USING VMLIST,RVMLIST     ESTABLISH ADDRESSABILITY              00670000
+         USING VMPOOL,RVMPOOL     ESTABLISH ADDRESSABILITY              00680000
+         USING VMVAR,RVMVAR       ESTABLISH ADDRESSABILITY              00690000
+                                                                        00700000
+         EJECT ,                                                        00710000
+         COPY  CRAB               "C" RUNTIME ANCHOR BLOCK              00720000
+         USING CRAB,R12           ADDRESSABILITY                        00730000
+                                                                        00740000
+         EJECT ,                                                        00750000
+         COPY  DSA                DYNAMIC SAVE AREA                     00760000
+                                                                        00770000
+***************************************************************         00780000
+*                                                                       00790000
+*   Begin locally defined work area.  Note that the WRK256              00800000
+*   workarea is not cleared upon entry, contrary to product             00810000
+*   convention.  Refer to change log entry dated 01/21/95.              00820000
+*                                                                       00830000
+***************************************************************         00840000
+WRK256   DS    XL256              GENERAL WORK AREA                     00850000
+                                                                        00860000
+WORKAREA DS    0A                 READ/WRITE WORKAREA                   00870000
+#CRAB    DS    A                  ADDRESS OF "C" RUNTIME BLOCK          00880000
+SAVANC@  DS    A                  ADDRESS OF VMPOOL ANCHOR WORD         00890000
+SAVOWNER DS    A                  SYSTEM=ICVT, TASK=ITASK, PROCESS=IPCB 00900000
+SAVTOKEN DS    XL8                $ENTITY TOKEN RETURN AREA (UNUSED)    00910000
+OLDVARHD DS    XL16               VARIABLE ENTITY USERDATA              00920000
+NEWVARHD DS    XL16               VARIABLE ENTITY USERDATA              00930000
+                                                                        00940000
+SUB0SAVE DS    16F                NONSTANDARD SUBROUTINE SAVE AREA      00950000
+                                                                        00960000
+MFE_LIST DS    10F                GENERAL PLIST CONSTRUCTION AREA       00970000
+$ENTMFL  $ENTITY MF=(L,MFE_LIST)  $ENTITY PARM LIST CONSTRUCTION        00980000
+$VARMFL  $VARMGR MF=(L,MFE_LIST)  $VARMGR PARM LIST CONSTRUCTION        00990000
+$MSGMFL  $MSG  FIELDS=(,,,,),     $MSG    PARM LIST CONSTRUCTION       X01000000
+               MF=(L,MFE_LIST)                                          01010000
+                                                                        01020000
+RETR15   DS    F                                                        01030000
+RETR0    DS    F                                                        01040000
+RETR1    DS    F                                                        01050000
+RETREGS  EQU   RETR15,*-RETR15    INCLUSIVE SYMBOL                      01060000
+                                                                        01070000
+FLAGS    DS    X                  FLAGS                                 01080000
+FLUSERQH EQU   X'80'              USER STG POOL & QH ALLOCATED          01090000
+                                                                        01100000
+WORKLEN  EQU   *-WORKAREA         LENGTH OF USER DSA AREA               01110000
+DSALEN   EQU   *-DSA              LENGTH OF DSA                         01120000
+                                                                        01130000
+         $MSGDFT PREFIX=ICTPID,                                        +01140000
+               COMPID='VAR',                                           +01150000
+               TABLE=*#MSGS,                                           +01160000
+               WORKA=0,                                                +01170000
+               MF=(E,$MSGMFL),                                         +01180000
+               PRINT=NOGEN                                              01190000
+                                                                        01200000
+         EJECT ,                                                        01210000
+IVARMGR@ CSECT ,                                                        01220000
+IVARMGR  CENTRY DSA=DSALEN,BASE=R9,INDEP=YES                            01230000
+                                                                        01240000
+         USING DSA,R13            ADDRESSABILITY                        01250000
+         XC    WORKAREA(WORKLEN),WORKAREA   INITIALIZE LOCAL WORKAREA   01260000
+                                                                        01270000
+         LR    R2,R1              SAVE ADDRESS OF PLIST                 01280000
+         ST    R12,#CRAB          ADDRESS OF "C" RUNTIME BLOCK          01290000
+         DROP  R12                CRAB                                  01300000
+         LR    R12,R9             PROGRAM ADDRESS                       01310000
+         USING IVARMGR,R12        ADDRESSABILITY                        01320000
+                                                                        01330000
+         LR    RVMLIST,R2         ADDRESS OF PLIST                      01340000
+         USING VMLIST,RVMLIST     ESTABLISH ADDRESSABILITY              01350000
+                                                                        01360000
+*---------------------------------------------------------------------- 01370000
+* INITIALIZATION                                                        01380000
+*---------------------------------------------------------------------- 01390000
+                                                                        01400000
+         @RESTENV ,                  ENSURE ENVIRONMENT                 01410000
+                                                                        01420000
+         ST    RVMLIST,RETR1         RETURN VMLIST IN R1                01430000
+         MVI   RETR15+(L'RETR15-1),1 SET SUCCESSFUL RETURN CODE         01440000
+         SR    RVMPOOL,RVMPOOL       NO VMPOOL YET                      01450000
+         SR    RQH,RQH               NO QH YET                          01460000
+         BAS   R14,FINDANC           LOCATE ANCHOR, QH, AND VMPOOL      01470000
+         ST    R1,SAVANC@            SAVE ADDRESS OF ANCHOR WORD        01480000
+                                                                        01490000
+*---------------------------------------------------------------------- 01500000
+* REQUEST CODE LOOKUP                                                   01510000
+*---------------------------------------------------------------------- 01520000
+                                                                        01530000
+         SR    R15,R15            CLEAR                                 01540000
+         ICM   R15,3,VMLREQCD     REQUEST CODE                          01550000
+         BNP   ERRREQCD           BRANCH IF BAD REQUEST                 01560000
+         C     R15,RQCDMAX        CHECK AGAINST MAX REQUEST CODE        01570000
+         BH    ERRREQCD           BRANCH IF BAD REQUEST                 01580000
+         BCTR  R15,0              MINUS 1                               01590000
+         SLL   R15,2              MULTIPLY BY 4                         01600000
+         B     RQCDTABL(R15)      JUMP TO SERVICE ROUTINE               01610000
+                                                                        01620000
+RQCDTABL DS    0F                                                       01630000
+         B     PCREATE            1                                     01640000
+         B     PDESTROY           2                                     01650000
+         B     VGET               3                                     01660000
+         B     VPUT               4                                     01670000
+RQCDMAX  DC    A((*-RQCDTABL)/4)                                        01680000
+                                                                        01690000
+*---------------------------------------------------------------------- 01700000
+* PCREATE - CREATE A VARIABLE POOL                                      01710000
+*---------------------------------------------------------------------- 01720000
+                                                                        01730000
+PCREATE  DS    0H                                                       01740000
+                                                                        01750000
+         LTR   RVMPOOL,RVMPOOL    IS THERE A VMPOOL BLOCK ANCHORED?     01760000
+         BNZ   PCDONE             BRANCH IF YES                         01770000
+                                                                        01780000
+*                                                                       01790000
+* ALLOCATE STGMGR IMPLICIT POOL FOR SCOPE=USER REQUEST W/O QH SPECIFIED 01800000
+*---------------------------------------------------------------------- 01810000
+                                                                        01820000
+         LTR   RQH,RQH            DO WE HAVE A STMGMGR QH?              01830000
+         BNZ   PCGETVMP           BRANCH IF YES                         01840000
+         BAS   R14,STGINIT        MUST BE SCOPE=USER IMPLICIT QH        01850000
+                                                                        01860000
+*                                                                       01870000
+* ALLOCATE AND INITIALIZE THE VMPOOL BLOCK                              01880000
+*---------------------------------------------------------------------- 01890000
+                                                                        01900000
+PCGETVMP DS    0H                                                       01910000
+                                                                        01920000
+         STGGET L'VMP,                                                 +01930000
+               QH=(RQH)           ALLOCATE A VMPOOL BLOCK               01940000
+                                                                        01950000
+         BNZ   ERRSTG             BRANCH IF STG ERROR                   01960000
+         LR    RVMPOOL,R1         SET RVMPOOL ADDRESS                   01970000
+         MVC   VMPID,=CL4'VMP '   SET BLOCK ID                          01980000
+         MVC   VMPSCOPE,VMLSCOPE  SET POOL SCOPE                        01990000
+         ST    RQH,VMPQH          SET QH ADDRESS                        02000000
+         MVC   VMPOWNER,SAVOWNER  SET OWNER ID                          02010000
+         TM    FLAGS,FLUSERQH     USER STG POOL & QH ALLOCATED?         02020000
+         BNO   PCGETENT           BRANCH IF NOT                         02030000
+         OI    VMPF1,VMPF1STG     FLAG FOR FAST PDESTROY                02040000
+                                                                        02050000
+*                                                                       02060000
+* INITIALIZE AN ENTITY MANAGER                                          02070000
+*---------------------------------------------------------------------- 02080000
+                                                                        02090000
+PCGETENT DS    0H                                                       02100000
+                                                                        02110000
+         $ENTITY INIT,                                                 +02120000
+               SLOTS=64,                                               +02130000
+               QH=(RQH),                                               +02140000
+               ANCHOR=VMPENT@,                                         +02150000
+               WKA=WRK256,                                             +02160000
+               MF=(E,$ENTMFL)                                           02170000
+                                                                        02180000
+         BNZ   ERRENT             BRANCH IF ENT ERROR                   02190000
+                                                                        02200000
+*                                                                       02210000
+* PLACE NEW VMPOOL ADDRESS AT ANCHOR WORD                               02220000
+*---------------------------------------------------------------------- 02230000
+                                                                        02240000
+         L     R15,SAVANC@        SAVED ANCHOR WORD ADDRESS             02250000
+         SR    R1,R1              SHOULD HAVE A ZERO                    02260000
+         CS    R1,RVMPOOL,0(R15)  SET THE NEW VMPOOL ADDRESS            02270000
+         BE    PCDONE             BRANCH IF VMPOOL IS SET               02280000
+         LR    R5,RVMPOOL         SAVE ADDRESS OF NEW VMPOOL            02290000
+         LR    RVMPOOL,R1         APPARENTLY THIS IS THE ONE            02300000
+                                                                        02310000
+*                                                                       02320000
+* A RACE CONDITION OCCURRED.  DELETE THE NEW STRUCTURES.                02330000
+*---------------------------------------------------------------------- 02340000
+                                                                        02350000
+         BAS   R14,TERMENT        KILL THE $ENTITY MANAGER              02360000
+         TM    FLAGS,FLUSERQH     WAS DEDICATED STORAGE ALLOCATED?      02370000
+         BO    PCKILLU            BRANCH IF YES                         02380000
+                                                                        02390000
+         STGRETN LEN=L'VMP,                                            +02400000
+               ADDR=(R5),                                              +02410000
+               QH=(RQH)           FREE THE VMPOOL WE ALLOCATED          02420000
+                                                                        02430000
+         BNZ   ERRSTG             BRANCH IF STG ERROR                   02440000
+         B     PCDONE             OTHERWISE, WE ARE DONE                02450000
+                                                                        02460000
+PCKILLU  DS    0H                                                       02470000
+                                                                        02480000
+         BAS   R14,STGTERM        KILL THE DEDICATED STORAGE            02490000
+         B     PCDONE             AND WE ARE DONE                       02500000
+                                                                        02510000
+*                                                                       02520000
+* SUCCESSFUL PCREATE, RETURN TO CALLER                                  02530000
+*---------------------------------------------------------------------- 02540000
+                                                                        02550000
+PCDONE   DS    0H                                                       02560000
+                                                                        02570000
+         ST    RVMPOOL,VMLVPOOL   SET VMPOOL RETURN ADDRESS             02580000
+         B     RETURN                                                   02590000
+                                                                        02600000
+*---------------------------------------------------------------------- 02610000
+* PDESTROY - DESTROY A VARIABLE POOL                                    02620000
+*---------------------------------------------------------------------- 02630000
+                                                                        02640000
+PDESTROY DS    0H                                                       02650000
+                                                                        02660000
+         LTR   RVMPOOL,RVMPOOL    VMPOOL LOCATED?                       02670000
+         BZ    ERRENVIR           BRANCH IF NOT                         02680000
+         LTR   RQH,RQH            QH LOCATED?                           02690000
+         BZ    ERRENVIR           BRANCH IF NOT                         02700000
+         CLI   VMPSCOPE,$VARMGR_SCOPE_USER                              02710000
+         BNE   ERRNOTPM           DESTROY IS PERMITTED ONLY FOR USER    02720000
+         TM    VMPF1,VMPF1STG     WAS IMPLICIT STGMGR POOL CREATED?     02730000
+         BNO   PDEXPQH            BRANCH IF EXPLICIT QH WAS GIVEN       02740000
+                                                                        02750000
+*                                                                       02760000
+* DESTROY USER POOL THAT HAS A DEDICATED STGMGR POOL                    02770000
+*---------------------------------------------------------------------- 02780000
+                                                                        02790000
+         BAS   R14,STGTERM        DESTROY POOL AND QH                   02800000
+         B     RETURN             AND WE ARE DONE                       02810000
+                                                                        02820000
+*                                                                       02830000
+* DESTROY USER POOL THAT HAS A POSSIBLY NON-DEDICATED STGMGR POOL       02840000
+*---------------------------------------------------------------------- 02850000
+                                                                        02860000
+PDEXPQH  DS    0H                                                       02870000
+                                                                        02880000
+         BAS   R14,FREEVAR        RUN $ENTITY CHAIN AN FREE VARIABLES   02890000
+         BAS   R14,TERMENT        TERMINATE THE $ENTITY MANAGER         02900000
+                                                                        02910000
+         STGRETN LEN=L'VMP,                                            +02920000
+               ADDR=(RVMPOOL),                                         +02930000
+               QH=(RQH)           RELEASE VMPOOL BLOCK                  02940000
+                                                                        02950000
+         BNZ   ERRSTG             BRANCH IF ERROR                       02960000
+         B     RETURN                                                   02970000
+                                                                        02980000
+*---------------------------------------------------------------------- 02990000
+* VGET - RETRIEVE A VARIABLE                                            03000000
+*---------------------------------------------------------------------- 03010000
+                                                                        03020000
+VGET     DS    0H                                                       03030000
+                                                                        03040000
+         BAS   R14,CKGETPUT       VALIDATE VMPOOL & VARNAME             03050000
+         LR    R5,R1              VARIABLE NAME ADDRESS                 03060000
+         LR    R4,R0              VARIABLE NAME LENGTH                  03070000
+         XC    VMLSCOPE,VMLSCOPE  NULL THE SCOPE                        03080000
+         XC    VMLCLASS,VMLCLASS  NULL THE CLASS CODE                   03090000
+         XC    VMLVARLN,VMLVARLN  NULL THE VARIABLE LENGTH              03100000
+         XC    VMLVAR,VMLVAR      NULL THE VARIABLE ADDRESS             03110000
+         LTR   RVMPOOL,RVMPOOL    IS SYSTEM/TASK/PROCESS POOL UNDEF.?   03120000
+         BZ    VGSKIP             BRANCH IF YES TO SKIP EXTR            03130000
+                                                                        03140000
+VGNEXT   DS    0H                                                       03150000
+                                                                        03160000
+         $ENTITY EXTR,                                                 +03170000
+               ANCHOR=VMPENT@,                                         +03180000
+               ENTITY=((R5),(R4)),                                     +03190000
+               USERDATA=OLDVARHD,                                      +03200000
+               WKA=WRK256,                                             +03210000
+               MF=(E,$ENTMFL)     LOCATE THE VARIABLE ENTITY            03220000
+                                                                        03230000
+         BZ    VGFOUND            BRANCH IF VARIABLE LOCATED            03240000
+                                                                        03250000
+VGSKIP   DS    0H                                                       03260000
+                                                                        03270000
+         CLI   VMPSCOPE,$VARMGR_SCOPE_SYSTEM                            03280000
+         BE    VGNOTFND           RETURN NULL VARIABLE IF EXHAUSTED     03290000
+         CLI   VMPSCOPE,$VARMGR_SCOPE_TASK                              03300000
+         BE    VGNXTSYS           CHECK SYSTEM POOL IF THIS WAS TASK    03310000
+         CLI   VMPSCOPE,$VARMGR_SCOPE_PROCESS                           03320000
+         BE    VGNXTASK           CHECK TASK POOL IF THIS WAS PROCESS   03330000
+                                                                        03340000
+*                                                                       03350000
+* STEP UP TO PROCESS LEVEL POOL, IF POSSIBLE                            03360000
+*---------------------------------------------------------------------- 03370000
+                                                                        03380000
+         LTR   RITASK,RITASK      GOT TASK POINTER?                     03390000
+         BZ    VGNXTSYS           BRANCH IF NOT                         03400000
+         ICM   R1,15,TSKPCBC      CURRENT PROCESS                       03410000
+         BZ    VGNXTASK           BRANCH IF NO PROCESS                  03420000
+X        USING IPCB,R1                                                  03430000
+         ICM   RVMPOOL,15,X.PCBVPOOL                                    03440000
+         DROP  X                                                        03450000
+         BNZ   VGNEXT             CHECK THE PROCESS VPOOL               03460000
+         B     VGNXTASK           BRANCH IF NO PROCESS VPOOL            03470000
+                                                                        03480000
+*                                                                       03490000
+* STEP UP TO TASK LEVEL POOL, IF POSSIBLE                               03500000
+*---------------------------------------------------------------------- 03510000
+                                                                        03520000
+VGNXTASK DS    0H                                                       03530000
+                                                                        03540000
+         LTR   RITASK,RITASK         GOT TASK POINTER?                  03550000
+         BZ    VGNXTSYS              BRANCH IF NOT                      03560000
+         ICM   RVMPOOL,15,TSKVPOOL   TASK LEVEL POOL                    03570000
+         BNZ   VGNEXT                CHECK THE TASK VPOOL               03580000
+         B     VGNXTSYS              BRANCH IF NO TASK VPOOL            03590000
+                                                                        03600000
+*                                                                       03610000
+* STEP UP TO SYSTEM LEVEL POOL, IF POSSIBLE                             03620000
+*---------------------------------------------------------------------- 03630000
+                                                                        03640000
+VGNXTSYS DS    0H                                                       03650000
+                                                                        03660000
+         ICM   RVMPOOL,15,ICTVPOOL   SYSTEM LEVEL POOL                  03670000
+         BNZ   VGNEXT                CHECK THE SYSTEM VPOOL             03680000
+         B     VGNOTFND              BRANCH IF NO SYSTEM VPOOL          03690000
+                                                                        03700000
+*                                                                       03710000
+* VARIABLE NOT LOCATED, PASS BACK NULL VARIABLE & "NOT FOUND" REASON CD 03720000
+*---------------------------------------------------------------------- 03730000
+                                                                        03740000
+VGNOTFND DS    0H                                                       03750000
+                                                                        03760000
+         MVC   VMLRSNCD,=A($VARMGR_RSN_NOT_FOUND)                       03770000
+         B     RETURN                                                   03780000
+                                                                        03790000
+*                                                                       03800000
+* VARIABLE LOCATED, PASS IT BACK TO CALLER                              03810000
+*---------------------------------------------------------------------- 03820000
+                                                                        03830000
+VGFOUND  DS    0H                                                       03840000
+                                                                        03850000
+O        USING VMVAR,OLDVARHD                                           03860000
+                                                                        03870000
+         MVC   VMLSCOPE,VMPSCOPE   SHOW THE SCOPE                       03880000
+         MVC   VMLCLASS,O.VMVCLASS SHOW THE CLASS CODE                  03890000
+         LH    R1,O.VMVLENG        VARIABLE LENGTH                      03900000
+         ST    R1,VMLVARLN         SHOW THE VARIABLE LENGTH             03910000
+                                                                        03920000
+*        LA    R1,O.VMVIVAR        INTERNAL VARIABLE ADDRESS            03930000
+*        ST    R1,VMLVAR           SHOW VARIABLE ADDRESS                03940000
+*        CLC   O.VMVLENG,=H'12'    IS VARIABLE INTERNAL?                03950000
+*        BNH   RETURN              BRANCH IF YES, DONE                  03960000
+                                                                        03970000
+         MVC   VMLVAR,O.VMVXVAR    SHOW EXTERNAL VARIABLE ADDRESS       03980000
+         B     RETURN              DONE                                 03990000
+                                                                        04000000
+         DROP  O                                                        04010000
+                                                                        04020000
+*---------------------------------------------------------------------- 04030000
+* VPUT - STORE A VARIABLE                                               04040000
+*---------------------------------------------------------------------- 04050000
+                                                                        04060000
+VPUT     DS    0H                                                       04070000
+                                                                        04080000
+         BAS   R14,CKGETPUT       VALIDATE VMPOOL & VARNAME             04090000
+         LR    R5,R1              VARIABLE NAME ADDRESS                 04100000
+         LR    R4,R0              VARIABLE NAME LENGTH                  04110000
+         ICM   R2,15,VMLVARLN     VARIABLE LENGTH                       04120000
+         BM    ERRPARM            BRANCH IF BAD PARMS                   04130000
+         C     R2,=A($VARMGR_VAR_SIZE)                                  04140000
+         BH    ERRPARM            BRANCH IF BAD PARMS                   04150000
+                                                                        04160000
+*                                                                       04170000
+* BUILD THE VARIABLE CONTROL INFORMATION                                04180000
+*---------------------------------------------------------------------- 04190000
+                                                                        04200000
+N        USING VMVAR,NEWVARHD                                           04210000
+O        USING VMVAR,OLDVARHD                                           04220000
+                                                                        04230000
+         MVI   N.VMVID,C'V'         SET THE ID                          04240000
+         MVC   N.VMVCLASS,VMLCLASS  SET THE SPECIFIED CLASS             04250000
+         STH   R2,N.VMVLENG         SET THE VARIABLE LENGTH             04260000
+         LTR   R2,R2                NULL VARIABLE?                      04270000
+         BZ    VPNULL               BRANCH IF NULL VARIABLE             04280000
+                                                                        04290000
+*        CH    R2,=H'12'            WILL IT BE AN INTERNAL VARIABLE?    04300000
+*        BH    VPEXTR               BRANCH IF NOT                       04310000
+*        LR    R1,R2                VARIABLE LENGTH                     04320000
+*        BCTR  R1,0                 LENGTH CODE                         04330000
+*        EX    R1,COPYINT           COPY INTERNAL VARIABLE              04340000
+                                                                        04350000
+         ICM   R3,15,VMLVAR         VARIABLE ADDRESS                    04360000
+         BZ    VPNULL               BRANCH IF NULL VARIABLE             04370000
+         B     VPEXTR               CONTINUE                            04380000
+                                                                        04390000
+COPYINT  MVC   N.VMVIVAR(*-*),0(R3) COPY INTERNAL VARIABLE              04400000
+                                                                        04410000
+*                                                                       04420000
+* LOCATE EXISTING VARIABLE CONTENTS                                     04430000
+*---------------------------------------------------------------------- 04440000
+                                                                        04450000
+VPEXTR   DS    0H                                                       04460000
+                                                                        04470000
+         $ENTITY EXTR,                                                 +04480000
+               ANCHOR=VMPENT@,                                         +04490000
+               ENTITY=((R5),(R4)),                                     +04500000
+               USERDATA=OLDVARHD,                                      +04510000
+               WKA=WRK256,                                             +04520000
+               MF=(E,$ENTMFL)     LOCATE THE VARIABLE ENTITY            04530000
+                                                                        04540000
+         BNZ   VPNEWVAR           BRANCH IF IT DOES NOT EXIST           04550000
+                                                                        04560000
+*                                                                       04570000
+* UPDATE AN EXISTING INTERNAL VARIABLE WITH NEW INTERNAL VARIABLE       04580000
+*---------------------------------------------------------------------- 04590000
+                                                                        04600000
+         B     VPOLDEXT           NO INTERNAL VARIABLE SUPPORT YET !!!  04610000
+                                                                        04620000
+*        CLC   O.VMVLENG,=H'12'   IS EXISTING VARIABLE INTERNAL?        04630000
+*        BH    VPOLDEXT           BRANCH IF NOT                         04640000
+*        CLC   N.VMVLENG,=H'12'   IS NEW VERSION INTERNAL?              04650000
+*        BH    VPNEWEXT           BRANCH IF NOT                         04660000
+*        BAS   R14,ENTPOST        POST THE NEW ENTITY                   04670000
+*        B     VPUPDVML           DONE, RETURN MANAGED VARIABLE INFO    04680000
+                                                                        04690000
+*                                                                       04700000
+* UPDATE AN EXISTING INTERNAL VARIABLE WITH NEW EXTERNAL VARIABLE       04710000
+*---------------------------------------------------------------------- 04720000
+                                                                        04730000
+VPNEWEXT DS    0H                                                       04740000
+                                                                        04750000
+         STH   R2,N.VMVMXLEN      SET MAX. SIZE OF EXTERNAL VARIABLE    04760000
+         LR    R0,R2              VARIABLE LENGTH                       04770000
+         LR    R1,R3              VARIABLE ADDRESS                      04780000
+         BAS   R14,STORENEW       GET NEW EXTERNAL VARIABLE STORAGE     04790000
+         ST    R1,N.VMVXVAR       SET EXTERNAL VARIABLE ADDRESS         04800000
+         BAS   R14,ENTPOST        POST THE NEW ENTITY                   04810000
+         B     VPUPDVML           DONE, RETURN MANAGED VARIABLE INFO    04820000
+                                                                        04830000
+*                                                                       04840000
+* UPDATE AN EXISTING EXTERNAL VARIABLE WITH NEW INTERNAL VARIABLE       04850000
+*---------------------------------------------------------------------- 04860000
+                                                                        04870000
+VPOLDEXT DS    0H                                                       04880000
+                                                                        04890000
+         B     VPEXTEXT           NO INTERNAL VARIABLE SUPPORT YET !!!  04900000
+                                                                        04910000
+         CH    R2,=H'12'          NEW VARIABLE INTERNAL?                04920000
+         BH    VPEXTEXT           BRANCH IF NOT                         04930000
+         L     R3,O.VMVXVAR       EXTERNAL VARIABLE ADDRESS             04940000
+         LH    R2,O.VMVMXLEN      EXTERNAL VARIABLE STORAGE SIZE        04950000
+         LTR   R2,R2              NULL VARIABLE?                        04960000
+         BNP   VPOLDNUL           BRANCH IF YES                         04970000
+                                                                        04980000
+         STGRETN ADDR=(R3),                                            +04990000
+               LEN=(R2),                                               +05000000
+               QH=(RQH)           RELEASE EXTERNAL VARIABLE STORAGE     05010000
+                                                                        05020000
+         BNZ   ERRSTG             BRANCH IF ERROR                       05030000
+                                                                        05040000
+VPOLDNUL DS    0H                                                       05050000
+                                                                        05060000
+         BAS   R14,ENTPOST        POST THE NEW ENTITY                   05070000
+         B     VPUPDVML           DONE, RETURN MANAGED VARIABLE INFO    05080000
+                                                                        05090000
+*                                                                       05100000
+* UPDATE AN EXISTING EXTERNAL VARIABLE WITH NEW EXTERNAL VARIABLE       05110000
+*---------------------------------------------------------------------- 05120000
+                                                                        05130000
+VPEXTEXT DS    0H                                                       05140000
+                                                                        05150000
+         CH    R2,O.VMVMXLEN      WILL NEW FIT IN OLD STORAGE?          05160000
+         BNH   VPNEWFIT           BRANCH IF YES                         05170000
+         STM   R2,R3,SUB0SAVE     TEMPORARY SAVE                        05180000
+         L     R3,O.VMVXVAR       EXTERNAL VARIABLE ADDRESS             05190000
+         LH    R2,O.VMVMXLEN      EXTERNAL VARIABLE STORAGE SIZE        05200000
+         LTR   R2,R2              NULL VARIABLE?                        05210000
+         BNP   VPEXTNUL           BRANCH IF YES                         05220000
+                                                                        05230000
+         STGRETN ADDR=(R3),                                            +05240000
+               LEN=(R2),                                               +05250000
+               QH=(RQH)           RELEASE EXTERNAL VARIABLE STORAGE     05260000
+                                                                        05270000
+         BNZ   ERRSTG             BRANCH IF ERROR                       05280000
+                                                                        05290000
+VPEXTNUL DS    0H                                                       05300000
+                                                                        05310000
+         LM    R2,R3,SUB0SAVE     RESTORE                               05320000
+         STH   R2,N.VMVMXLEN      SET MAX. SIZE OF EXTERNAL VARIABLE    05330000
+         LR    R0,R2              VARIABLE LENGTH                       05340000
+         LR    R1,R3              VARIABLE ADDRESS                      05350000
+         BAS   R14,STORENEW       GET NEW EXTERNAL VARIABLE STORAGE     05360000
+         ST    R1,N.VMVXVAR       SET EXTERNAL VARIABLE ADDRESS         05370000
+         BAS   R14,ENTPOST        POST THE NEW ENTITY                   05380000
+         B     VPUPDVML           DONE, RETURN MANAGED VARIABLE INFO    05390000
+                                                                        05400000
+VPNEWFIT DS    0H                                                       05410000
+         L     R14,O.VMVXVAR      EXTERNAL VARIABLE STORAGE             05420000
+         ST    R14,N.VMVXVAR      SET IN NEW VARIABLE HEADER            05430000
+         MVC   N.VMVMXLEN,O.VMVMXLEN INHERIT THE LENGTH                 05440000
+                                                                        05450000
+         LTR   R3,R3              VARIABLE IS MARKED AS BLANK ?         05460000
+         BM    VPNBLNK            UPDATE VARIABLES WITH BLANKS          05470000
+                                                                        05480000
+         LR    R15,R2             COPY-TO LENGTH                        05490000
+         LR    R0,R3              COPY-FROM ADDRESS                     05500000
+         LR    R1,R2              COPY-FROM LENGTH                      05510000
+         MVCL  R14,R0             COPY NEW VARIABLE TO EXTERNAL STORAGE 05520000
+         B     VPNPOST                                                  05530000
+                                                                        05540000
+VPNBLNK  DS    0H                                                       05550000
+         MVI   0(R14),C' '        FILL UP VARIABLE WITH BLANKS          05560000
+         BCTR  R2,0                                                     05570000
+         BCTR  R2,0                                                     05580000
+         LTR   R2,R2                                                    05590000
+         BM    VPNPOST                                                  05600000
+         L     R1,=F'254'                                               05610000
+VBLKLOOP DS    0H                                                       05620000
+         C     R2,=F'254'                                               05630000
+         BNH   VBLKLAST                                                 05640000
+         MVI   0(R14),C' '        FILL UP VARIABLE WITH BLANKS          05650000
+         EX    R1,*+4                                                   05660000
+         MVC   1(0,R14),0(R14)    COPY NEW VARIABLE TO EXTERNAL STORAGE 05670000
+         A     R14,=F'256'                                              05680000
+         S     R2,=F'256'                                               05690000
+         B     VBLKLOOP                                                 05700000
+VBLKLAST DS    0H                                                       05710000
+         MVI   0(R14),C' '        FILL UP VARIABLE WITH BLANKS          05720000
+         LTR   R2,R2                                                    05730000
+         BM    VPNPOST                                                  05740000
+         EX    R2,*+4                                                   05750000
+         MVC   1(0,R14),0(R14)    COPY NEW VARIABLE TO EXTERNAL STORAGE 05760000
+                                                                        05770000
+VPNPOST  DS    0H                                                       05780000
+         BAS   R14,ENTPOST        POST THE NEW ENTITY                   05790000
+         B     VPUPDVML           DONE, RETURN MANAGED VARIABLE INFO    05800000
+                                                                        05810000
+*                                                                       05820000
+* ALLOCATE STORAGE FOR NEW EXTERNAL VARIABLE                            05830000
+*---------------------------------------------------------------------- 05840000
+                                                                        05850000
+VPNEWVAR DS    0H                                                       05860000
+                                                                        05870000
+*        CH    R2,=H'12'          EXTERNAL VARIABLE STORAGE NEEDED?     05880000
+*        BNH   VPNEWADD           BRANCH IF NOT                         05890000
+                                                                        05900000
+         STH   R2,N.VMVMXLEN      SET MAX. SIZE OF EXTERNAL VARIABLE    05910000
+         LR    R0,R2              VARIABLE LENGTH                       05920000
+         LR    R1,R3              VARIABLE ADDRESS                      05930000
+         BAS   R14,STORENEW       GET NEW EXTERNAL VARIABLE STORAGE     05940000
+         ST    R1,N.VMVXVAR       SET EXTERNAL VARIABLE ADDRESS         05950000
+                                                                        05960000
+*                                                                       05970000
+* ADD A NEW VARIABLE                                                    05980000
+*---------------------------------------------------------------------- 05990000
+                                                                        06000000
+VPNEWADD DS    0H                                                       06010000
+                                                                        06020000
+         $ENTITY ADD,                                                  +06030000
+               ANCHOR=VMPENT@,                                         +06040000
+               ENTITY=((R5),(R4)),                                     +06050000
+               TOKEN=SAVTOKEN,                                         +06060000
+               USERDATA=NEWVARHD,                                      +06070000
+               WKA=WRK256,                                             +06080000
+               MF=(E,$ENTMFL)     LOCATE THE VARIABLE ENTITY            06090000
+                                                                        06100000
+         BNZ   ERRENT             BRANCH IF ERROR                       06110000
+         B     VPUPDVML           DONE, RETURN MANAGED VARIABLE INFO    06120000
+                                                                        06130000
+*                                                                       06140000
+* ZERO LENGTH VARIABLE, RELEASE VARIABLE STORAGE AND SET NULL VARIABLE  06150000
+*---------------------------------------------------------------------- 06160000
+                                                                        06170000
+VPNULL   DS    0H                                                       06180000
+                                                                        06190000
+         $ENTITY EXTR,                                                 +06200000
+               ANCHOR=VMPENT@,                                         +06210000
+               ENTITY=((R5),(R4)),                                     +06220000
+               USERDATA=OLDVARHD,                                      +06230000
+               WKA=WRK256,                                             +06240000
+               MF=(E,$ENTMFL)     LOCATE THE VARIABLE ENTITY            06250000
+                                                                        06260000
+         BNZ   VPNULNEW           DONE IF NOT LOCATED                   06270000
+                                                                        06280000
+         L     R3,O.VMVXVAR       EXTERNAL VARIABLE ADDRESS             06290000
+         LH    R2,O.VMVMXLEN      EXTERNAL VARIABLE STORAGE SIZE        06300000
+         LTR   R2,R2              NULL VARIABLE?                        06310000
+         BNP   RETURN             RETURN IF NULL VARIABLE               06320000
+                                                                        06330000
+         STGRETN ADDR=(R3),                                            +06340000
+               LEN=(R2),                                               +06350000
+               QH=(RQH)           RELEASE EXTERNAL VARIABLE STORAGE     06360000
+                                                                        06370000
+         BNZ   ERRSTG             BRANCH IF ERROR                       06380000
+                                                                        06390000
+         XC    N.VMVMXLEN,N.VMVMXLEN     MAXIMUM LENGTH = 0             06400000
+                                                                        06410000
+         BAS   R14,ENTPOST        POST THE NEW ENTITY                   06420000
+         B     VPUPDVML           DONE, RETURN MANAGED VARIABLE INFO    06430000
+                                                                        06440000
+*                                                                       06450000
+* ADD A NEW NULL VARIABLE                                               06460000
+*---------------------------------------------------------------------- 06470000
+                                                                        06480000
+VPNULNEW DS    0H                                                       06490000
+                                                                        06500000
+         XC    N.VMVMXLEN,N.VMVMXLEN     MAXIMUM LENGTH = 0             06510000
+                                                                        06520000
+         $ENTITY ADD,                                                  +06530000
+               ANCHOR=VMPENT@,                                         +06540000
+               ENTITY=((R5),(R4)),                                     +06550000
+               TOKEN=SAVTOKEN,                                         +06560000
+               USERDATA=NEWVARHD,                                      +06570000
+               WKA=WRK256,                                             +06580000
+               MF=(E,$ENTMFL)     LOCATE THE VARIABLE ENTITY            06590000
+                                                                        06600000
+         BNZ   ERRENT             BRANCH IF ERROR                       06610000
+         B     VPUPDVML           DONE, RETURN MANAGED VARIABLE INFO    06620000
+                                                                        06630000
+*---------------------------------------------------------------------- 06640000
+* MANAGED VARIABLE HAS BEEN SUCCESSFULLY UPDATED,  RETURN ADDRESS       06650000
+* AND LENGTH OF MANAGED VARIABLE IN VMLIST.                             06660000
+*---------------------------------------------------------------------- 06670000
+VPUPDVML DS    0H                 *** NOTE. EXT VARIABLE SUPPORT ONLY   06680000
+         LH    R2,N.VMVLENG       LENGTH OF VARIABLE                    06690000
+         L     R3,N.VMVXVAR       ADDRESS OF EXTERNAL VARIABLE          06700000
+                                                                        06710000
+         ST    R2,VMLVARLN        POST ADDRESS OF VARIABLE              06720000
+         ST    R3,VMLVAR          POST ADDRESS OF VARIABLE LENGTH       06730000
+         B     RETURN             DONE                                  06740000
+                                                                        06750000
+         DROP  N                                                        06760000
+         DROP  O                                                        06770000
+                                                                        06780000
+*---------------------------------------------------------------------- 06790000
+* EXCEPTION ROUTINES                                                    06800000
+*---------------------------------------------------------------------- 06810000
+                                                                        06820000
+ERRPARM  DS    0H                                                       06830000
+                                                                        06840000
+         MVC   VMLRSNCD,=A($VARMGR_RSN_INVALID_PARMS)                   06850000
+         B     ERRCOMM                                                  06860000
+                                                                        06870000
+ERRNOTPM DS    0H                                                       06880000
+                                                                        06890000
+         MVC   VMLRSNCD,=A($VARMGR_RSN_NOT_PERMITTED)                   06900000
+         B     ERRCOMM                                                  06910000
+                                                                        06920000
+ERRREQCD DS    0H                                                       06930000
+                                                                        06940000
+         MVC   VMLRSNCD,=A($VARMGR_RSN_INVALID_REQUEST)                 06950000
+         B     ERRCOMM                                                  06960000
+                                                                        06970000
+ERRENVIR DS    0H                                                       06980000
+                                                                        06990000
+         MVC   VMLRSNCD,=A($VARMGR_RSN_ENVIRONMENT)                     07000000
+         B     ERRCOMM                                                  07010000
+                                                                        07020000
+ERRSTG   DS    0H                                                       07030000
+                                                                        07040000
+         MVC   VMLRSNCD,=A($VARMGR_RSN_STG_ERROR)                       07050000
+         B     ERRCOMM                                                  07060000
+                                                                        07070000
+ERRENT   DS    0H                                                       07080000
+                                                                        07090000
+         MVC   VMLRSNCD,=A($VARMGR_RSN_ENT_ERROR)                       07100000
+         B     ERRCOMM                                                  07110000
+                                                                        07120000
+ERRSCOPE DS    0H                                                       07130000
+                                                                        07140000
+         MVC   VMLRSNCD,=A($VARMGR_RSN_INVALID_SCOPE)                   07150000
+         B     ERRCOMM                                                  07160000
+                                                                        07170000
+ERRCOMM  DS    0H                                                       07180000
+                                                                        07190000
+         XC    RETR15,RETR15      RC = 0 --> UNSUCCESSFUL               07200000
+         B     RETURN                                                   07210000
+                                                                        07220000
+*---------------------------------------------------------------------- 07230000
+* RETURN TO CALLER                                                      07240000
+*---------------------------------------------------------------------- 07250000
+                                                                        07260000
+RETURN   DS    0H                                                       07270000
+                                                                        07280000
+         MVC   RETR0,VMLRSNCD     PASS REASON CODE IN R0                07290000
+                                                                        07300000
+         $TRACE *=A(TRC_NAV_VARMGR),80    TRACE ENTRY W/ 80 USER BYTES  07310000
+                                                                        07320000
+         BNZ   NOTRACE            BRANCH IF TRACING NOT AVAILABLE       07330000
+                                                                        07340000
+         L     R14,4(,R13)        CALLER'S SAVE AREA                    07350000
+         L     R2,68(,R14)        CALLER'S R12 (PROBABLE BASE REG)      07360000
+         L     R14,12(,R14)       CALLER'S RETURN ADDRESS               07370000
+         LA    R14,0(,R14)        CLEAR HI                              07380000
+         LA    R2,0(,R2)          CLEAR HI                              07390000
+         ST    R14,16(,R1)        TRACE RETURN ADDRESS                  07400000
+         LA    R15,4(,R2)         SAVE PROBABLE BASE REG +4             07410000
+         SR    R14,R2             CALCULATE OFFSET                      07420000
+         BNP   NOOFFSET           BRANCH IF OFFSET DOESN'T LOOK GOOD    07430000
+         C     R14,=F'4096'       WAS CALL POINT WITHIN ONE BASE REG?   07440000
+         BH    NOOFFSET           BRANCH IF NOT                         07450000
+         ST    R14,20(,R1)        TRACE PROBABLE CALL POINT OFFSET      07460000
+         LA    R3,32(,R15)        CHECK FOR "PLATINUM" IN FIRST 36BYTES 07470000
+         LA    R2,2               INCREMENT BY TWO'S                    07480000
+                                                                        07490000
+TEYELOOP DS    0H                                                       07500000
+                                                                        07510000
+         CLC   0(8,R15),=CL8'PLATINUM' @CPYRYT EYECATCHER?              07520000
+         BE    TEYEGOT            BRANCH IF YES                         07530000
+         BXLE  R15,R2,TEYELOOP    LOOK FOR THE @CPYRYT EYECATCHER       07540000
+         B     NOOFFSET           BRANCH IF @CPYRYT NOT FOUND           07550000
+                                                                        07560000
+TEYEGOT  DS    0H                                                       07570000
+                                                                        07580000
+         MVC   24(8,R1),32(R15)   COPY PROBABLE &SYSECT NAME            07590000
+                                                                        07600000
+NOOFFSET DS    0H                                                       07610000
+                                                                        07620000
+                                                                        07630000
+         MVC   0(2,R1),VMLREQCD   TRACE FUNCTION CODE                   07640000
+         MVC   2(1,R1),VMLSCOPE   TRACE SCOPE                           07650000
+         MVC   3(1,R1),VMLCLASS   TRACE VARIABLE CLASS                  07660000
+         MVC   4(12,R1),RETREGS   TRACE 15,0,1 RETURN REGISTERS         07670000
+         MVC   32(4,R1),VMLNAM    TRACE VARIABLE NAME ADDRESS           07680000
+         MVC   36(4,R1),VMLNAMLN  TRACE VARIABLE NAME LENGTH            07690000
+         MVC   56(4,R1),VMLVAR    TRACE VARIABLE ADDRESS                07700000
+         MVC   60(4,R1),VMLVARLN  TRACE VARIABLE LENGTH                 07710000
+                                                                        07720000
+         LR    R2,R1              SAVE TRACE ENTRY ADDRESS              07730000
+         LA    R0,40(,R1)         COPY-TO ADDRESS                       07740000
+         LA    R1,16              COPY-TO LENGTH                        07750000
+         L     R14,VMLNAM         COPY-FROM ADDRESS                     07760000
+         L     R15,VMLNAMLN       COPY-FROM LENGTH                      07770000
+         MVCL  R0,R14             COPY UP TO 8-BYTES OF VARIABLE NAME   07780000
+                                                                        07790000
+         LA    R0,64(,R2)         COPY-TO ADDRESS                       07800000
+         LA    R1,16              COPY-TO LENGTH                        07810000
+         L     R14,VMLVAR         COPY-FROM ADDRESS                     07820000
+         L     R15,VMLVARLN       COPY-FROM LENGTH                      07830000
+         MVCL  R0,R14             COPY UP TO 8-BYTES OF VARIABLE        07840000
+                                                                        07850000
+NOTRACE  DS    0H                                                       07860000
+         LM    R15,R1,RETREGS     RETURN VALUES                         07870000
+                                                                        07880000
+         PUSH  USING              SAVE USINGS                           07890000
+         LR    R9,R12             RESTORE PROGRAM BASE                  07900000
+         USING IVARMGR,R9         ADDRESSABILITY                        07910000
+         DROP  R12                IVARMGR                               07920000
+         L     R12,#CRAB          ADDRESS OF "C" RUNTIME BLOCK          07930000
+         USING CRAB,R12           ADDRESSABILITY                        07940000
+                                                                        07950000
+         CEXIT RC=(R15),INDEP=YES RETURN                                07960000
+         POP   USING              RESTORE USINGS                        07970000
+                                                                        07980000
+*---------------------------------------------------------------------- 07990000
+* SUBROUTINE FREEVAR: RUN $ENTITY CHAIN AND FREE EXTERNAL VARIABLES     08000000
+*                                                                       08010000
+* ENTRY:  VMPOOL                                                        08020000
+*                                                                       08030000
+* RETURN: ALL RESTORED                                                  08040000
+*                                                                       08050000
+*---------------------------------------------------------------------- 08060000
+                                                                        08070000
+FREEVAR  DS    0H                                                       08080000
+                                                                        08090000
+         STM   R14,R5,SUB0SAVE    SAVE REGISTERS                        08100000
+                                                                        08110000
+X        USING ENTCNTL,R5                                               08120000
+         L     R5,VMPENT@         ADDRESS OF ENTCNTL                    08130000
+         L     R5,X.ENTQ          FIRST ENTITY ENTRY IN CHAIN           08140000
+         DROP  X                                                        08150000
+                                                                        08160000
+X        USING ENENTRY,R5                                               08170000
+Y        USING VMVAR,R4                                                 08180000
+                                                                        08190000
+FVARNEXT DS    0H                                                       08200000
+                                                                        08210000
+         LTR   R5,R5              GOOD ENTITY ENTRY?                    08220000
+         BNP   FVARRETN           BRANCH IF END OF CHAIN                08230000
+         LA    R4,X.ENEUSER       ADDRESS OF XL16 USER AREA             08240000
+                                                                        08250000
+*        CLC   Y.VMVLENG,=H'12'   INTERNAL VARIABLE?                    08260000
+*        BNH   FVARINT            BRANCH IF YES                         08270000
+                                                                        08280000
+         L     R3,Y.VMVXVAR       ADDRESS OF EXTERNAL VARIABLE          08290000
+         LH    R2,Y.VMVMXLEN      LENGTH OF STORAGE AREA                08300000
+         LTR   R2,R2              NULL VARIABLE?                        08310000
+         BNP   FVARINT            BRANCH IF YES                         08320000
+                                                                        08330000
+         STGRETN LEN=(R2),                                             +08340000
+               ADDR=(R3),                                              +08350000
+               QH=(RQH)           RELEASE EXTERNAL VARIABLE STORAGE     08360000
+                                                                        08370000
+         BNZ   ERRSTG             BRANCH IF STG ERROR                   08380000
+                                                                        08390000
+FVARINT  DS    0H                                                       08400000
+                                                                        08410000
+         L     R5,X.ENEQFWD       NEXT ENTITY ENTRY IN CHAIN            08420000
+         B     FVARNEXT           GO RELEASE EXTERNAL VARIABLES         08430000
+                                                                        08440000
+FVARRETN DS    0H                                                       08450000
+                                                                        08460000
+         LM    R14,R5,SUB0SAVE    RESTORE REGISTERS                     08470000
+         BR    R14                RETURN TO CALLER                      08480000
+                                                                        08490000
+         DROP  X                                                        08500000
+         DROP  Y                                                        08510000
+                                                                        08520000
+*---------------------------------------------------------------------- 08530000
+* SUBROUTINE ENTPOST: UPDATE THE ENTITY OF AN EXISTING VARIABLE         08540000
+*                                                                       08550000
+* ENTRY:  NEWVARHD                                                      08560000
+*         R5 = VARIABLE NAME ADDRESS                                    08570000
+*         R4 = VARIABLE NAME LENGTH                                     08580000
+*                                                                       08590000
+* RETURN: ALL RESTORED                                                  08600000
+*                                                                       08610000
+*---------------------------------------------------------------------- 08620000
+                                                                        08630000
+ENTPOST  DS    0H                                                       08640000
+                                                                        08650000
+         STM   R14,R5,SUB0SAVE    SAVE REGISTERS                        08660000
+                                                                        08670000
+         $ENTITY POST,                                                 +08680000
+               ANCHOR=VMPENT@,                                         +08690000
+               ENTITY=((R5),(R4)),                                     +08700000
+               USERDATA=NEWVARHD,                                      +08710000
+               WKA=WRK256,                                             +08720000
+               MF=(E,$ENTMFL)     UPDATE THE VARIABLE ENTITY            08730000
+                                                                        08740000
+         BNZ   ERRENT             BRANCH IF ERROR                       08750000
+         LM    R14,R5,SUB0SAVE    RESTORE REGISTERS                     08760000
+         BR    R14                RETURN TO CALLER                      08770000
+                                                                        08780000
+*---------------------------------------------------------------------- 08790000
+* SUBROUTINE STORENEW: ALLOCATE STORAGE AND COPY NEW EXTERNAL VARIABLE  08800000
+*                                                                       08810000
+* ENTRY:  R1 = VARIABLE ADDRESS                                         08820000
+*         R0 = VARIABLE LENGTH                                          08830000
+*                                                                       08840000
+* RETURN: R1 = ADDRESS OF EXTERNAL VARIABLE STORAGE                     08850000
+*                                                                       08860000
+*---------------------------------------------------------------------- 08870000
+                                                                        08880000
+STORENEW DS    0H                                                       08890000
+                                                                        08900000
+         STM   R14,R5,SUB0SAVE    SAVE REGISTERS                        08910000
+         LR    R4,R1              VARIABLE ADDRESS                      08920000
+         LR    R5,R0              VARIABLE LENGTH                       08930000
+                                                                        08940000
+         STGGET (R5),                                                  +08950000
+               QH=(RQH)           GET EXTERNAL VARIABLE STORAGE         08960000
+                                                                        08970000
+         BNZ   ERRSTG             BRANCH IF STORAGE ERROR               08980000
+         ST    R1,SUB0SAVE+12     RETURN ADDRESS IN R1                  08990000
+                                                                        09000000
+         LTR   R4,R4              VARIABLE IS MARKED BLANK ?            09010000
+         BM    STORBLK                                                  09020000
+                                                                        09030000
+         LR    R0,R1              COPY-TO ADDRESS                       09040000
+         LR    R1,R5              COPY-TO LENGTH                        09050000
+         MVCL  R0,R4              COPY VARIABLE TO EXTERNAL STORAGE     09060000
+         B     STOREXIT                                                 09070000
+                                                                        09080000
+STORBLK  DS    0H                                                       09090000
+         LR    R14,R1             COPY-TO ADDRESS                       09100000
+         LR    R2,R5              COPY-TO LENGTH                        09110000
+         MVI   0(R14),C' '        FILL UP VARIABLE WITH BLANKS          09120000
+         BCTR  R2,0                                                     09130000
+         BCTR  R2,0               PREPARE FOR EX                        09140000
+         LTR   R2,R2                                                    09150000
+         BM    STOREXIT                                                 09160000
+         L     R1,=F'254'                                               09170000
+SBLKLOOP DS    0H                                                       09180000
+         C     R2,=F'254'                                               09190000
+         BNH   SBLKLAST                                                 09200000
+         MVI   0(R14),C' '        FILL UP VARIABLE WITH BLANKS          09210000
+         EX    R1,*+4                                                   09220000
+         MVC   1(0,R14),0(R14)    COPY NEW VARIABLE TO EXTERNAL STORAGE 09230000
+         A     R14,=F'256'        ADVANCE TO NEXT 256 BYTES FRAME       09240000
+         S     R2,=F'256'                                               09250000
+         B     SBLKLOOP                                                 09260000
+SBLKLAST DS    0H                                                       09270000
+         MVI   0(R14),C' '        FILL UP VARIABLE WITH BLANKS          09280000
+         LTR   R2,R2                                                    09290000
+         BM    STOREXIT                                                 09300000
+         EX    R2,*+4                                                   09310000
+         MVC   1(0,R14),0(R14)    COPY NEW VARIABLE TO EXTERNAL STORAGE 09320000
+                                                                        09330000
+STOREXIT DS    0H                                                       09340000
+         LM    R14,R5,SUB0SAVE    RESTORE REGISTERS                     09350000
+         BR    R14                RETURN TO CALLER                      09360000
+                                                                        09370000
+*---------------------------------------------------------------------- 09380000
+* SUBROUTINE CKGETPUT: VALIDATE PARMS FOR VGET AND VPUT                 09390000
+*                                                                       09400000
+* ENTRY:  VMPOOL & VMLIST                                               09410000
+*                                                                       09420000
+* RETURN: R1 = ADDRESS OF VARIABLE NAME                                 09430000
+*         R0 = LENGTH  OF VARIABLE NAME                                 09440000
+*                                                                       09450000
+*---------------------------------------------------------------------- 09460000
+                                                                        09470000
+CKGETPUT DS    0H                                                       09480000
+                                                                        09490000
+         STM   R0,R15,SUB0SAVE    SAVE REGISTERS                        09500000
+                                                                        09510000
+         LTR   RVMPOOL,RVMPOOL    VMPOOL LOCATED?                       09520000
+         BNZ   CKVMPOK            BRANCH IF YES                         09530000
+         CLI   VMLSCOPE,$VARMGR_SCOPE_USER                              09540000
+         BE    ERRENVIR           USER POOL VGET/VPUT MUST HAVE VMPOOL  09550000
+         CLC   VMLREQCD,=AL2($VARMGR_VGET)                              09560000
+         BE    CKVMPOK            DON'T CREATE POOL FOR VGET            09570000
+         SR    R2,R2              CLEAR                                 09580000
+         IC    R2,VMLSCOPE        REQUESTED SCOPE                       09590000
+                                                                        09600000
+         PUSH  USING              SAVE USINGS                           09610000
+         DROP  R12                IVARMGR                               09620000
+         USING IVARMGR,R3         ADDRESSABILITY                        09630000
+         USING CRAB,R12           ADDRESSABILITY                        09640000
+         LR    R3,R12             RESTORE PROGRAM BASE                  09650000
+         L     R12,#CRAB          ADDRESS OF "C" RUNTIME BLOCK          09660000
+                                                                        09670000
+         $VARMGR PCREATE,                                              +09680000
+               SCOPE=(R2),                                             +09690000
+               MF=(E,$VARMFL)                                           09700000
+                                                                        09710000
+         LR    R12,R3             RESTORE NORMAL IVARMGR BASE           09720000
+         POP   USING              RESTORE USINGS                        09730000
+                                                                        09740000
+         LTR   R15,R15            SUCCESSFUL CALL?                      09750000
+         BZ    ERRENVIR           BRANCH IF NOT                         09760000
+                                                                        09770000
+X        USING VMLIST,$VARMFL                                           09780000
+         L     RVMPOOL,X.VMLVPOOL SET NEW VMPOOL ADDRESS                09790000
+         DROP  X                                                        09800000
+                                                                        09810000
+CKVMPOK  DS    0H                                                       09820000
+                                                                        09830000
+         ICM   R1,15,VMLNAM       ADDRESS OF NAME                       09840000
+         BZ    ERRPARM            BRANCH IF BAD PARMS                   09850000
+         ICM   R0,15,VMLNAMLN     LENGTH OF NAME                        09860000
+         BNP   ERRPARM            BRANCH IF BAD PARMS                   09870000
+         C     R0,=A($VARMGR_VARNAME_SIZE)                              09880000
+         BH    ERRPARM            BRANCH IF BAD PARMS                   09890000
+                                                                        09900000
+         LM    R2,R15,SUB0SAVE+8  RESTORE REGISTERS                     09910000
+         BR    R14                RETURN TO CALLER                      09920000
+                                                                        09930000
+*---------------------------------------------------------------------- 09940000
+* SUBROUTINE TERMENT: TERM A $ENTITY MANAGER                            09950000
+*                                                                       09960000
+* ENTRY:  VMPOOL                                                        09970000
+*                                                                       09980000
+* RETURN: ALL RESTORED                                                  09990000
+*                                                                       10000000
+*---------------------------------------------------------------------- 10010000
+                                                                        10020000
+TERMENT  DS    0H                                                       10030000
+                                                                        10040000
+         STM   R14,R2,SUB0SAVE    SAVE REGISTERS                        10050000
+                                                                        10060000
+         $ENTITY TERM,                                                 +10070000
+               ANCHOR=VMPENT@,                                         +10080000
+               WKA=WRK256,                                             +10090000
+               MF=(E,$ENTMFL)                                           10100000
+                                                                        10110000
+         BNZ   ERRENT             BRANCH IF ERROR                       10120000
+         LM    R14,R2,SUB0SAVE    RESTORE REGISTERS                     10130000
+         BR    R14                RETURN TO CALLER                      10140000
+                                                                        10150000
+*---------------------------------------------------------------------- 10160000
+* SUBROUTINE STGINIT: INITIALIZE SCOPE=USER IMPLICIT STORAGE POOL       10170000
+*                                                                       10180000
+* ENTRY:  VMLIST                                                        10190000
+*                                                                       10200000
+* RETURN: RQH = QH ADDRESS                                              10210000
+*                                                                       10220000
+*---------------------------------------------------------------------- 10230000
+                                                                        10240000
+STGINIT  DS    0H                                                       10250000
+                                                                        10260000
+         STM   R14,R5,SUB0SAVE    SAVE REGISTERS                        10270000
+                                                                        10280000
+         STGGET 16,                                                    +10290000
+               QH=ICTSTG          GET GLOBAL STG FOR USER QH            10300000
+                                                                        10310000
+         BNZ   ERRSTG             BRANCH IF ERROR                       10320000
+         LR    RQH,R1             NEW QH ADDRESS                        10330000
+         MVC   8(8,RQH),=CL8'VMP___QH' MARK IT                          10340000
+         L     R2,=A($VARMGR_STGMGR_BLKSIZE)                            10350000
+                                                                        10360000
+         STGINIT (R2),                                                 +10370000
+               QH=(RQH)           INITIALIZE A USER STGMGR POOL         10380000
+                                                                        10390000
+         BNZ   ERRSTG             BRANCH IF ERROR                       10400000
+         OI    FLAGS,FLUSERQH     USER QH AND POOL ALLOCATED            10410000
+         LM    R14,R5,SUB0SAVE    RESTORE REGISTERS                     10420000
+         BR    R14                RETURN TO CALLER                      10430000
+                                                                        10440000
+*---------------------------------------------------------------------- 10450000
+* SUBROUTINE STGTERM: DESTROY SCOPE=USER IMPLICIT STORAGE POOL          10460000
+*                                                                       10470000
+* ENTRY:  VMPOOL                                                        10480000
+*                                                                       10490000
+* RETURN: ALL REGISTERS RESTORED                                        10500000
+*                                                                       10510000
+*---------------------------------------------------------------------- 10520000
+                                                                        10530000
+STGTERM  DS    0H                                                       10540000
+                                                                        10550000
+         STM   R14,R5,SUB0SAVE    SAVE REGISTERS                        10560000
+                                                                        10570000
+         STGTERM QH=(RQH)         RELEASE ALL EXTENTS                   10580000
+                                                                        10590000
+         BNZ   ERRSTG             BRANCH IF ERROR                       10600000
+                                                                        10610000
+         STGRETN ADDR=(RQH),                                           +10620000
+               LEN=16,                                                 +10630000
+               QH=ICTSTG          FREE GLOBAL STG FOR USER QH           10640000
+                                                                        10650000
+         BNZ   ERRSTG             BRANCH IF ERROR                       10660000
+         LM    R14,R5,SUB0SAVE    RESTORE REGISTERS                     10670000
+         BR    R14                RETURN TO CALLER                      10680000
+                                                                        10690000
+*---------------------------------------------------------------------- 10700000
+* SUBROUTINE FINDANC: LOCATE VMPOOL ANCHOR WORD, QH, AND VMPOOL         10710000
+*                                                                       10720000
+* ENTRY:  VMLIST                                                        10730000
+*                                                                       10740000
+* RETURN: R01 = ADDRESS OF VMPOOL ANCHOR WORD                           10750000
+*         RQH = QH ADDRESS                                              10760000
+*         RVMPOOL = VMPOOL BLOCK ADDRESS                                10770000
+*                                                                       10780000
+*---------------------------------------------------------------------- 10790000
+                                                                        10800000
+FINDANC  DS    0H                                                       10810000
+                                                                        10820000
+         STM   R14,R5,SUB0SAVE    SAVE REGISTERS                        10830000
+                                                                        10840000
+         CLI   VMLSCOPE,$VARMGR_SCOPE_SYSTEM                            10850000
+         BE    FANCSYS            BRANCH IF SYSTEM  SCOPE               10860000
+         CLI   VMLSCOPE,$VARMGR_SCOPE_TASK                              10870000
+         BE    FANCTASK           BRANCH IF TASK    SCOPE               10880000
+         CLI   VMLSCOPE,$VARMGR_SCOPE_PROCESS                           10890000
+         BE    FANCPROC           BRANCH IF PROCESS SCOPE               10900000
+         CLI   VMLSCOPE,$VARMGR_SCOPE_USER                              10910000
+         BE    FANCUSER           BRANCH IF USER    SCOPE               10920000
+         B     ERRSCOPE           INVALID SCOPE                         10930000
+                                                                        10940000
+FANCSYS  DS    0H                                                       10950000
+                                                                        10960000
+         LA    R1,ICTVPOOL        SYSTEM ANCHOR WORD                    10970000
+         LA    RQH,ICTSTG         STORAGE QH                            10980000
+         L     RVMPOOL,0(,R1)     VMPOOL BLOCK                          10990000
+         ST    RICVT,SAVOWNER     OWNER ID FOR PCREATE                  11000000
+         B     FANCRETN           RETURN TO CALLER                      11010000
+                                                                        11020000
+FANCTASK DS    0H                                                       11030000
+                                                                        11040000
+         LTR   RITASK,RITASK      IS THERE AN ITASK POINTER?            11050000
+         BZ    ERRENVIR           BRANCH IF NOT                         11060000
+         LA    R1,TSKVPOOL        TASK ANCHOR WORD                      11070000
+         LA    RQH,TSKSTG         STORAGE QH                            11080000
+         L     RVMPOOL,0(,R1)     VMPOOL BLOCK                          11090000
+         ST    RITASK,SAVOWNER    OWNER ID FOR PCREATE                  11100000
+         LTR   RVMPOOL,RVMPOOL    WAS THE VMPOOL RESOLVED?              11110000
+         BZ    FANCRETN           BRANCH IF NOT                         11120000
+         L     RQH,VMPQH          USE QH FROM PCREATE (POSS. X-TASK)    11130000
+         B     FANCRETN           RETURN TO CALLER                      11140000
+                                                                        11150000
+FANCPROC DS    0H                                                       11160000
+                                                                        11170000
+         LTR   RITASK,RITASK      IS THERE AN ITASK POINTER?            11180000
+         BZ    ERRENVIR           BRANCH IF NOT                         11190000
+         ICM   R2,15,TSKPCBC      IS THERE A CURRENT PCB?               11200000
+         BZ    ERRENVIR           BRANCH IF NOT                         11210000
+X        USING IPCB,R2                                                  11220000
+         LA    R1,X.PCBVPOOL      PROCESS ANCHOR WORD                   11230000
+         LA    RQH,X.PCBSTG       STORAGE QH                            11240000
+         DROP  X                                                        11250000
+         L     RVMPOOL,0(,R1)     VMPOOL BLOCK                          11260000
+         ST    R2,SAVOWNER        OWNER ID FOR PCREATE                  11270000
+         LTR   RVMPOOL,RVMPOOL    WAS THE VMPOOL RESOLVED?              11280000
+         BZ    FANCRETN           BRANCH IF NOT                         11290000
+         L     RQH,VMPQH          USE QH FROM PCREATE (POSS. X-PROC)    11300000
+         B     FANCRETN           RETURN TO CALLER                      11310000
+                                                                        11320000
+FANCUSER DS    0H                                                       11330000
+                                                                        11340000
+         LA    R1,VMLVPOOL        USER ANCHOR WORD                      11350000
+         L     RQH,VMLQH          STORAGE QH                            11360000
+         L     RVMPOOL,0(,R1)     VMPOOL BLOCK                          11370000
+         LTR   RVMPOOL,RVMPOOL    DOES VMPOOL EXIST?                    11380000
+         BZ    FANCRETN           BRANCH IF NOT                         11390000
+         L     RQH,VMPQH          USE QH FROM PCREATE                   11400000
+         B     FANCRETN           RETURN TO CALLER                      11410000
+                                                                        11420000
+FANCRETN DS    0H                                                       11430000
+                                                                        11440000
+         LM    R14,R0,SUB0SAVE    RESTORE REGISTERS                     11450000
+         LM    R2,R5,SUB0SAVE+16  RESTORE REGISTERS                     11460000
+         BR    R14                RETURN TO CALLER                      11470000
+                                                                        11480000
+         LTORG ,                                                        11490000
+                                                                        11500000
+         $VARMGR DSECT=YES        INTEGRATOR VARIABLE SERVICES          11510000
+         PRINT NOGEN                                                    11520000
+         IHAPSA ,                 MVS PREFIXED SAVE AREA                11530000
+         IKJTCB ,                 MVS TASK CONTROL BLOCK                11540000
+         TRACODES ,               INTEGRATOR TRACE CODE EQUATES         11550000
+         ICVT  ,                  INTEGRATOR CVT                        11560000
+         IVTAMCVT ,               INTEGRATOR VTAM CVT                   11570000
+         ITASK ,                  INTEGRATOR TASK BLOCK                 11580000
+         IPCB ,                   INTEGRATOR PROCESS BLOCK              11590000
+         ABCODES ,                INTEGRATOR $ABEND CODES               11600000
+         $ENTITY DSECT=ALL        INTEGRATOR $ENTITY SERVICE            11610000
+         END   ,                                                        11620000

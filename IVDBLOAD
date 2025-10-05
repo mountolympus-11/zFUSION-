@@ -1,0 +1,1183 @@
+IVDBLOAD TITLE '- LOAD VIRTUAL DATABASE TABLE DEFINITION'               00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE: IVDBLOAD - Load virtual database table definition            00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This routine is used to load a named VDB table definition          00080000
+*    from the appropriate SYSTABLES, SYSCOLUMNS, and                    00090000
+*    SYSVARIABLES entries of the project catalog.                       00100000
+*                                                                       00110000
+*    The VDB table definition consists of a single SYSTABLES            00120000
+*    entry and one or more SYSCOLUMNS and their corresponding           00130000
+*    SYSVARIABLES entries.  Each SYSCOLUMN contains up to four          00140000
+*    references (foreign keys) to the SYSVARIABLES used to              00150000
+*    satisfy SQL select, insert, update, and delete queries.            00160000
+*    If the caller provides a query type, only those                    00170000
+*    SYSVARIABLES contributing to that query are returned.              00180000
+*    Otherwise all associated SYSVARIABLES are returned.                00190000
+*                                                                       00200000
+*    The results of a successful VDB load request are returned          00210000
+*    in VDBLRET format. This return area contains the SYSTABLES         00220000
+*    entry and pointers to lists containing the SYSCOLUMNS and          00230000
+*    SYSVARIABLES.                                                      00240000
+*                                                                       00250000
+*    A "storage release obligation list" is returned in                 00260000
+*    VDBLRET to simplify the callers cleanup.  All storage              00270000
+*    areas acquired are IPROJ owned facilitating cross-process          00280000
+*    data sharing.  Refer to VDBLRET for details.  Use IVDBREL          00290000
+*    to release these areas.                                            00300000
+*                                                                       00310000
+*    The VARDATA extensions of both the SYSCOLUMNS and                  00320000
+*    SYSVARIABLES are placed in a separate buffer during table          00330000
+*    fetch so that the resulting column and variable list can           00340000
+*    be scanned using fixed length increments.                          00350000
+*                                                                       00360000
+*                                                                       00370000
+* METHOD:                                                               00380000
+*                                                                       00390000
+*    The SYSVARIABLE entries are attached to their respective           00400000
+*    SYSCOLUMNS entries via an unsigned, 16-bit col->var offlink        00410000
+*    based on the origin of the SYSVARIABLE buffer segment              00420000
+*    returned in LVDBAVAR.                                              00430000
+*                                                                       00440000
+*                                                                       00450000
+* NOTES:                                                                00460000
+*                                                                       00470000
+*    Table tokens for catalog tables are acquired from IUSER.           00480000
+*    If no token is available for SYSTABLES, SYSCOLUMNS, and/or         00490000
+*    SYSVARIABLES, they are created via TBOPEN and retained in          00500000
+*    the IUSER.  TBCLOSE is not issued.                                 00510000
+*                                                                       00520000
+*                                                                       00530000
+* ON ENTRY:                                                             00540000
+*                                                                       00550000
+*    R1  points to a parameter list described by the VDBLOADP           00560000
+*        mapping                                                        00570000
+*                                                                       00580000
+*                                                                       00590000
+* ON EXIT:                                                              00600000
+*                                                                       00610000
+*    R15 and R0 contain a return code / reason code pair                00620000
+*                                                                       00630000
+*        RC00 - VDB definition returned via VDBLRET                     00640000
+*                                                                       00650000
+*               R0 - number of columns                                  00660000
+*               R1 - addr of the VDBLRET return area                    00670000
+*                                                                       00680000
+*        RC04 - the named project is not open                           00690000
+*                                                                       00700000
+*        RC08 - missing, invalid, or incomplete VDB definition          00710000
+*                                                                       00720000
+*               RSN04 - no SYSTABLE entry, VDB table not defined        00730000
+*               RSN08 - table not evaluated for SQL execution           00740000
+*               RSN12 - VDB table has no columns                        00750000
+*               RSN16 - VDB table has no variables                      00760000
+*                                                                       00770000
+*        RC12 - unexpected table services completion                    00780000
+*                                                                       00790000
+*               R0-R1 contain diagnostic info in @PUSHERR format        00800000
+*                                                                       00810000
+*        RC16 - storage not available                                   00820000
+*                                                                       00830000
+**<DOC-OFF>****************************************************         00840000
+                                                                        00850000
+         EJECT                                                          00860000
+***************************************************************         00870000
+*                                                                       00880000
+* MAINTENANCE:                                                          00890000
+*                                                                       00900000
+*    03/31/95 R. Turgeon                                                00910000
+*             Column -> variable offlink base changed from              00920000
+*             the beginning of the column/variable block to             00930000
+*             the origin of the variable section, allowing              00940000
+*             support of a larger number of VDB columns.                00950000
+*                                                                       00960000
+*    08/03/95 R. Turgeon                                                00970000
+*             Restructure of parameter list and return area.            00980000
+*             The return area formerly contained in VDBLOADP is         00990000
+*             now separately managed (VDBLRET).                         01000000
+*                                                                       01010000
+*    02/19/96 Su-fen Wu                                                 01020000
+*             Remove the comparison for the region name field           01030000
+*             since the key for variable definition is the              01040000
+*             concatenation of screen name and variable name.           01050000
+*                                                                       01060000
+***************************************************************         01070000
+                                                                        01080000
+         EJECT                                                          01090000
+         #WORK ,                                                        01100000
+VARKEY   DS    F             SYSCOLS OFFSET TO SYSVAR FOREIGN KEY OR 0  01110000
+FIRSTVAR DS    F             SYSVARIABLE SECTION, OFFSET TO FIRST ENTRY 01120000
+COUNTVAR DS    F             SYSVARIABLE COUNT                          01130000
+ORGVAR   DS    F             BUFFER OFFSET TO SYSVARIABLES SECTION      01140000
+*                                                                       01150000
+FIRSTCOL DS    F             SYSCOLUMNS SECTION, OFFSET TO FIRST ENTRY  01160000
+COUNTCOL DS    F             SYSCOLUMN COUNT                            01170000
+ORGCOL   DS    F             BUFFER OFFSET TO SYSCOLUMNS SECTION        01180000
+WIDTHCOL DS    F             RETAINED / TRUNCATED SYSCOLUMN ENTRY WIDTH 01190000
+                                                                        01200000
+BMAXREQ  DS    F             BASEBUFR IS TARGET OF SYSCOL AND SYSVAR    01210000
+*                            TBGETS. TRACK LARGEST BUFFER SIZE REQMT    01220000
+*                            HERE FOR EVENTUAL RETURN                   01230000
+                                                                        01240000
+BASEBUFR DS    0A            BASE RECORD BUFFER                         01250000
+BASEBADR DS    A                BLOCK ADDRESS                           01260000
+BASEBLEN DS    F                BLOCK LENGTH                            01270000
+BASEBNXT DS    A                NEXT INSERTION AREA                     01280000
+BASEBREM DS    F                LENGTH REMAINING                        01290000
+                                                                        01300000
+VDATBUFR DS    0A            VARDATA/X RECORD EXTENSIONS                01310000
+VDATBADR DS    A                BLOCK ADDRESS                           01320000
+VDATBLEN DS    F                BLOCK LENGTH                            01330000
+VDATBNXT DS    A                NEXT INSERTION AREA                     01340000
+VDATBREM DS    F                LENGTH REMAINING                        01350000
+                                                                        01360000
+TBSVREGS DS    3F            R15-R1 AFTER TABLE SERVICES REQUEST        01370000
+RETREGS  DS    3F            R15-R1 STATUS REG SAVEAREA                 01380000
+                                                                        01390000
+SARGAREA DS    XL64             SEARCH ARGUMENT CONSTRUCTION AREA       01400000
+$VDBLRET DS    0F,XL(LVDBRLN)   RETURN AREA STAGING                     01410000
+$SYSTAB  DS    0F,XL(STBLN)     SYSTABLES ROW BUFFER                    01420000
+                                                                        01430000
+         #ENDWORK ,          END OF WORKAREA                            01440000
+                                                                        01450000
+         EJECT                                                          01460000
+         VDBLOADP ,          REQUEST / RETURN LISTS                     01470000
+                                                                        01480000
+         EJECT                                                          01490000
+         TBSERVIS OPEN,GET,EXIST,SET                                    01500000
+                                                                        01510000
+         EJECT                                                          01520000
+         ICATALOG TABLE,COLUMN,VARIABLE                                 01530000
+                                                                        01540000
+         EJECT                                                          01550000
+         EQUS ,                                                         01560000
+                                                                        01570000
+         EJECT                                                          01580000
+IVDBLOAD #ENTER BASE=R12,PREG=R8                                        01590000
+                                                                        01600000
+         USING ITASK,R10          ITASK ADDRESSABILITY                  01610000
+                                                                        01620000
+         EJECT                                                          01630000
+***************************************************************         01640000
+*                                                                       01650000
+*   General initialization                                              01660000
+*                                                                       01670000
+***************************************************************         01680000
+                                                                        01690000
+         USING VDBLOADP,R8        REQUEST LIST                          01700000
+R        USING VDBLRET,$VDBLRET   REQUEST RETURN AREA                   01710000
+T        USING SYSTABLE,$SYSTAB   SYSTABLES RETRIEVAL AREA              01720000
+                                                                        01730000
+         L     R2,TSKPCBC         ADDRESS OF CURRENT PCB                01740000
+         USING IPCB,R2            IPCB ADDRESSABILITY                   01750000
+                                                                        01760000
+         L     R9,PCBUSER         ADDRESS OF IUSER BLOCK                01770000
+         USING IUSER,R9           LIFE OF FUNCTION                      01780000
+                                                                        01790000
+         L     R7,USRPROJ         ADDRESS OF IPROJ                      01800000
+         USING IPROJ,R7           LIFE OF FUNCTION                      01810000
+         DROP  R2                 IPCB                                  01820000
+                                                                        01830000
+*--------------------------------------------------------------         01840000
+*   acquire and validate project and table names                        01850000
+*--------------------------------------------------------------         01860000
+                                                                        01870000
+         L     R1,PVDBPROJ        PROJECT NAME (EXPANSION INTENDED)     01880000
+         CLC   PRJNAME(8),0(R1)   AS ANTICIPATED?                       01890000
+         BNE   ERR_PROJ           ELSE INVALID PROJECT REFERENCE        01900000
+         MVC   R.LVDBPROJ(8),0(R1)   PROJ EXPANSION ???                 01910000
+                                                                        01920000
+         L     R14,PVDBTABL       VDB TABLE NAME                        01930000
+         MVC   R.LVDBTABL,0(R14)  RETAIN IN RETURN AREA                 01940000
+                                                                        01950000
+         MVC   R.LVDBQTYP,PVDBQTYP   RETAIN QUERY TYPE CODE             01960000
+                                                                        01970000
+*--------------------------------------------------------------         01980000
+*   acquire access handle to systables                                  01990000
+*--------------------------------------------------------------         02000000
+                                                                        02010000
+         ICM   R1,15,USRTKTAB     TABLE HANDLE PREV ALLOCATED?          02020000
+         BNZ   GET_TAB                                                  02030000
+                                                                        02040000
+         LA    R1,=CL16'SYSTABLES'   R1 <== TABLE NAME                  02050000
+         LA    R0,PRJTOKEN           R0 <== PROJECT TOKEN               02060000
+         BAS   R14,$TABOPEN                                             02070000
+                                                                        02080000
+         LTR   R15,R15            OPEN SUCCESSFUL?                      02090000
+         BNZ   ERR_TBSV           TABLE SERVICES ERROR OTHERWISE        02100000
+         ST    R1,USRTKTAB        RETAIN SYSTABLES HANDLE               02110000
+                                                                        02120000
+*--------------------------------------------------------------         02130000
+*   load SYSTABLES entry                                                02140000
+*--------------------------------------------------------------         02150000
+                                                                        02160000
+GET_TAB  DS    0H                                                       02170000
+         MVC   T.STBLNAME,R.LVDBTABL  INSERT TABLE NAME IN ROW KEY      02180000
+                                                                        02190000
+         TBEXIST T.SYSTABLE,      ROW RETURN                           X02200000
+               KEYROW=T.SYSTABLE, ROW RETURN AREA PRIMED WITH KEY      X02210000
+               INDEX='PRIMARY',   USING PRIMARY INDEX                  X02220000
+               TTOKEN=USRTKTAB,                                        X02230000
+               MF=(E,MFE_LIST)                                          02240000
+                                                                        02250000
+         STM   R15,R1,TBSVREGS    DIAGNOSTICS                           02260000
+         CH    R15,=AL2(RC04)     DETERMINE COMPLETION                  02270000
+         BE    ERR_VDB            NO VDB DEFINITION                     02280000
+         BH    ERR_TBSV           TABLE SERVICES ERROR                  02290000
+                                                                        02300000
+*--------------------------------------------------------------         02310000
+*   validate VDB capability to satisfy the proposed query               02320000
+*--------------------------------------------------------------         02330000
+                                                                        02340000
+SQL_SEL  DS    0H                                                       02350000
+         CLI   PVDBQTYP,C'S'      SELECT STATEMENT?                     02360000
+         BNE   SQL_INS            NO                                    02370000
+         LA    R2,T.STBLSEL       SQL CAPABILITY FLAG                   02380000
+         LA    R3,SCOLVSEL-SYSCOLS                                      02390000
+         B     SQL_VERF                                                 02400000
+                                                                        02410000
+SQL_INS  DS    0H                                                       02420000
+         CLI   PVDBQTYP,C'I'      INSERT STATEMENT?                     02430000
+         BNE   SQL_DEL            NO                                    02440000
+         LA    R2,T.STBLINS       SQL CAPABILITY FLAG                   02450000
+         LA    R3,SCOLVINS-SYSCOLS                                      02460000
+         B     SQL_VERF                                                 02470000
+                                                                        02480000
+SQL_DEL  DS    0H                                                       02490000
+         CLI   PVDBQTYP,C'D'      DELETE STATEMENT?                     02500000
+         BNE   SQL_UPD            NO                                    02510000
+         LA    R2,T.STBLDEL       SQL CAPABILITY FLAG                   02520000
+         LA    R3,SCOLVDEL-SYSCOLS                                      02530000
+         B     SQL_VERF                                                 02540000
+                                                                        02550000
+SQL_UPD  DS    0H                                                       02560000
+         CLI   PVDBQTYP,C'U'      UPDATE STATEMENT?                     02570000
+         BNE   SQL_ALL            NO                                    02580000
+         LA    R2,T.STBLUPD       SQL CAPABILITY FLAG                   02590000
+         LA    R3,SCOLVUPD-SYSCOLS                                      02600000
+         B     SQL_VERF                                                 02610000
+                                                                        02620000
+SQL_ALL  DS    0H                 NO SQL VERB DECLARED, RETURN ALL DATA 02630000
+         LA    R0,SCOLN           LENGTH OF FULL SYSCOLS ENTRY          02640000
+         ST    R0,WIDTHCOL        RETAIN ALL PERSPECTIVES               02650000
+         B     SQL_FIN                                                  02660000
+                                                                        02670000
+SQL_VERF DS    0H                                                       02680000
+         CLI   0(R2),0            VDB TABLE APPROVED FOR EXECUTE?       02690000
+         NOP   ERR_SQL            FAIL IF NOT                           02700000
+         ST    R3,VARKEY          SAVE SYSCOLUMNS SYSVAR KEY INFO       02710000
+         LA    R0,SCOLEXLN        LENGTH OF TRIMMED SYSCOLS ENTRY       02720000
+         ST    R0,WIDTHCOL        UNUSED FOREIGN KEYS DROP OFF          02730000
+                                                                        02740000
+SQL_FIN  DS    0H                                                       02750000
+                                                                        02760000
+         EJECT                                                          02770000
+***************************************************************         02780000
+*                                                                       02790000
+*   Initial storage allocation for fixed and variable length            02800000
+*   return area buffers                                                 02810000
+*                                                                       02820000
+***************************************************************         02830000
+                                                                        02840000
+         LA    R0,2048            R0 <== DEFAULT INITIAL ALLOC SIZE     02850000
+         ICM   R5,15,PVDBSREQ     BUFFER RECOMMENDATIONS PROVIDED?      02860000
+         BZ    ALLOCFX            SKIP IF NOT                           02870000
+         ICM   R2,15,0(R5)        FIXED BUFFER RECOMMENDATION PROVIDED? 02880000
+         BNP   ALLOCFX            USE DEFAULT SIZE IF NOT               02890000
+         LR    R0,R2              ELSE ACCEPT THE RECOMMENDATION        02900000
+                                                                        02910000
+ALLOCFX  DS    0H                 FIXED LENGTH SECTION                  02920000
+         LA    R1,BASEBUFR        R1 <== BUFFER MGMT BLOCK              02930000
+         BAS   R14,@BUFINIT       INIT FIXED LENGTH ENTRY SECTION       02940000
+         LTR   R15,R15            NORMAL COMPLETION?                    02950000
+         BNZ   ERR_STG            FAIL                                  02960000
+                                                                        02970000
+         LA    R0,1024            R0 <== DEFAULT INITIAL ALLOC SIZE     02980000
+         LTR   R5,R5              BUFFER RECOMMENDATIONS PROVIDED?      02990000
+         BZ    ALLOCVAR           SKIP IF NOT                           03000000
+         ICM   R2,15,4(R5)        VARIABLE BUFFER RECOMMENDATION?       03010000
+         BNP   ALLOCVAR           USE DEFAULT SIZE IF NOT               03020000
+         LR    R0,R2              ELSE ACCEPT THE RECOMMENDATION        03030000
+                                                                        03040000
+ALLOCVAR DS    0H                 VARIALBE LENGTH SECTION               03050000
+         LA    R1,VDATBUFR        R1 <== BUFFER MGMT BLOCK              03060000
+         BAS   R14,@BUFINIT       INIT VARIABLE LENGTH ENTRY SECTION    03070000
+         LTR   R15,R15            NORMAL COMPLETION?                    03080000
+         BNZ   ERR_STG            FAIL                                  03090000
+                                                                        03100000
+*--------------------------------------------------------------         03110000
+*   return area and SYSTABLES row reside in the vardata buffer          03120000
+*--------------------------------------------------------------         03130000
+                                                                        03140000
+         LA    R0,LVDBRLN+STBLN   FIXED RETURN AREA LENGTH              03150000
+         BAS   R14,@SPILBUF       RESERVE SPACE AT BUFFER ORIGIN        03160000
+                                                                        03170000
+         EJECT                                                          03180000
+***************************************************************         03190000
+*                                                                       03200000
+*   Read column definitions - acquire access to SYSCOLUMNS              03210000
+*                                                                       03220000
+***************************************************************         03230000
+                                                                        03240000
+         L     R2,BASEBNXT        COL/VAR BUFFER INSERTION AREA         03250000
+         S     R2,BASEBUFR        OFFSET TO SYSCOLUMNS SECTION          03260000
+         ST    R2,ORGCOL          CONSISTENT TREATMENT OF SECTIONED BFR 03270000
+         ST    R2,FIRSTCOL        SYSCOLUMNS SECTION BEGINS WITH ENTRY  03280000
+                                                                        03290000
+*--------------------------------------------------------------         03300000
+*   acquire access to SYSCOLUMNS table                                  03310000
+*--------------------------------------------------------------         03320000
+                                                                        03330000
+         ICM   R1,15,USRTKCOL     TABLE HANDLE PREV ALLOCATED?          03340000
+         BZ    OPN_COLS           OPEN IT IF NOT                        03350000
+         LA    R1,USRTKCOL        TABLE TOKEN ADDRESS                   03360000
+         LA    R0,=CL8'COLSEQ'    INDEX NAME                            03370000
+         BAS   R14,$TABSET        ESTABLISH CURRENT POSITION            03380000
+         B     GET_COLS           CONTINUE                              03390000
+                                                                        03400000
+OPN_COLS DS    0H                                                       03410000
+         LA    R1,=CL16'SYSCOLUMNS'  R1 <== TABLE NAME                  03420000
+         LA    R0,PRJTOKEN           R0 <== SPACE TOKEN                 03430000
+         BAS   R14,$TABOPEN                                             03440000
+                                                                        03450000
+         LTR   R15,R15            OPEN SUCCESSFUL?                      03460000
+         BNZ   ERR_TBSV           TABLE SERVICES ERROR OTHERWISE        03470000
+         ST    R1,USRTKCOL        SAVE TABLE TOKEN                      03480000
+                                                                        03490000
+*--------------------------------------------------------------         03500000
+*   acquire next SYSCOLUMNS entry                                       03510000
+*--------------------------------------------------------------         03520000
+                                                                        03530000
+GET_COLS DS    0H                                                       03540000
+         LA    R1,=CL16'SCOLTBNM' R1  <== COLUMN NAME                   03550000
+         LA    R0,R.LVDBTABL      R0  <== TABLE NAME ADDR               03560000
+         LA    R15,L'SCOLTBNM     R15 <== LENGTH OF NAME                03570000
+         BAS   R14,$NAMSARG       BUILD A SARG LIST                     03580000
+         LR    R4,R1              SARG LIST                             03590000
+                                                                        03600000
+COL_NEXT DS    0H                                                       03610000
+         ICM   R0,15,BASEBREM     SPACE AVAILABLE ?                     03620000
+         BZ    COL_MORE           NO, GET SOME MORE. ZERO IS TROUBLE    03630000
+                                                                        03640000
+         TBGET *BASEBNXT,         INFUSE BUFFER DIRECTLY               X03650000
+               LENGTH=*BASEBREM,  LENGTH AVAILABLE FOR ENTRY           X03660000
+               POS=NEXT,          SCAN FORWARD                         X03670000
+               INDEX='COLSEQ',    USING PRIMARY INDEX                  X03680000
+               SARGS=(R4),        MATCHING THE VDB TABLE NAME PROVIDED X03690000
+               TTOKEN=USRTKCOL,                                        X03700000
+               MF=(E,MFE_LIST)                                          03710000
+                                                                        03720000
+         STM   R15,R1,TBSVREGS    DIAGNOSTICS                           03730000
+         CH    R15,=AL2(RC04)     DETERMINE COMPLETION                  03740000
+         BL    COL_READ           COLUMN RETRIEVED                      03750000
+         BH    ERR_TBSV           TABLE SERVICES ERROR                  03760000
+         LTR   R0,R0              END OF FILE?                          03770000
+         BZ    COL_FIN            PHASE ENDS IF SO                      03780000
+                                                                        03790000
+COL_MORE DS    0H                                                       03800000
+         LA    R1,BASEBUFR        R1 <== BUFFER MGMT DATA               03810000
+         BAS   R14,@BUFREAL       ELSE BUFFER IS TOO SMALL              03820000
+         LTR   R15,R15            STORAGE APLENTY?                      03830000
+         BNZ   ERR_STG            FAIL IF NOT                           03840000
+         B     COL_NEXT           ELSE RETRY                            03850000
+                                                                        03860000
+*--------------------------------------------------------------         03870000
+*   accept SYSCOLUMNS entry, discard unrefed foreign keys               03880000
+*--------------------------------------------------------------         03890000
+                                                                        03900000
+COL_READ DS    0H                 R1 <== LENGTH OF ROW RETRIEVED        03910000
+         A     R1,BASEBNXT        END OF OCCUPIED AREA OF BUFFER        03920000
+         S     R1,BASEBADR        TOTAL LENGTH REQUIRED THUS FAR        03930000
+         C     R1,BMAXREQ         LARGEST SIZE SEEN SO FAR (USUALLY)    03940000
+         BNH   *+8                SKIP IF NOT                           03950000
+         ST    R1,BMAXREQ         ELSE RETAIN FOR RETURN                03960000
+                                                                        03970000
+         L     R5,BASEBNXT        AREA OCCUPIED BY SYSCOL               03980000
+         USING SYSCOLS,R5         SYSCOLUMNS ROW FORMAT                 03990000
+                                                                        04000000
+         XC    SKVARSC#-SKEYVAR+SCOLVSEL,SKVARSC#-SKEYVAR+SCOLVSEL      04010000
+         XC    SKVARSC#-SKEYVAR+SCOLVINS,SKVARSC#-SKEYVAR+SCOLVINS      04020000
+         XC    SKVARSC#-SKEYVAR+SCOLVDEL,SKVARSC#-SKEYVAR+SCOLVDEL      04030000
+         XC    SKVARSC#-SKEYVAR+SCOLVUPD,SKVARSC#-SKEYVAR+SCOLVUPD      04040000
+                                                                        04050000
+         ICM   R2,15,VARKEY       SPECIFIC SQL PERSPECTIVE DECLARED?    04060000
+         BZ    COL_TRMD           CANT TRIM OTHERWISE                   04070000
+         LA    R15,SYSCOLS(R2)    LOCATE FOREIGN KEY WE'RE RETAINING    04080000
+         USING SKEYVAR,R15        TEMP ADDRESSABILITY                   04090000
+         TM    SKVARNAM,BF        VARIABLE DEFINED FOR THIS USE?        04100000
+         BZ    COL_NEXT           OMIT ENTIRELY IF NOT                  04110000
+         MVC   SCOLVEXE,SKEYVAR   EXTRACT FOREIGN KEY                   04120000
+         DROP  R15                SKEYVAR                               04130000
+                                                                        04140000
+COL_TRMD DS    0H                 BUFFER MGMT UPDATE                    04150000
+         L     R15,COUNTCOL       COLUMN COUNT                          04160000
+         LA    R15,1(,R15)        ACCOUNT FOR LATEST SYSCOLUMN          04170000
+         ST    R15,COUNTCOL       UPDATED COLUMN COUNT                  04180000
+                                                                        04190000
+         L     R1,BASEBNXT        SYSCOL ENTRY ORIGIN                   04200000
+         A     R1,WIDTHCOL        LENGTH OF SYSCOLS FIXED PORTION       04210000
+         ST    R1,BASEBNXT        UPDATE                                04220000
+                                                                        04230000
+         L     R0,BASEBREM        SPACE REMAINING IN BUFFER             04240000
+         S     R0,WIDTHCOL        ACCOUNT FOR NEW ENTRY                 04250000
+         ST    R0,BASEBREM        UPDATE                                04260000
+                                                                        04270000
+*--------------------------------------------------------------         04280000
+*   relocate column vardata                                             04290000
+*--------------------------------------------------------------         04300000
+                                                                        04310000
+         ICM   R0,15,SCOLDFLT     DEFAULT VALUE ATTACHED?               04320000
+         BZ    COL_NEXT           DONE IF NOT                           04330000
+         L     R1,SCOLDFLT+4      VARDATA ADDRESS                       04340000
+         BAS   R14,@SPILBUF       MOVE TO SPILL BUFFER                  04350000
+         LTR   R15,R15            SUCCESS?                              04360000
+         BNZ   ERR_STG            FAIL IF NOT                           04370000
+         ST    R1,SCOLDFLT+4      REP VARDATA ADDR WITH SPILL OFFSET    04380000
+         B     COL_NEXT           ONWARD                                04390000
+                                                                        04400000
+*--------------------------------------------------------------         04410000
+*   all SYSCOLUMNS entries acquired                                     04420000
+*--------------------------------------------------------------         04430000
+                                                                        04440000
+COL_FIN  DS    0H                                                       04450000
+         ICM   R0,15,COUNTCOL     COLUMNS ACQUIRED?                     04460000
+         BNP   ERR_COLS           VACUOUS DEFINITION                    04470000
+         DROP  R5                 SYSCOLS                               04480000
+                                                                        04490000
+         EJECT                                                          04500000
+***************************************************************         04510000
+*                                                                       04520000
+*   Read SYSVARIABLES accepting only those referenced by VDB            04530000
+*   column.  First insert an eyecatcher in the SYSCOLUMNS and           04540000
+*   SYSVARIABLES return area to ensure that all column to               04550000
+*   variable offlink values are non-zero.                               04560000
+*                                                                       04570000
+***************************************************************         04580000
+                                                                        04590000
+         LA    R1,=CL16'SYSVARIABLES'                                   04600000
+         LA    R0,16                                                    04610000
+         BAS   R14,@CVBUF                                               04620000
+         LTR   R15,R15                                                  04630000
+         BNZ   ERR_STG                                                  04640000
+                                                                        04650000
+         ST    R1,ORGVAR          OFFSET OF FIRST SYSVARIABLES SECTION  04660000
+                                                                        04670000
+         L     R1,BASEBNXT        SYSVARIABLE ENTRY PTR                 04680000
+         S     R1,BASEBUFR        CONVERT TO OFFSET                     04690000
+         ST    R1,FIRSTVAR        RETAIN FIRST ENTRY OFFSET             04700000
+                                                                        04710000
+*--------------------------------------------------------------         04720000
+*   acquire access to SYSVARIABLES                                      04730000
+*--------------------------------------------------------------         04740000
+                                                                        04750000
+         ICM   R1,15,USRTKVAR     TABLE HANDLE PREV ALLOCATED?          04760000
+         BZ    OPN_VARS           OPEN IT IF NOT                        04770000
+         LA    R1,USRTKVAR        TABLE TOKEN ADDRESS                   04780000
+         LA    R0,=CL8'VARKEY'    INDEX NAME                            04790000
+         BAS   R14,$TABSET        ESTABLISH CURRENT POSITION            04800000
+         B     VAR_NEXT           CONTINUE                              04810000
+                                                                        04820000
+OPN_VARS DS    0H                                                       04830000
+         LA    R1,=CL16'SYSVARIABLES'  R1 <== TABLE NAME                04840000
+         LA    R0,PRJTOKEN             R0 <== SPACE TOKEN               04850000
+         BAS   R14,$TABOPEN                                             04860000
+                                                                        04870000
+         LTR   R15,R15            OPEN SUCCESSFUL?                      04880000
+         BNZ   ERR_TBSV           TABLE SERVICES ERROR OTHERWISE        04890000
+         ST    R1,USRTKVAR        SAVE TABLE TOKEN                      04900000
+                                                                        04910000
+*--------------------------------------------------------------         04920000
+*   read SYSVARIABLES entries                                           04930000
+*--------------------------------------------------------------         04940000
+                                                                        04950000
+VAR_NEXT DS    0H                                                       04960000
+         ICM   R0,15,BASEBREM     SPACE AVAILABLE ?                     04970000
+         BZ    VAR_MORE           NO, GET SOME MORE. ZERO IS TROUBLE    04980000
+                                                                        04990000
+         TBGET *BASEBNXT,         INFUSE BUFFER DIRECTLY               X05000000
+               LENGTH=*BASEBREM,  LENGTH AVAILABLE FOR ENTRY           X05010000
+               POS=NEXT,          SCAN FORWARD                         X05020000
+               INDEX='VARKEY',    USING PRIMARY INDEX                  X05030000
+               TTOKEN=USRTKVAR,                                        X05040000
+               MF=(E,MFE_LIST)                                          05050000
+                                                                        05060000
+         STM   R15,R1,TBSVREGS    DIAGNOSTICS                           05070000
+         CH    R15,=AL2(RC04)     DETERMINE COMPLETION                  05080000
+         BL    VAR_READ           VARIABLE RETRIEVED                    05090000
+         BH    ERR_TBSV           TABLE SERVICES ERROR                  05100000
+         LTR   R0,R0              END OF FILE?                          05110000
+         BZ    VAR_FIN            PHASE ENDS IF SO                      05120000
+                                                                        05130000
+VAR_MORE DS    0H                                                       05140000
+         LA    R1,BASEBUFR        R1 <== BUFFER MGMT DATA               05150000
+         BAS   R14,@BUFREAL       ELSE BUFFER IS TOO SMALL              05160000
+         LTR   R15,R15            STORAGE APLENTY?                      05170000
+         BNZ   ERR_STG            FAIL IF NOT                           05180000
+         B     VAR_NEXT           ELSE RETRY                            05190000
+                                                                        05200000
+*--------------------------------------------------------------         05210000
+*   retain variable only if referred to by some column                  05220000
+*--------------------------------------------------------------         05230000
+                                                                        05240000
+VAR_READ DS    0H                 R1 <== LENGTH OF ROW RETRIEVED        05250000
+         A     R1,BASEBNXT        END OF OCCUPIED AREA OF BUFFER        05260000
+         S     R1,BASEBADR        TOTAL LENGTH REQUIRED THUS FAR        05270000
+         C     R1,BMAXREQ         LARGEST SIZE SEEN SO FAR (USUALLY)    05280000
+         BNH   *+8                SKIP IF NOT                           05290000
+         ST    R1,BMAXREQ         ELSE RETAIN FOR RETURN                05300000
+                                                                        05310000
+         L     R5,BASEBNXT        ADDR OF SYSVARIABLE ROW               05320000
+         USING SVARSECT,R5        SYSCOLUMNS ROW FORMAT                 05330000
+         LR    R1,R5              R1 <== SYSVARIABLE ROW                05340000
+         BAS   R14,@LINKVAR       ASSOCIATE VAR WITH COLUMN             05350000
+         LTR   R15,R15            VAR JOINED TO COLUMNS?                05360000
+         BZ    VAR_NEXT           DISCARD IT IF NOT                     05370000
+                                                                        05380000
+         L     R15,COUNTVAR       VARIABLE CLAIMED                      05390000
+         LA    R15,1(,R15)        INCREMENT VARIABLE COUNT              05400000
+         ST    R15,COUNTVAR       SAVE VARIABLE COUNT                   05410000
+                                                                        05420000
+         L     R0,BASEBNXT        FREE INSERT AREA BEFORE SYSVAR TRIM   05430000
+         S     R0,BASEBADR        MAX BUFFER LENGTH REQUIRED            05440000
+         C     R0,BMAXREQ         MOST EVER REQUIRED?                   05450000
+         BNH   *+8                SKIP IF NOT                           05460000
+         ST    R0,BMAXREQ         RETAIN LARGEST SIZE EVER NEEDED       05470000
+                                                                        05480000
+         L     R1,BASEBNXT        BUFFER SLOT OCCUPIED BY SYSVAR        05490000
+         LA    R1,SVARLN(,R1)     FIXED LENGTH OF SYSVAR                05500000
+         ST    R1,BASEBNXT        RESET FREE PTR                        05510000
+                                                                        05520000
+         L     R0,BASEBREM        BUFFER FREE SPACE                     05530000
+         SH    R0,=AL2(SVARLN)    ACCOUNT FOR NEW SYSVAR                05540000
+         ST    R0,BASEBREM        RESET FREE SIZE                       05550000
+                                                                        05560000
+*--------------------------------------------------------------         05570000
+*   relocate variable vardata                                           05580000
+*--------------------------------------------------------------         05590000
+                                                                        05600000
+         ICM   R1,15,SVARMETH     R1 <== LOCATOR METHOD                 05610000
+         BZ    VAR_METH           N/A                                   05620000
+         LH    R0,0(,R1)          DATA LENGTH                           05630000
+         LTR   R0,R0              GARBAGE?                              05640000
+         BNP   VAR_METH           SKIP IF NOT                           05650000
+         AH    R0,=H'2'           R0 <== TOTAL LENGTH OF VARDATA        05660000
+         BAS   R14,@SPILBUF       MOVE TO SPILL BUFFER                  05670000
+         LTR   R15,R15            SUCCESS?                              05680000
+         BNZ   ERR_STG            FAIL IF NOT                           05690000
+         ST    R1,SVARMETH        REP VARDATA ADDR WITH SPILL OFFSET    05700000
+VAR_METH DS    0H                 ONWARD                                05710000
+                                                                        05720000
+         ICM   R1,15,SVARDVAL     R1 <== DEFAULT VALUE                  05730000
+         BZ    VAR_DVAL           N/A                                   05740000
+         LH    R0,0(,R1)          DATA LENGTH                           05750000
+         LTR   R0,R0              GARBAGE?                              05760000
+         BNP   VAR_DVAL           SKIP IF NOT                           05770000
+         AH    R0,=H'2'           R0 <== TOTAL LENGTH OF VARDATA        05780000
+         BAS   R14,@SPILBUF       MOVE TO SPILL BUFFER                  05790000
+         LTR   R15,R15            SUCCESS?                              05800000
+         BNZ   ERR_STG            FAIL IF NOT                           05810000
+         ST    R1,SVARDVAL        REP VARDATA ADDR WITH SPILL OFFSET    05820000
+VAR_DVAL DS    0H                 ONWARD                                05830000
+                                                                        05840000
+         ICM   R1,15,SVARDESC     R1 <== DESCRIPTION                    05850000
+         BZ    VAR_DESC           N/A                                   05860000
+         LH    R0,0(,R1)          DATA LENGTH                           05870000
+         LTR   R0,R0              GARBAGE?                              05880000
+         BNP   VAR_DESC           SKIP IF NOT                           05890000
+         AH    R0,=H'2'           R0 <== TOTAL LENGTH OF VARDATA        05900000
+         BAS   R14,@SPILBUF       MOVE TO SPILL BUFFER                  05910000
+         LTR   R15,R15            SUCCESS?                              05920000
+         BNZ   ERR_STG            FAIL IF NOT                           05930000
+         ST    R1,SVARDESC        REP VARDATA ADDR WITH SPILL OFFSET    05940000
+VAR_DESC DS    0H                 ONWARD                                05950000
+                                                                        05960000
+         B     VAR_NEXT                                                 05970000
+                                                                        05980000
+*--------------------------------------------------------------         05990000
+*   all SYSVARIABLES acquired                                           06000000
+*--------------------------------------------------------------         06010000
+                                                                        06020000
+VAR_FIN  DS    0H                                                       06030000
+         ICM   R0,15,COUNTVAR     VARIABLES ACQUIRED?                   06040000
+         BNP   ERR_VARS           VACUOUS DEFINITION                    06050000
+         DROP  R5                 SVARSECT                              06060000
+                                                                        06070000
+         EJECT                                                          06080000
+***************************************************************         06090000
+*                                                                       06100000
+*   Reattach SYSCOLUMNS vardata                                         06110000
+*                                                                       06120000
+***************************************************************         06130000
+                                                                        06140000
+         L     R5,FIRSTCOL        OFFSET TO FIRST SYSCOLUMN             06150000
+         AL    R5,BASEBUFR        CONVERT TO PTR                        06160000
+         USING SYSCOLS,R5         BEGIN SCAN                            06170000
+         L     R6,COUNTCOL        NUMBER OF COLUMNS                     06180000
+                                                                        06190000
+ATCOL_GO DS    0H                 PROCESS NEXT SYSCOL                   06200000
+         ICM   R2,15,SCOLDFLT     ASSOCIATED DEFAULT VALUE?             06210000
+         BZ    ATCOL_NX           SKIP IF NOT                           06220000
+         L     R1,SCOLDFLT+4      OFFSET TO VARDATA                     06230000
+         AL    R1,VDATBUFR        CONVERT TO PTR                        06240000
+         ST    R1,SCOLDFLT+4      ATTACH COMPLETE                       06250000
+                                                                        06260000
+ATCOL_NX DS    0H                                                       06270000
+         A     R5,WIDTHCOL        ADVANCE TO NEXT COLUMN                06280000
+         BCT   R6,ATCOL_GO        PROCESS ALL COLUMNS                   06290000
+         DROP  R5                 SYSCOLS                               06300000
+                                                                        06310000
+         EJECT                                                          06320000
+***************************************************************         06330000
+*                                                                       06340000
+*   Reattach SYSVARIABLES vardata                                       06350000
+*                                                                       06360000
+***************************************************************         06370000
+                                                                        06380000
+         L     R5,FIRSTVAR        OFFSET TO FIRST SYSVAR                06390000
+         AL    R5,BASEBUFR        CONVERT TO PTR                        06400000
+         USING SVARSECT,R5        BEGIN SCAN                            06410000
+         L     R6,COUNTVAR        NUMBER OF VARIABLES                   06420000
+                                                                        06430000
+ATVAR_GO DS    0H                 PROCESS NEXT SYSVAR                   06440000
+         ICM   R1,15,SVARMETH     LOCATOR METHOD?                       06450000
+         BZ    *+12               SKIP IF NOT                           06460000
+         AL    R1,VDATBUFR        OFFSET TO VARDATA                     06470000
+         ST    R1,SVARMETH        ATTACH COMPLETE                       06480000
+                                                                        06490000
+         ICM   R1,15,SVARDVAL     DEFAULT VALUE?                        06500000
+         BZ    *+12               SKIP IF NOT                           06510000
+         AL    R1,VDATBUFR        OFFSET TO VARDATA                     06520000
+         ST    R1,SVARDVAL        ATTACH COMPLETE                       06530000
+                                                                        06540000
+         ICM   R1,15,SVARDESC     DESCRIPTION?                          06550000
+         BZ    *+12               SKIP IF NOT                           06560000
+         AL    R1,VDATBUFR        OFFSET TO VARDATA                     06570000
+         ST    R1,SVARDESC        ATTACH COMPLETE                       06580000
+                                                                        06590000
+ATVAR_NX DS    0H                                                       06600000
+         LA    R5,SVARSECT+SVARLN ADVANCE TO NEXT VARIABLE              06610000
+         BCT   R6,ATVAR_GO        PROCESS ALL VARIABLES                 06620000
+         DROP  R5                 SVARSECT                              06630000
+                                                                        06640000
+         EJECT                                                          06650000
+****************************************************************        06660000
+*                                                                       06670000
+*   Prepare cross-referenced VDB definition for return                  06680000
+*                                                                       06690000
+****************************************************************        06700000
+                                                                        06710000
+         MVC   R.LVDB#COL,COUNTCOL+2                                    06720000
+         MVC   R.LVDBLCOL,WIDTHCOL+2                                    06730000
+                                                                        06740000
+         L     R1,FIRSTCOL        COLUMN OFFSET                         06750000
+         AL    R1,BASEBUFR        FIRST COLUMN ADDRESS                  06760000
+         ST    R1,R.LVDBACOL      RETURN TO REQUESTOR                   06770000
+                                                                        06780000
+         L     R1,ORGVAR          VARIABLE SECTION ORIGIN OFFSET        06790000
+         AL    R1,BASEBUFR        VARIABLE SECTION ADDRESS              06800000
+         ST    R1,R.LVDBAVAR      BASE FOR COL->VAR OFFLINKS            06810000
+                                                                        06820000
+*---------------------------------------------------------------        06830000
+*   return buffer usage stats for use in VDB reload                     06840000
+*---------------------------------------------------------------        06850000
+                                                                        06860000
+         MVC   R.LVDBSTG1,BASEBUFR   FIXED LENGTH ENTRY SECTION ORIGIN  06870000
+         MVC   R.LVDBSTG2,VDATBUFR   VAR LENGTH ENTRY SECTION ORIGIN    06880000
+                                                                        06890000
+         L     R3,BMAXREQ         LARGEST BASE BUFFER EXTENT REQUIRED   06900000
+         LA    R3,7(,R3)          ROUND UP TO DWORD                     06910000
+         SRL   R3,3                                                     06920000
+         SLL   R3,3                                                     06930000
+         ST    R3,R.LVDBSRQ1      LENGTH USED / REQUIRED                06940000
+                                                                        06950000
+         L     R3,VDATBLEN        LENGTH OF BUFFER                      06960000
+         S     R3,VDATBREM        MINUS LENGTH REMAINING                06970000
+         LA    R3,7(,R3)          ROUND UP TO DWORD                     06980000
+         SRL   R3,3                                                     06990000
+         SLL   R3,3                                                     07000000
+         ST    R3,R.LVDBSRQ2      LENGTH USED / REQUIRED                07010000
+                                                                        07020000
+*---------------------------------------------------------------        07030000
+*   insert SYSTABLES row in preallocated slot and anchor                07040000
+*---------------------------------------------------------------        07050000
+                                                                        07060000
+         L     R2,VDATBADR        LOCATE AREA RESERVED FOR RETURN BLOCK 07070000
+         LA    R3,LVDBRLN(,R2)    SYSTABLES ROW FOLLOWS RETURN BLOCK    07080000
+         MVC   0(STBLN,R3),T.SYSTABLE                                   07090000
+                                                                        07100000
+         MVC   0(LVDBRLN,R2),R.VDBLRET                                  07110000
+L        USING VDBLRET,R2         RETURN AREA PLACED IN PERM STORAGE    07120000
+         ST    R3,L.LVDBSYST      ANCHOR THE SYSTABLES ROW              07130000
+         DROP  L                                                        07140000
+                                                                        07150000
+         EJECT                                                          07160000
+****************************************************************        07170000
+*                                                                       07180000
+*   Normal and abnormal termination - set RC and RSN codes              07190000
+*                                                                       07200000
+****************************************************************        07210000
+                                                                        07220000
+         LA    R15,RC00           NORMAL COMPLETION                     07230000
+         L     R0,COUNTCOL        R0 <== RETURN COLUMN COUNT DIRECTLY   07240000
+         L     R1,VDATBADR        R1 <== RETURN AREA                    07250000
+         B     EXIT                                                     07260000
+                                                                        07270000
+ERR_PROJ DS    0H                 PROJECT NOT AVAILABLE                 07280000
+         SR    R0,R0                                                    07290000
+         LA    R15,RC04                                                 07300000
+         B     ERR_EXIT                                                 07310000
+                                                                        07320000
+                                                                        07330000
+*------- missing, invalid, or incomplete VDB definition --------        07340000
+                                                                        07350000
+                                                                        07360000
+ERR_VDB  DS    0H                 VDB TABLE NOT DEFINED                 07370000
+         LA    R0,RSN04                                                 07380000
+         LA    R15,RC08                                                 07390000
+         B     ERR_EXIT                                                 07400000
+                                                                        07410000
+ERR_SQL  DS    0H                 SQL EXECUTION NOT EVALUATED           07420000
+         LA    R0,RSN08                                                 07430000
+         LA    R15,RC08                                                 07440000
+         B     ERR_EXIT                                                 07450000
+                                                                        07460000
+ERR_COLS DS    0H                 VDB TABLE HAS NO COLUMNS              07470000
+         LA    R0,RSN12                                                 07480000
+         LA    R15,RC08                                                 07490000
+         B     ERR_EXIT                                                 07500000
+                                                                        07510000
+ERR_VARS DS    0H                 VDB TABLE HAS NO VARIABLES            07520000
+         LA    R0,RSN16                                                 07530000
+         LA    R15,RC08                                                 07540000
+         B     ERR_EXIT                                                 07550000
+                                                                        07560000
+                                                                        07570000
+*------- environmental error -----------------------------------        07580000
+                                                                        07590000
+                                                                        07600000
+ERR_TBSV DS    0H                 TABLE SERVICES FAILURE                07610000
+         LM    R15,R1,TBSVREGS                                          07620000
+                                                                        07630000
+         @PUSHERR ,                                                     07640000
+                                                                        07650000
+         LA    R15,RC12                                                 07660000
+         B     ERR_EXIT                                                 07670000
+                                                                        07680000
+ERR_STG  DS    0H                 STORAGE NOT AVAILABLE                 07690000
+         SR    R0,R0                                                    07700000
+         LA    R15,RC16                                                 07710000
+         B     ERR_EXIT                                                 07720000
+                                                                        07730000
+*--------------------------------------------------------------         07740000
+*   release acquired storage if failure                                 07750000
+*--------------------------------------------------------------         07760000
+                                                                        07770000
+ERR_EXIT DS    0H                                                       07780000
+         STM   R15,R1,RETREGS                                           07790000
+                                                                        07800000
+         ICM   R1,15,BASEBUFR     ACQUIRED STORAGE                      07810000
+         BZ    FREE1                                                    07820000
+         $RETSTOR *BASEBUFR,QHDR=0                                      07830000
+                                                                        07840000
+FREE1    DS    0H                                                       07850000
+                                                                        07860000
+         ICM   R1,15,VDATBUFR     ACQUIRED STORAGE                      07870000
+         BZ    FREE2                                                    07880000
+         $RETSTOR *VDATBUFR,QHDR=0                                      07890000
+                                                                        07900000
+FREE2    DS    0H                                                       07910000
+                                                                        07920000
+         LM    R15,R1,RETREGS     RESTORE STATUS REGS                   07930000
+                                                                        07940000
+         EJECT                                                          07950000
+***************************************************************         07960000
+*                                                                       07970000
+*   Return completion status to caller                                  07980000
+*                                                                       07990000
+***************************************************************         08000000
+                                                                        08010000
+EXIT     DS    0H                                                       08020000
+         #EXIT                                                          08030000
+                                                                        08040000
+         EJECT                                                          08050000
+***************************************************************         08060000
+*                                                                       08070000
+* ROUTINE: @LINKVAR - Join SYSCOLUMNS list to SYSVARIABLES              08080000
+*                                                                       08090000
+* ON ENTRY:                                                             08100000
+*                                                                       08110000
+*    R1  - SYSVARIABLE entry                                            08120000
+*                                                                       08130000
+* ON EXIT:                                                              08140000
+*                                                                       08150000
+*    R15 - number of SYSCOLUMNS entries joined to SYSVARIABLES          08160000
+*                                                                       08170000
+***************************************************************         08180000
+                                                                        08190000
+@LINKVAR DS    0H                                                       08200000
+         BAKR  R14,0              SAVE CALLERS REGS                     08210000
+                                                                        08220000
+*--------------------------------------------------------------         08230000
+*   compute SYSVARIABLE entry offlink value                             08240000
+*--------------------------------------------------------------         08250000
+                                                                        08260000
+         USING SVARSECT,R1        SYSVARIABLE ENTRY AS INPUT            08270000
+         LR    R0,R1              CONVERT SYSVARIABLES ADDRESS TO       08280000
+         S     R0,BASEBUFR        BUFFER OFFSET, THEN CONVERT THAT TO   08290000
+         S     R0,ORGVAR          SYSVARIABLES SECTION OFFSET           08300000
+         SR    R15,R15            JOIN COUNT                            08310000
+                                                                        08320000
+*--------------------------------------------------------------         08330000
+*   scan SYSCOLUMNS entries                                             08340000
+*--------------------------------------------------------------         08350000
+                                                                        08360000
+         L     R6,COUNTCOL        NUMBER OF COLUMNS TO PROCESS          08370000
+         L     R2,FIRSTCOL        OFFSET TO FIRST COLUMN ENTRY          08380000
+         AL    R2,BASEBUFR        CONVERT TO ADDRESS                    08390000
+         USING SYSCOLS,R2         ADDRESSABILITY                        08400000
+                                                                        08410000
+@LINKTOP DS    0H                                                       08420000
+         LA    R3,SCOLVEXE        FOREIGN KEY ARRAY ORIGIN              08430000
+         USING SKEYVAR,R3         KEY FORMAT                            08440000
+         LA    R4,SKEYVARL        SIZE OF FOREIGN KEY                   08450000
+         LA    R5,SYSCOLS         WIDTH OF COLUMN                       08460000
+         A     R5,WIDTHCOL        END OF COLUMN ENTRY                   08470000
+         BCTR  R5,0               PREPARE FOR USE IN BXLE               08480000
+                                                                        08490000
+@LINKCOL DS    0H                                                       08500000
+         TM    SVARFLG1,SVARF1LT  LITERAL ?                             08510000
+         BO    @LINKADV           YES, SKIP                             08520000
+                                                                        08530000
+         CLC   SVARNAME,SKVARNAM  MATCHING VARNAMES?                    08540000
+         BNE   @LINKADV                                                 08550000
+         CLC   SVARSNAM,SKVARSCR  MATCHING SCREEN NAMES?                08560000
+         BNE   @LINKADV                                                 08570000
+                                                                        08580000
+         STCM  R0,3,SKVARSC#      JOIN COLUMN/SQL-VIEW TO SYSVAR        08590000
+         LA    R15,1(,R15)        INCR JOIN COUNT                       08600000
+                                                                        08610000
+@LINKADV DS    0H                                                       08620000
+         BXLE  R3,R4,@LINKCOL     PROCESS ALL VIEWS                     08630000
+         AL    R2,WIDTHCOL        ADVANCE TO NEXT COLUMN                08640000
+         BCT   R6,@LINKTOP        PROCESS ALL COLUMNS                   08650000
+                                                                        08660000
+         PR    ,                                                        08670000
+         DROP  R3,R2,R1           SKEYVAR, SYSCOLS, SVARSECT            08680000
+                                                                        08690000
+         EJECT                                                          08700000
+***************************************************************         08710000
+*                                                                       08720000
+* ROUTINE: $NAMSARG - Construct simple (type 0) search argument         08730000
+*                                                                       08740000
+* ON ENTRY:                                                             08750000
+*                                                                       08760000
+*    R1  - column name address                                          08770000
+*    R0  - value origin                                                 08780000
+*    R15 - value length                                                 08790000
+*                                                                       08800000
+* ON EXIT:                                                              08810000
+*                                                                       08820000
+*    R15 - zero                                                         08830000
+*    R1  - SARG address                                                 08840000
+*                                                                       08850000
+***************************************************************         08860000
+                                                                        08870000
+$NAMSARG DS    0H                                                       08880000
+         BAKR  R14,R0             SAVE CALLERS REGS                     08890000
+                                                                        08900000
+         LR    R3,R1              COLUMN NAME                           08910000
+         LR    R2,R0              VALUE                                 08920000
+                                                                        08930000
+         LA    R4,SARGAREA        SARG CONSTRUCTION                     08940000
+         USING TBSARGS,R4         SARG FORMAT                           08950000
+         XC    TBSARGS(TBSAFIXL),TBSARGS                                08960000
+         MVC   TBSABOOL,TBSABAND  BOOLEAN CONNECTOR                     08970000
+         MVC   TBSAENTS,=H'1'     ARGUMENT COUNT                        08980000
+         LA    R0,TBSANFXL+TBSAFIXL(,R15)  SARG LENGTH                  08990000
+         STH   R0,TBSALEN                                               09000000
+                                                                        09010000
+         MVI   TBSAOPR,TBSAO$EQ   MATCH THIS NAME                       09020000
+         MVC   TBSAACOL,0(R3)     COLUMN NAME                           09030000
+         BCTR  R15,0              PREPARE FOR EX                        09040000
+         EX    R15,*+4            INSERT ARGUMENT VALUE                 09050000
+         MVC   TBSAAVAL(*-*),0(R2)                                      09060000
+                                                                        09070000
+         LR    R1,R4              RETURN SARG                           09080000
+         SR    R15,R15                                                  09090000
+         PR    ,                                                        09100000
+         DROP  R4                 TBSARGS                               09110000
+                                                                        09120000
+         EJECT                                                          09130000
+***************************************************************         09140000
+*                                                                       09150000
+* ROUTINE: $TABOPEN - open table                                        09160000
+*                                                                       09170000
+* ON ENTRY:                                                             09180000
+*                                                                       09190000
+*    R1  - table name address                                           09200000
+*    R0  - $SPACE token                                                 09210000
+*                                                                       09220000
+* ON EXIT:                                                              09230000
+*                                                                       09240000
+*    R15 - TBOPEN return code                                           09250000
+*    R1  - table token                                                  09260000
+*                                                                       09270000
+***************************************************************         09280000
+                                                                        09290000
+$TABOPEN DS    0H                                                       09300000
+         BAKR  R14,0              SAVE CALLERS REGS                     09310000
+                                                                        09320000
+         LR    R2,R0              SPACE TOKEN                           09330000
+         LR    R3,R1              TABLE NAME                            09340000
+                                                                        09350000
+         TBOPEN (R3),             OPEN THE NAMED TABLE                 X09360000
+               STOKEN=(R2),       PROJECT SPACE TOKEN                  X09370000
+               TTOKEN=FWORD,      RETAIN TABLE TOKEN                   X09380000
+               MF=(E,MFE_LIST)                                          09390000
+                                                                        09400000
+         STM   R15,R1,TBSVREGS    RETAIN DIAGNOSTIC INFO                09410000
+         SR    R1,R1              TABLE TOKEN RETURN                    09420000
+         LTR   R15,R15            NORMAL COMPLETION EXPECTED            09430000
+         BNZ   *+8                TABLE SERVICE DETECTED FAILURE        09440000
+         L     R1,FWORD           RETURN TABLE TOKEN                    09450000
+         PR    ,                                                        09460000
+                                                                        09470000
+         EJECT                                                          09480000
+***************************************************************         09490000
+*                                                                       09500000
+* ROUTINE: $TABSET - Establish positino at top of table                 09510000
+*                                                                       09520000
+* ON ENTRY:                                                             09530000
+*                                                                       09540000
+*    R1  - table token addr                                             09550000
+*    R0  - index name address or zero                                   09560000
+*                                                                       09570000
+* ON EXIT:                                                              09580000
+*                                                                       09590000
+*    R15 - TBSET return code                                            09600000
+*                                                                       09610000
+***************************************************************         09620000
+                                                                        09630000
+$TABSET  DS    0H                                                       09640000
+         BAKR  R14,0              SAVE CALLERS REGS                     09650000
+                                                                        09660000
+         LR    R2,R1              TABLE TOKEN ADDR                      09670000
+         LR    R3,R0              INDEX NAME ADDRESS OR ZERO            09680000
+                                                                        09690000
+         TBSET TTOKEN=(R2),       REPOSITION                           X09700000
+               POS=TOP,                                                X09710000
+               INDEX=(R3),                                             X09720000
+               MF=(E,MFE_LIST)                                          09730000
+                                                                        09740000
+         STM   R15,R1,TBSVREGS    RETAIN DIAGNOSTIC INFO                09750000
+         PR    ,                                                        09760000
+                                                                        09770000
+         EJECT                                                          09780000
+***************************************************************         09790000
+*                                                                       09800000
+* ROUTINE: @CVBUF - Add block to column/variable buffer                 09810000
+*                                                                       09820000
+* ON ENTRY:                                                             09830000
+*                                                                       09840000
+*    R1  - block address                                                09850000
+*    R0  - block length                                                 09860000
+*                                                                       09870000
+* ON EXIT:                                                              09880000
+*                                                                       09890000
+*    R15 - $GETSTOR return code if failure, zero otherwise              09900000
+*    R1  - vardata buffer offset of accepted entry                      09910000
+*                                                                       09920000
+***************************************************************         09930000
+                                                                        09940000
+@CVBUF   DS    0H                                                       09950000
+         BAKR  R14,0              SAVE CALLERS REGS                     09960000
+                                                                        09970000
+         LR    R2,R1              BLOCK ORIGIN                          09980000
+         LR    R3,R0              BLOCK LENGTH                          09990000
+                                                                        10000000
+@CVGO    DS    0H                                                       10010000
+         C     R3,BASEBREM        SUFFICIENT STORAGE AVAILABLE?         10020000
+         BNH   @CVMOV             ACCEPT BLOCK IF SO                    10030000
+         LA    R1,BASEBUFR        R1 <== BUFFER MGMT AREA               10040000
+         BAS   R14,@BUFREAL       REALLOCATE / EXTEND                   10050000
+         LTR   R15,R15            SUCCESS?                              10060000
+         BNZ   @CVRET             FAIL OTHERWISE                        10070000
+         B     @CVGO              RETRY                                 10080000
+                                                                        10090000
+@CVMOV   DS    0H                 MOVE BLOCK TO MANAGED STORAGE         10100000
+         L     R0,BASEBNXT        INSERTION POINT                       10110000
+         LR    R1,R3              BLOCK LENGTH                          10120000
+         LR    R14,R2             BLOCK ORIGIN                          10130000
+         LR    R15,R3             SOURCE LENGTH = TARGET LENGTH         10140000
+         MVCL  R0,R14             NEW HOME FOR BLOCK                    10150000
+                                                                        10160000
+         L     R1,BASEBNXT        ORIGIN OF STORED ENTRY                10170000
+         S     R1,BASEBUFR        R1 <== RETURN OFFSET OF STORED ENTRY  10180000
+         ST    R0,BASEBNXT        UPDATE AVAIL INSERTION AREA LOCATION  10190000
+                                                                        10200000
+         L     R15,BASEBREM       LENGTH OF AVAIL AREA                  10210000
+         SR    R15,R3             ACCOUNT FOR NEW ENTRY                 10220000
+         ST    R15,BASEBREM       LENGTH REMAINING                      10230000
+         SR    R15,R15            INDICATE SUCCESS                      10240000
+                                                                        10250000
+@CVRET   DS    0H                 RETURN                                10260000
+         PR    ,                                                        10270000
+                                                                        10280000
+         EJECT                                                          10290000
+***************************************************************         10300000
+*                                                                       10310000
+* ROUTINE:  @SPILBUF - add block to vardata (SPILL) buffer              10320000
+*                                                                       10330000
+* ON ENTRY:                                                             10340000
+*                                                                       10350000
+*    R1  - block address                                                10360000
+*    R0  - block length                                                 10370000
+*                                                                       10380000
+* ON EXIT:                                                              10390000
+*                                                                       10400000
+*    R15 - $GETSTOR return code if failure, zero otherwise              10410000
+*    R1  - vardata buffer offset of accepted entry                      10420000
+*                                                                       10430000
+***************************************************************         10440000
+                                                                        10450000
+@SPILBUF DS    0H                                                       10460000
+         BAKR  R14,0              SAVE CALLERS REGS                     10470000
+                                                                        10480000
+         LR    R2,R1              BLOCK ORIGIN                          10490000
+         LR    R3,R0              BLOCK LENGTH                          10500000
+                                                                        10510000
+@SPILGO  DS    0H                                                       10520000
+         C     R3,VDATBREM        SUFFICIENT STORAGE AVAILABLE?         10530000
+         BNH   @SPILMOV           ACCEPT BLOCK IF SO                    10540000
+         LA    R1,VDATBUFR        R1 <== BUFFER MGMT AREA               10550000
+         BAS   R14,@BUFREAL       REALLOCATE / EXTEND                   10560000
+         LTR   R15,R15            SUCCESS?                              10570000
+         BNZ   @SPILRET           FAIL OTHERWISE                        10580000
+         B     @SPILGO            RETRY                                 10590000
+                                                                        10600000
+@SPILMOV DS    0H                 MOVE BLOCK TO MANAGED STORAGE         10610000
+         L     R0,VDATBNXT        INSERTION POINT                       10620000
+         LR    R1,R3              BLOCK LENGTH                          10630000
+         LR    R14,R2             BLOCK ORIGIN                          10640000
+         LR    R15,R3             SOURCE LENGTH = TARGET LENGTH         10650000
+         MVCL  R0,R14             NEW HOME FOR BLOCK                    10660000
+                                                                        10670000
+         L     R1,VDATBNXT        ORIGIN OF STORED ENTRY                10680000
+         S     R1,VDATBUFR        R1 <== RETURN OFFSET OF STORED ENTRY  10690000
+         ST    R0,VDATBNXT        UPDATE AVAIL INSERTION AREA LOCATION  10700000
+                                                                        10710000
+         L     R15,VDATBREM       LENGTH OF AVAIL AREA                  10720000
+         SR    R15,R3             ACCOUNT FOR NEW ENTRY                 10730000
+         ST    R15,VDATBREM       LENGTH REMAINING                      10740000
+         SR    R15,R15            INDICATE SUCCESS                      10750000
+                                                                        10760000
+@SPILRET DS    0H                 RETURN                                10770000
+         PR    ,                                                        10780000
+                                                                        10790000
+         EJECT                                                          10800000
+***************************************************************         10810000
+*                                                                       10820000
+* ROUTINE: @BUFINIT - Acquire buffer and initialize                     10830000
+*                                                                       10840000
+* ON ENTRY:                                                             10850000
+*                                                                       10860000
+*    R0  - buffer size                                                  10870000
+*    R1  - buffer mgmt area                                             10880000
+*                                                                       10890000
+* ON EXIT:                                                              10900000
+*                                                                       10910000
+*    R15 - $GETSTOR return code, 0 - success                            10920000
+*                                                                       10930000
+***************************************************************         10940000
+                                                                        10950000
+@BUFINIT DS    0H                 R0 <== LENGTH                         10960000
+         BAKR  R14,0              SAVE CALLERS REGS                     10970000
+                                                                        10980000
+         LR    R3,R1              BUFFER DESCRIPTOR                     10990000
+         LR    R2,R0              INITIAL SIZE                          11000000
+                                                                        11010000
+         $GETSTOR (R2),QHDR=0,COND=YES                                  11020000
+         LTR   R15,R15            STORAGE ACQUIRED?                     11030000
+         BNZ   @BUFIRET           NO                                    11040000
+                                                                        11050000
+         ST    R1,0(,R3)          BUFFER                                11060000
+         ST    R1,8(,R3)          ALL AVAILABLE                         11070000
+         ST    R2,4(,R3)          BUFFER LENGTH                         11080000
+         ST    R2,12(,R3)         ALL AVAILABLE                         11090000
+                                                                        11100000
+         SR    R15,R15            INDICATE SUCCESS                      11110000
+                                                                        11120000
+@BUFIRET DS    0H                                                       11130000
+         PR    ,                                                        11140000
+                                                                        11150000
+         EJECT                                                          11160000
+***************************************************************         11170000
+*                                                                       11180000
+* ROUTINE: @BUFREAL - Reallocate buffer                                 11190000
+*                                                                       11200000
+* ON ENTRY:                                                             11210000
+*                                                                       11220000
+*    R1  - buffer descriptor                                            11230000
+*                                                                       11240000
+* ON EXIT:                                                              11250000
+*                                                                       11260000
+*    R15 - $GETSTOR return code, 0 - success                            11270000
+*                                                                       11280000
+***************************************************************         11290000
+                                                                        11300000
+@BUFREAL DS    0H                                                       11310000
+         BAKR  R14,0              SAVE CALLERS REGS                     11320000
+                                                                        11330000
+         LR    R8,R1              BUFFER DESCRIPTOR                     11340000
+                                                                        11350000
+         L     R4,0(,R8)          BUFFER ORIGIN                         11360000
+         L     R3,8(,R8)          END OF USED PORTION                   11370000
+         SR    R3,R4              LENGTH OF USED PORTION                11380000
+         LR    R5,R3              MVCL READY SOURCE IN (R4,R5)          11390000
+                                                                        11400000
+         L     R2,4(,R8)          CURRENT BUFFER LENGTH                 11410000
+         AR    R2,R2              DOUBLE FOR REALLOC                    11420000
+                                                                        11430000
+         $GETSTOR (R2),QHDR=0,COND=YES                                  11440000
+         LTR   R15,R15            CONTINUE?                             11450000
+         BNZ   @BUFRRET           FAIL                                  11460000
+                                                                        11470000
+         LR    R6,R1              NEW BUFFER                            11480000
+         LR    R14,R1             COPY USED PORTION OF PRIOR BUFFER     11490000
+         LR    R15,R3             COPY INTO NEW HOME                    11500000
+         MVCL  R14,R4                                                   11510000
+                                                                        11520000
+         $RETSTOR *0(R8),QHDR=0                                         11530000
+                                                                        11540000
+         ST    R6,0(,R8)          BUFFER ORIGIN                         11550000
+         ST    R2,4(,R8)          BUFFER LENGTH                         11560000
+         AR    R6,R3              FIRST AVAILABLE BYTE                  11570000
+         ST    R6,8(,R8)                                                11580000
+         SR    R2,R3              AMOUNT OF FREE STORAGE                11590000
+         ST    R2,12(,R8)                                               11600000
+                                                                        11610000
+         SR    R15,R15            INDICATE SUCCESS                      11620000
+                                                                        11630000
+@BUFRRET DS    0H                                                       11640000
+         PR    ,                                                        11650000
+                                                                        11660000
+         EJECT                                                          11670000
+***************************************************************         11680000
+*                                                                       11690000
+*   Local read-only storage                                             11700000
+*                                                                       11710000
+***************************************************************         11720000
+                                                                        11730000
+         LTORG ,                                                        11740000
+                                                                        11750000
+         EJECT                                                          11760000
+         PRINT NOGEN ,                                                  11770000
+         ICVT  ,                                                        11780000
+         ITASK ,                                                        11790000
+         IPCB  ,                                                        11800000
+         IUSER ,                                                        11810000
+         IPROJ ,                                                        11820000
+         END   ,                                                        11830000

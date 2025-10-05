@@ -1,0 +1,715 @@
+ITSKSEND TITLE '- $TSEND ITASK MESSAGE SEND SERVICE'                    00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE:  ITSKSEND - $TSEND ITASK MESSAGE SEND SERVICE                00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This routine implements the $TSEND service. It allows a            00080000
+*    requestor to send a message to the current ITASK, an ITASK         00090000
+*    identified by name, a process within the current ITASK, or         00100000
+*    to an ITASK identified by a unique workunit token.                 00110000
+*                                                                       00120000
+*    If a process name is specified on the $TSEND request               00130000
+*    within the current ITASK, the message is queued to the             00140000
+*    IPCB workunit and its associated MESSAGE EPB is posted.            00150000
+*    If a process name is specified for a remote ITASK, the             00160000
+*    message type is preserved in TMSG.TMSGOTYP and the message         00170000
+*    type is changed to indicate a rerouting requirement.  The          00180000
+*    message is then sent to the destination ITASK.  It is the          00190000
+*    responsibility of the recipient of that message to forward         00200000
+*    the message to the destination process.                            00210000
+*                                                                       00220000
+*    In general, if the message is destined for a foreign ITASK         00230000
+*    or for a process running under a foreign ITASK, the DISP           00240000
+*    lock must be held to ensure that it is not freed on behalf         00250000
+*    of task termination while this code is running.  However,          00260000
+*    if the destination ITASK is a parent of the current ITASK          00270000
+*    that situation cannot occur and the DISP lock need not be          00280000
+*    acquired.                                                          00290000
+*                                                                       00300000
+*    The passed message is reformatted into a message entry             00310000
+*    described by the TMSG HDR=YES mapping.                             00320000
+*                                                                       00330000
+*                                                                       00340000
+* ON ENTRY:                                                             00350000
+*                                                                       00360000
+*    R1  contains the address of a parameter list described             00370000
+*        by PTSPARMS ($TSEND DSECT=YES)                                 00380000
+*                                                                       00390000
+* NOTES: In the current implementation,  if WUTOKEN is                  00400000
+*        specified the DISP lock is acquired inorder to invoke          00410000
+*        the WULOC service and the TSEND is treated as an INTER         00420000
+*        task send regardless if the destination workunit is            00430000
+*        local to the current task.  A future enhancement might         00440000
+*        consider changing the request to a local TSEND if the          00450000
+*        destination workunit is running within the same ITASK.         00460000
+*                                                                       00470000
+* ON EXIT:                                                              00480000
+*                                                                       00490000
+*    R15 contains one of the following return codes.                    00500000
+*    R0  may contain a reason code.                                     00510000
+*                                                                       00520000
+*        RC00 - message sent                                            00530000
+*                                                                       00540000
+*               R1 = XEPB token if REPLY=YES, else zero                 00550000
+*                                                                       00560000
+*        RC04 - destination not found                                   00570000
+*                                                                       00580000
+*               RSN04 - target ITASK not found                          00590000
+*               RSN08 - target IPCB  not found                          00600000
+*                                                                       00610000
+*        RC08 - message rejected, invalid text block size               00620000
+*        RC12 - storage failure, stg service retcode in R1              00630000
+*        RC16 - unable to acquire DISP lock, retcode in R1              00640000
+*        RC20 - unable to post destination ITASK, retcode in R1         00650000
+*                                                                       00660000
+**<DOC-OFF>****************************************************         00670000
+                                                                        00680000
+***************************************************************         00690000
+*                                                                       00700000
+* MAINTENANCE:                                                          00710000
+*                                                                       00720000
+*    04/15/93 R. Turgeon                                                00730000
+*             Initial Version                                           00740000
+*                                                                       00750000
+*    07/07/93 R. Colmone                                                00760000
+*             Added Process(PCB) level send support                     00770000
+*                                                                       00780000
+*    09/29/94 R. Turgeon                                                00790000
+*             Added destination identification by workunit token        00800000
+*                                                                       00810000
+*    03/21/95 R. Colmone                                                00820000
+*             Corrected message formatting for PCB targeted             00830000
+*             workunits identified by the WUTOKEN= parameter.           00840000
+*                                                                       00850000
+*    12/14/95 R. Colmone                                                00860000
+*             Intratask messages sent using WUTOKEN= parameter          00870000
+*             are not sent to the appropriate workunit.                 00880000
+*                                                                       00890000
+***************************************************************         00900000
+                                                                        00910000
+         EJECT                                                          00920000
+         $TSEND DSECT=YES         PLIST FORMAT                          00930000
+                                                                        00940000
+         EJECT                                                          00950000
+         TMSG   HDR=YES           MESSAGE FORMAT                        00960000
+                                                                        00970000
+         EJECT                                                          00980000
+         $TASK  DSECT=YES         ITASK FORMAT                          00990000
+                                                                        01000000
+         EJECT                                                          01010000
+         $WULOC DSECT=YES         WORKUNIT LOCATOR PLIST FORMAT         01020000
+                                                                        01030000
+         EJECT                                                          01040000
+         @CB   WORKUNIT=YES                                             01050000
+                                                                        01060000
+         EJECT                                                          01070000
+         EVCODES ,                EVENT CODES                           01080000
+                                                                        01090000
+         MSGCODES ,               INTERTASK MESSAGE CODES               01100000
+                                                                        01110000
+         EQUS  ,                                                        01120000
+                                                                        01130000
+         EJECT                                                          01140000
+         #WORK ,                  BEGIN WORKAREA                        01150000
+                                                                        01160000
+FLAGS    DS    X                  LOCAL FLAGS                           01170000
+FLOCKED  EQU   X'80'                 DISP LOCK ACQUIRED                 01180000
+                                                                        01190000
+REGSAVE  DS    16F                REGISTER SAVEAREA                     01200000
+                                                                        01210000
+TGTITASK DS    A                  ADDR OF TARGET ITASK                  01220000
+TGTWU    DS    A                  ADDR OF TARGET WORKUNIT               01230000
+TGTPNAME DS    A                  ADDR OF TARGET PCB NAME               01240000
+MSGPTR   DS    A                  ADDR OF CONSTRUCTED MSG               01250000
+ETOKEN   DS    F                  XEPB TOKEN                            01260000
+                                                                        01270000
+         IWUENTUD DSECT=NO        WORKUNIT LOCATOR USER DATA            01280000
+                                                                        01290000
+$WUL_MFL $WULOC MF=(L,*)          WORKUNIT LOCATOR PLIST                01300000
+$TASKMFL $TASK  MF=(L,*)          TASK MANAGER PLIST                    01310000
+                                                                        01320000
+WRK512   DS    XL512              WORKAREA                              01330000
+                                                                        01340000
+         #ENDWORK ,               END WORKAREA                          01350000
+                                                                        01360000
+         EJECT                                                          01370000
+ITSKSEND #ENTER PREG=R8                                                 01380000
+                                                                        01390000
+         USING ITASK,R10                                                01400000
+         USING PTSPARMS,R8                                              01410000
+                                                                        01420000
+         EJECT                                                          01430000
+***************************************************************         01440000
+*                                                                       01450000
+*   REQUEST VALIDATION - DETERMINE DISTRIBUTION LIST                    01460000
+*                                                                       01470000
+***************************************************************         01480000
+         L     R2,PTSINFOL        MESSAGE BLOCK LENGTH, IF ANY          01490000
+         C     R2,=A(1024*32)     EXCESSIVE?                            01500000
+         BH    ERR_SIZE           REJECT IF SO                          01510000
+                                                                        01520000
+         LA    R3,TMSGHLN+TMSGSLN(,R2)   TOTAL SIZE OF SAVED MSG        01530000
+         ICM   R1,15,PTSTDEST     DETERMINE MSG DISTRIBUTION REQ        01540000
+         BZ    INTRA              MESSAGE GOES TO HOST ITASK            01550000
+         BM    ITER_LCK           WUTOKEN, ASSUME INTERTASK FOR NOW     01560000
+         CLC   TSKNAME,0(R1)      HOST TASK EXPLICITLY NAMED?           01570000
+         BNE   INTER              CROSS ITASK OTHERWISE                 01580000
+                                                                        01590000
+***************************************************************         01600000
+*                                                                       01610000
+*   MSG DESTINED FOR HOST ITASK OR PROCESS WITHIN HOST ITASK            01620000
+*                                                                       01630000
+***************************************************************         01640000
+INTRA    DS    0H                                                       01650000
+         LA    R1,ITASK           R1 <== CURRENT ITASK                  01660000
+         ST    R1,TGTITASK        ADDRESS OF TARGET ITASK               01670000
+         ICM   R0,15,PTSPDEST     MESSAGE DESTINED FOR PROCESS?         01680000
+         BZ    POSTMSG            ASSIGN STORAGE TO TASK IF NOT         01690000
+         BM    ITRA_PCB           PCB IDENTIFIED BY NAME                01700000
+                                                                        01710000
+         BAS   R14,LOCIPCB        LOCATE TARGET PROCESS BY NAME (R0)    01720000
+         BNZ   ERR_PNF            PROCESS NOT FOUND                     01730000
+         B     POSTMSG            PCB PTR IN R1                         01740000
+                                                                        01750000
+ITRA_PCB DS    0H                 PCB ADDRESS GIVEN DIRECTLY            01760000
+         LR    R1,R0              CANDIDATE PCB ADDRESS                 01770000
+         LA    R1,0(,R1)          REMOVE FLAG BIT                       01780000
+         CLC   =CL8'IPCB',0(R1)   COARSE VALIDATION                     01790000
+         BE    *+8                ASSERT 'VALID PCB PROVIDED'           01800000
+         EX    R0,*               DENIED                                01810000
+         B     POSTMSG            PCB PTR IN R1                         01820000
+                                                                        01830000
+         EJECT                                                          01840000
+***************************************************************         01850000
+*                                                                       01860000
+*   MSG DESTINED FOR A FOREIGN ITASK.  THE DISP LOCK IS USUALLY         01870000
+*   ACQUIRED.  HOWEVER, IF THE DESTINATION ITASK IS AN ANCESTOR         01880000
+*   OF THE CURRENT (SENDER) ITASK, WE ARE ASSURRED THAT IT              01890000
+*   CANNOT TERMINATE DURING THE SEND OPERATION.  THE DISP LOCK          01900000
+*   IS NOT ACQUIRED IN THIS CASE.                                       01910000
+*                                                                       01920000
+***************************************************************         01930000
+INTER    DS    0H                                                       01940000
+         LR    R2,R10             CURRENT ITASK                         01950000
+T        USING ITASK,R2           PREPARE FOR ANCESTOR SCAN             01960000
+         L     R1,PTSTDEST        LOCATE DESTINATION ITASK NAME         01970000
+                                                                        01980000
+ITER_PAR DS    0H                 PARENT ITASK IS CALLED OWNING ITASK   01990000
+         ICM   R2,15,T.TSKOWNR    MOVE UP THE OWNERSHIP HIERARCHY       02000000
+         BZ    ITER_LCK           DESTINATION IS NOT AN ANCESTOR        02010000
+         CLC   T.TSKNAME,0(R1)    DESTINATION IS AN ANCESTOR?           02020000
+         BNE   ITER_PAR           CONTINUE SCAN OTHERWISE               02030000
+                                                                        02040000
+         ST    R2,TGTITASK        SAVE TARGET ITASK ADDRESS             02050000
+         B     ITER_PCB           LOCATE PCB WU IF REQUESTED            02060000
+         DROP  T                  ROVING ITASK PTR                      02070000
+                                                                        02080000
+*--------------------------------------------------------------         02090000
+*   ACQUIRE DISP LOCK                                                   02100000
+*--------------------------------------------------------------         02110000
+ITER_LCK DS    0H                                                       02120000
+         $SER  OBTAIN,DISP        SERIALIZE USE OF ITASK CHAIN          02130000
+         CH    R15,=AL2(RC04)     ENSURE CONTROL ACQUIRED               02140000
+         BE    ITER_HAV           ALREADY SERIALIZED?                   02150000
+         BH    ERR_LOCK           LOCK MGMT ERROR                       02160000
+         OI    FLAGS,FLOCKED      LOCK ACQUIRED                         02170000
+                                                                        02180000
+ITER_HAV DS    0H                                                       02190000
+                                                                        02200000
+*--------------------------------------------------------------         02210000
+*  Determine if destination workunit is specified by name or            02220000
+*  by token.  If token is specified locate the workunit using           02230000
+*  the WULOC service and set the target ITASK address.  If              02240000
+*  the target workunit is a PCB,  then retain the address of            02250000
+*  the PCB name to enable the format message to properly                02260000
+*  construct the message for forwarding information.                    02270000
+*--------------------------------------------------------------         02280000
+         ICM   R1,15,PTSTDEST     R1 <== ADDR OF TASK NAME OR WUTKN     02290000
+         BNM   ITER_TSK           CONTINUE WITH LOCATE                  02300000
+                                                                        02310000
+         BAS   R14,LOCWU          WORKUNIT TOKEN PROVIDED               02320000
+         BNZ   ERR_TNF            WORKUNIT NOT FOUND                    02330000
+         ST    R1,TGTITASK        SET TARGET ITASK ADDRESS              02340000
+         LR    R6,R1              PRESERVE ITASK AS MSG DESTINATION     02350000
+                                                                        02360000
+         LTR   R2,R0              IPCB WORKUNIT?                        02370000
+         BZ    ITER_MSG           NO, WORKUNIT LOCATED                  02380000
+                                                                        02390000
+TGT      USING IPCB,R2            IPCB TEMP ADDRESSABILITY              02400000
+         LA    R0,TGT.PCBNAME     ADDRESS OF DESTINATION WU NAME        02410000
+         ST    R0,TGTPNAME        RETAIN ADDRESS FOR MSG FORMAT         02420000
+                                                                        02430000
+         CR    R1,R10             INTRA TASK MESSAGE?                   02440000
+         BNE   ITER_MSG           NO, PROCESS INTER TASK MESSAGE        02450000
+         LR    R1,R2              PCB IS TARGET WORKUNIT                02460000
+         B     POSTMSG            PROCESS INTRA TASK MESSAGE            02470000
+                                                                        02480000
+         DROP  TGT                IPCB                                  02490000
+                                                                        02500000
+*--------------------------------------------------------------         02510000
+*  Locate the target ITASK by name and save the associated              02520000
+*  task address if the task is successfully located.  If a              02530000
+*  a PCB name is also specified on the TSEND request, then              02540000
+*  attempt to locate the target process within the ITASK.               02550000
+*  Retain the PCB name for proper message formatting.                   02560000
+*--------------------------------------------------------------         02570000
+ITER_TSK DS    0H                                                       02580000
+         BAS   R14,LOCITASK       ITASK LOCATE-BY-NAME                  02590000
+         BNZ   ERR_TNF            ITASK NOT FOUND                       02600000
+         ST    R1,TGTITASK        SET TARGET ITASK ADDRESS              02610000
+                                                                        02620000
+ITER_PCB DS    0H                                                       02630000
+         ICM   R0,15,PTSPDEST     FINAL DESTINATION IS NAMED PROCESS?   02640000
+         BZ    ITER_MSG           NO, CONTINUE                          02650000
+         BNM   *+8                ASSERT 'PROPERLY FORMED REQUEST'      02660000
+         EX    R0,*               PCB= FORM NOT ALLOWED INTERTASK       02670000
+         ST    R0,TGTPNAME        RETAIN ADDRESS FOR MSG FORMAT         02680000
+         L     R1,TGTITASK        DESTINATION ITASK                     02690000
+         BAS   R14,LOCIPCB        ASSURE PCB EXISTS IN TARGET ITASK     02700000
+         BNZ   ERR_PNF            ERROR OTHERWISE                       02710000
+                                                                        02720000
+ITER_MSG DS    0H                                                       02730000
+         L     R1,TGTITASK        DESTINATION ITASK                     02740000
+                                                                        02750000
+***************************************************************         02760000
+*                                                                       02770000
+*   POST MESSAGE TO DESIGNATED WORKUNIT                                 02780000
+*                                                                       02790000
+***************************************************************         02800000
+POSTMSG  DS    0H                                                       02810000
+         ST    R1,TGTWU           WORK UNIT ASSOCIATED WITH MESSAGE     02820000
+         BAS   R14,GETMSG         ACQUIRE AND INIT MESSAGE STORAGE      02830000
+         BNZ   ERR_STG            STORAGE MGMT FAILURE                  02840000
+                                                                        02850000
+         ST    R1,MSGPTR          INDICATED MSG CONSTRUCTED             02860000
+         BAS   R14,FMTMSG         BUILD MSG, RETURN IN R1               02870000
+         L     R0,TGTWU           R0 <== ADDR OF TARGET WORKUNIT        02880000
+         BAS   R14,QMSG           POST MESSAGE                          02890000
+                                                                        02900000
+         L     R2,TGTWU           ADDR OF TARGET WORKUNIT               02910000
+         USING @CB,R2             COMMON CB HEADER FORMAT               02920000
+         L     R2,@CB@MEPB        ADDR OF MESSAGE EPB                   02930000
+                                                                        02940000
+         $TASK POST,EPB=(R2),MF=(E,$TASKMFL)                            02950000
+                                                                        02960000
+         BNZ   ERR_POST                                                 02970000
+         B     RET_NORM           DONE                                  02980000
+         DROP  R2                 @CB                                   02990000
+                                                                        03000000
+         EJECT ,                                                        03010000
+***************************************************************         03020000
+*                                                                       03030000
+*   RETURN COMPLETION STATUS TO CALLER                                  03040000
+*                                                                       03050000
+***************************************************************         03060000
+RET_NORM DS    0H                 NORMAL COMPLETION                     03070000
+         L     R1,ETOKEN          RETURN XEPB TOKEN                     03080000
+         LA    R15,RC00                                                 03090000
+         B     EXIT                                                     03100000
+                                                                        03110000
+ERR_TNF  DS    0H                 NAMED ITASK NOT FOUND                 03120000
+         LA    R0,RSN04                                                 03130000
+         LA    R15,RC04                                                 03140000
+         B     EXIT                                                     03150000
+                                                                        03160000
+ERR_PNF  DS    0H                 NAMED IPCB  NOT FOUND                 03170000
+         LA    R0,RSN08                                                 03180000
+         LA    R15,RC04                                                 03190000
+         B     EXIT                                                     03200000
+                                                                        03210000
+ERR_SIZE DS    0H                 MESSAGE PROVIDED IS NOT VALID         03220000
+         LA    R15,RC08                                                 03230000
+         B     EXIT                                                     03240000
+                                                                        03250000
+ERR_STG  DS    0H                 STORAGE SERVICE FAILURE               03260000
+         LR    R1,R15             PRESERVE SERVICE RTN RETCODE          03270000
+         LA    R15,RC12                                                 03280000
+         B     EXIT                                                     03290000
+                                                                        03300000
+ERR_LOCK DS    0H                 STORAGE SERVICE FAILURE               03310000
+         LR    R1,R15             PRESERVE SERVICE RTN RETCODE          03320000
+         LA    R15,RC16                                                 03330000
+         B     EXIT                                                     03340000
+                                                                        03350000
+ERR_POST DS    0H                 INTERTASK POST FAILURE                03360000
+         LR    R1,R15             PRESERVE SERVICE RTN RETCODE          03370000
+         LA    R15,RC20                                                 03380000
+                                                                        03390000
+*--------------------------------------------------------------         03400000
+*   RELEASE LOCK IF ACQUIRED                                            03410000
+*--------------------------------------------------------------         03420000
+EXIT     DS    0H                                                       03430000
+         TM    FLAGS,FLOCKED      SERIALIZATION ON OUR BEHALF?          03440000
+         BNO   RETFREE            SKIP IF NOT                           03450000
+                                                                        03460000
+         STM   R15,R1,REGSAVE     PRESERVE COMPLETION STATUS            03470000
+         $SER  RELEASE,DISP       RELEASE LOCK                          03480000
+         LM    R15,R1,REGSAVE     RESTORE COMPLETION STATUS             03490000
+                                                                        03500000
+RETFREE  DS    0H                                                       03510000
+                                                                        03520000
+*--------------------------------------------------------------         03530000
+*   RETURN                                                              03540000
+*--------------------------------------------------------------         03550000
+RETURN   DS    0H                                                       03560000
+         #EXIT ,                                                        03570000
+                                                                        03580000
+         EJECT ,                                                        03590000
+***************************************************************         03600000
+*                                                                       03610000
+* ROUTINE:  FMTMSG - CONSTRUCT MESSAGE ENTRY                            03620000
+*                                                                       03630000
+* ON ENTRY:                                                             03640000
+*                                                                       03650000
+*    R1  CONTAINS THE ADDRESS OF AN INITIALIZED TSEND MSG               03660000
+*                                                                       03670000
+* ON EXIT:                                                              03680000
+*                                                                       03690000
+*    R15 CONTAINS ONE OF THE FOLLOWING RETURN CODES                     03700000
+*                                                                       03710000
+*        RC00 - MSG BUILT AND RETURNED VIA R1                           03720000
+*                                                                       03730000
+***************************************************************         03740000
+FMTMSG   DS    0H                                                       03750000
+         STM   R0,R15,REGSAVE     SAVE CALLERS REGS                     03760000
+         LR    R9,R1              INITED MESSAGE                        03770000
+                                                                        03780000
+         USING TMSG,R9            MESSAGE FORMAT                        03790000
+         MVC   TMSGORG,TSKNAME    NAME OF ISSUING ITASK                 03800000
+         MVC   TMSGTYPE,PTSTYPE   TYPE CODE                             03810000
+         MVC   TMSGW1,PTSMW1      PARM #1                               03820000
+         MVC   TMSGW2,PTSMW2      PARM #2                               03830000
+         MVC   TMSGW3,PTSMW3      PARM #3                               03840000
+         MVC   TMSGW4,PTSMW4      PARM #4                               03850000
+         MVC   TMSGINFL,PTSINFOL  MSG BLOCK LENGTH                      03860000
+                                                                        03870000
+         ICM   R1,15,TGTPNAME     PCB FINAL DESTINATION?                03880000
+         BZ    FMT_RPLY           NO, CONTINUE WITH REPLY EPB           03890000
+         MVC   TMSGPNAM,0(R1)     NAME OF DESTINATION PCB               03900000
+         BNM   *+10               ACTUAL PCB PTR?                       03910000
+         MVC   TMSGPNAM,PCBNAME-IPCB(R1)                                03920000
+                                                                        03930000
+         C     R10,TGTITASK       INTRA TASK MESSAGE?                   03940000
+         BE    FMT_RPLY           YES, CONTINUE                         03950000
+         MVC   TMSGOTYP,TMSGTYPE  SAVE ORIGINAL MESSAGE TYPE            03960000
+         MVC   TMSGTYPE,=A(ITM_TMSG_PROCESS) MSG FORWARDING REQUIRED    03970000
+                                                                        03980000
+***************************************************************         03990000
+*                                                                       04000000
+*   IF REPLY=YES IS SPECIFIED, INITIALIZE AN XEPB AND ASSOCIATE         04010000
+*   IT WITH THE TARGET WORKUNIT.  IF ITS AN INTRATASK MSG,              04020000
+*   INITIALIZE THE XEPB WITH SCOPE=LOCAL AND SET THE                    04030000
+*   DESTINATION PCB.                                                    04040000
+*                                                                       04050000
+***************************************************************         04060000
+FMT_RPLY DS    0H                                                       04070000
+         ICM   R0,15,PTSREPLY     REPLY REQUIRED?                       04080000
+         BZ    FMT_INFO           NO, CONTINUE                          04090000
+         ICM   R1,15,ETOKEN       SETEPB ALREADY ISSUED?                04100000
+         BNZ   FMT_ETKN           YES, SET EPB TOKEN                    04110000
+                                                                        04120000
+         C     R10,TGTITASK       INTRA TASK MESSAGE?                   04130000
+         BE    FMT_LOCL           YES, CONTINUE                         04140000
+                                                                        04150000
+         $TASK SETEPB,            INITIALIZE REPLY EVENT               +04160000
+               TASK=*TGTITASK,    DESTINIATION ITASK                   +04170000
+               ECODE=EC$REPLY,                                         +04180000
+               MF=(E,$TASKMFL)                                          04190000
+         B     FMT_ETKN           SAVE XEPB TOKEN                       04200000
+                                                                        04210000
+FMT_LOCL DS    0H                                                       04220000
+         $TASK SETEPB,            INITIALIZE REPLY EVENT               +04230000
+               TASK=*TGTITASK,    DESTINIATION ITASK                   +04240000
+               SCOPE=LOCAL,                                            +04250000
+               ECODE=EC$REPLY,                                         +04260000
+               MF=(E,$TASKMFL)                                          04270000
+                                                                        04280000
+FMT_ETKN DS    0H                                                       04290000
+         ST    R1,TMSGEPB         SET XEPB TOKEN                        04300000
+         ST    R1,ETOKEN          PRESERVE TOKEN                        04310000
+                                                                        04320000
+         L     R1,TGTWU           ADDRESS OF TARGET WORKUNIT            04330000
+         CLC   =C'IPCB',0(R1)     SEND TO A LOCAL PCB?                  04340000
+         BNE   FMT_INFO           NO, CONTINUE                          04350000
+                                                                        04360000
+         $TASK PCSEPB,            SET DESTINATION PCB ADDR IN XEPB     +04370000
+               EPB=*ETOKEN,                                            +04380000
+               PCB=*TGTWU,                                             +04390000
+               MF=(E,$TASKMFL)                                          04400000
+                                                                        04410000
+*--------------------------------------------------------------         04420000
+*  COPY MESSAGE INFO AREA TO TARGET MESSAGE                             04430000
+*--------------------------------------------------------------         04440000
+FMT_INFO DS    0H                                                       04450000
+         ICM   R5,15,PTSINFOL     MSG BLOCK LENGTH                      04460000
+         BNP   FMTHDR             SKIP IF ZERO                          04470000
+         L     R4,PTSINFO         MSG BLOCK ORIGIN                      04480000
+         LA    R14,TMSGINFO       APPEND BLOCK TO MSG HEADER            04490000
+         LR    R15,R5             SOURCE LENGTH = TARGET LENGTH         04500000
+         MVCL  R14,R4                                                   04510000
+                                                                        04520000
+FMTHDR   DS    0H                                                       04530000
+         LA    R1,TMSG            RETURN MESSAGE BLOCK                  04540000
+         LA    R15,RC00           SUCCESS                               04550000
+         DROP  R9                 TMSG                                  04560000
+                                                                        04570000
+FMT_RET  DS    0H                                                       04580000
+         LM    R2,R14,REGSAVE+8   RESTORE REGS                          04590000
+         LTR   R15,R15            REFLECT COMPLETION STATUS VIA CC      04600000
+         BR    R14                                                      04610000
+                                                                        04620000
+         EJECT ,                                                        04630000
+***************************************************************         04640000
+*                                                                       04650000
+* ROUTINE:  LOCITASK - LOCATE ITASK BY NAME                             04660000
+*                                                                       04670000
+* DESCRIPTION:                                                          04680000
+*                                                                       04690000
+*    CALL THE WORKUNIT LOCATOR FACILITY TO OBTAIN THE ADDRESS           04700000
+*    OF THE ITASK WITH THE REQUESTED NAME.                              04710000
+*                                                                       04720000
+* ON ENTRY:                                                             04730000
+*                                                                       04740000
+*    R1 - ADDR OF ITASK NAME                                            04750000
+*                                                                       04760000
+* ON EXIT:                                                              04770000
+*                                                                       04780000
+*    R15 CONTAINS ONE OF THE FOLLOWING RETURN CODES                     04790000
+*                                                                       04800000
+*        RC00 - ITASK PTR RETURNED IN R1                                04810000
+*        RC04 - ITASK NOT FOUND                                         04820000
+*                                                                       04830000
+***************************************************************         04840000
+LOCITASK DS    0H                                                       04850000
+         STM   R0,R15,REGSAVE     SAVE CALLER'S REGISTERS               04860000
+         LR    R2,R1              ADDR OF TASK NAME                     04870000
+                                                                        04880000
+         $WULOC LOCATE,USERDATA=IWUENTUD,TSKNAME=(R2),LOCKED=YES,      X04890000
+               WKA=WRK512,MF=(E,$WUL_MFL)                               04900000
+                                                                        04910000
+         BNZ   LOCI_RC4           NOT FOUND RETURN                      04920000
+         ICM   R1,15,WUDITASK     ADDRESS OF ITASK                      04930000
+         BNZ   LOCI_RET           RETURN ITASK ADDRESS                  04940000
+                                                                        04950000
+LOCI_RC4 DS    0H                 ASSUME WORKUNIT NOT FOUND             04960000
+         LA    R15,RC04           ITASK NOT FOUND                       04970000
+                                                                        04980000
+LOCI_RET DS    0H                                                       04990000
+         LM    R2,R14,REGSAVE+8   RESTORE CALLERS REGISTERS             05000000
+         LTR   R15,R15            SET CONDITION CODE                    05010000
+         BR    R14                RETURN TO CALLER                      05020000
+                                                                        05030000
+         EJECT ,                                                        05040000
+***************************************************************         05050000
+*                                                                       05060000
+* ROUTINE:  LOCWU - LOCATE WORKUNIT(S) BY WORKUNIT TOKEN                05070000
+*                                                                       05080000
+* DESCRIPTION:                                                          05090000
+*                                                                       05100000
+*    THIS ROUTINE ACQUIRES WORKUNIT INFORMATION INCLUDING ITASK         05110000
+*    AND IPCB ADDRESSES FROM THE WORKUNIT TOKEN PROVIDED ON             05120000
+*    ENTRY.                                                             05130000
+*                                                                       05140000
+* ON ENTRY:                                                             05150000
+*                                                                       05160000
+*    R1 - ADDR OF A THE WORKUNIT TOKEN                                  05170000
+*                                                                       05180000
+* ON EXIT:                                                              05190000
+*                                                                       05200000
+*    R15 CONTAINS ONE OF THE FOLLOWING RETURN CODES                     05210000
+*                                                                       05220000
+*        RC00 - WORKUNIT SUCCESSFULLY LOCATED                           05230000
+*                                                                       05240000
+*               R1 - ITASK ADDRESS                                      05250000
+*               R0 - IPCB  ADDRESS OR ZERO                              05260000
+*                                                                       05270000
+*        RC04 - WORKUNIT NOT FOUND                                      05280000
+*                                                                       05290000
+***************************************************************         05300000
+LOCWU    DS    0H                                                       05310000
+         STM   R0,R15,REGSAVE     SAVE CALLER'S REGISTERS               05320000
+         LR    R2,R1              WORKUNIT TOKEN ADDRESS                05330000
+                                                                        05340000
+         $WULOC LOCATE,USERDATA=IWUENTUD,TOKEN=(R2),LOCKED=YES,        X05350000
+               WKA=WRK512,MF=(E,$WUL_MFL)                               05360000
+                                                                        05370000
+         BNZ   LOCWURC4           NOT FOUND                             05380000
+                                                                        05390000
+         L     R0,WUDIPCB         ADDRESS OF IPCB                       05400000
+         ICM   R1,15,WUDITASK     ADDRESS OF ITASK                      05410000
+         BNZ   LOCWURET           RETURN                                05420000
+                                                                        05430000
+LOCWURC4 DS    0H                 ASSUME WORKUNIT NOT FOUND             05440000
+         LA    R15,RC04           ITASK NOT FOUND                       05450000
+                                                                        05460000
+LOCWURET DS    0H                                                       05470000
+         LM    R2,R14,REGSAVE+8   RESTORE CALLERS REGISTERS             05480000
+         LTR   R15,R15            SET CONDITION CODE                    05490000
+         BR    R14                RETURN TO CALLER                      05500000
+                                                                        05510000
+         EJECT ,                                                        05520000
+***************************************************************         05530000
+*                                                                       05540000
+* ROUTINE:  LOCIPCB  - LOCATE IPCB WITHIN ITASK BY NAME                 05550000
+*                                                                       05560000
+* DESCRIPTION:                                                          05570000
+*                                                                       05580000
+*    THIS ROUTINE WILL SCAN THE ITASK PCB QUEUE FOR THE                 05590000
+*    SPECIFIED PCB NAME. IF LOCATED THE ADDRESS OF IPCB WILL            05600000
+*    BE RETURNED IN R1.                                                 05610000
+*                                                                       05620000
+* ON ENTRY:                                                             05630000
+*                                                                       05640000
+*    R0 - ADDR OF IPCB NAME                                             05650000
+*    R1 - ADDR OF ITASK                                                 05660000
+*                                                                       05670000
+* ON EXIT:                                                              05680000
+*                                                                       05690000
+*    R15 CONTAINS ONE OF THE FOLLOWING RETURN CODES                     05700000
+*                                                                       05710000
+*        RC00 - IPCB PTR RETURNED IN R1                                 05720000
+*        RC04 - IPCB NOT FOUND                                          05730000
+*                                                                       05740000
+***************************************************************         05750000
+LOCIPCB  DS    0H                                                       05760000
+         STM   R0,R15,REGSAVE     SAVE CALLER'S REGISTERS               05770000
+                                                                        05780000
+         LR    R2,R0              ADDRESS OF PCB NAME                   05790000
+         LR    R6,R1              ADDRESS OF ITASK                      05800000
+T        USING ITASK,R6           ITASK ADDRESSABILITY                  05810000
+                                                                        05820000
+         LA    R15,RC00           ASSUME PCB AVAILABLE                  05830000
+         LA    R1,T.TSKPCB        ADDRESS OF PCB DISPATCH QUEUE         05840000
+         SH    R1,=AL2(PCBNEXT-IPCB)  BACKUP OFFSET OF PCB LINK         05850000
+         USING IPCB,R1            ITASK ADDRESSABILITY                  05860000
+                                                                        05870000
+LPCB_NXT DS    0H                                                       05880000
+         ICM   R1,15,PCBNEXT      ADDRESS OF NEXT PCB                   05890000
+         BZ    LPCB_NF            UNABLE TO LOCATE PCB                  05900000
+         CLC   PCBNAME,0(R2)      PCB NAME MATCH?                       05910000
+         BE    LPCB_RET           RETURN                                05920000
+         B     LPCB_NXT           ADDRESS OF NEXT PCB                   05930000
+                                                                        05940000
+LPCB_NF  DS    0H                                                       05950000
+         LA    R15,RC04           PCB NOT FOUND                         05960000
+                                                                        05970000
+LPCB_RET DS    0H                                                       05980000
+         LM    R2,R14,REGSAVE+8   RESTORE CALLER'S REGISTERS            05990000
+         LTR   R15,R15            SET CONDITION CODE                    06000000
+         BR    R14                RETURN TO CALLER                      06010000
+         DROP  T                  ITASK                                 06020000
+                                                                        06030000
+         EJECT ,                                                        06040000
+***************************************************************         06050000
+*                                                                       06060000
+* ROUTINE:  QMSG - ADD MESSAGE TO DESIGNATED MESSAGE QUEUE              06070000
+*                                                                       06080000
+* DESCRIPTION:                                                          06090000
+*                                                                       06100000
+*    THIS ROUTINE IS USED TO ADD A GIVEN MESSAGE TO THE TOP             06110000
+*    OF THE DESIGNATED MESSAGE QUEUE, WHICH IS ACTUALLY TREATED         06120000
+*    AS A STACK IN THIS ROUTINE.  THIS ALLOWS MULTITASK ACCESS          06130000
+*    (ADD ONLY) TO THE QUEUE WITHOUT THE NEED FOR SERIALIZATION.        06140000
+*                                                                       06150000
+* ON ENTRY:                                                             06160000
+*                                                                       06170000
+*    R1 - ADDR OF MESSAGE ENTRY (TMSG)                                  06180000
+*    R0 - ADDR OF DESTINATION WORKUNIT                                  06190000
+*                                                                       06200000
+***************************************************************         06210000
+QMSG     DS    0H                                                       06220000
+         STM   R0,R15,REGSAVE     PRESERVE CALLERS ENVIRONMENT          06230000
+                                                                        06240000
+         USING TMSG,R1            MESSAGE NODE                          06250000
+         LR    R2,R0              MESSAGE QUEUE ANCHOR                  06260000
+         USING @CB,R2             STD CONTROL BLOCK FORMAT              06270000
+         L     R8,@CB@MSGQ        ADDRESS OF WORKUNIT MSG QUEUE         06280000
+                                                                        06290000
+         LM    R4,R5,0(R8)        MESSAGE PTR AND COUNT                 06300000
+         LR    R6,R1              TMSG NODE PTR                         06310000
+                                                                        06320000
+QCDS     DS    0H                                                       06330000
+         ST    R4,TMSGNEXT        SET FORWARD LINK IN NEW MSG           06340000
+         LA    R7,1(,R5)          ACCOUNT FOR NEW MSG                   06350000
+         CDS   R4,R6,0(R8)        SWAP ONTO TOP OF STACK                06360000
+         BNZ   QCDS               KEEP TRYING                           06370000
+                                                                        06380000
+         LA    R15,RC00           COMPLETE                              06390000
+         LM    R0,R14,REGSAVE     RESTORE CALLERS ENVIRONEMENT          06400000
+         BR    R14                RETURN                                06410000
+         DROP  R1,R2              TMSG NODE, DESTINATION WU             06420000
+                                                                        06430000
+         EJECT ,                                                        06440000
+***************************************************************         06450000
+*                                                                       06460000
+* ROUTINE:  GETMSG - ACQUIRE AND INITIALIZE $TSEND MSG BLOCK            06470000
+*                                                                       06480000
+* DESCRIPTION:                                                          06490000
+*                                                                       06500000
+*    ACQUIRE STORAGE FOR THE REQUESTERS MESSAGE INCLUDING SPACE         06510000
+*    FOR THE TMSG FRAME.  USUALLY, THE STORAGE ACQUIRED WILL BE         06520000
+*    OWNED BY THE DESTINATION WORKUNIT, ENSURING PROPER CLEANUP         06530000
+*    IF THAT WORKUNIT SHOULD FAIL BEFORE PROCESSING ITS                 06540000
+*    MESSAGES.  HOWEVER, IF THE WORKUNIT HAS ESTABLISHED                06550000
+*    A MESSAGE QUEUE RESOURCE MANAGER, THE BLOCK IS ACQUIRED            06560000
+*    IN UNOWNED STORAGE.                                                06570000
+*                                                                       06580000
+* ON ENTRY:                                                             06590000
+*                                                                       06600000
+*    R1  CONTAINS THE ADDRESS OF THE TARGET WORK UNIT                   06610000
+*                                                                       06620000
+* ON EXIT:                                                              06630000
+*                                                                       06640000
+*    R15 CONTAINS ONE OF THE FOLLOWING RETURN CODES                     06650000
+*                                                                       06660000
+*        RC00 - MSG AREA INITIALIZED AND RETURNED VIA R1                06670000
+*        RCNN - STORAGE SERVICE FAILURE RETCODE                         06680000
+*                                                                       06690000
+***************************************************************         06700000
+GETMSG   DS    0H                                                       06710000
+         STM   R0,R15,REGSAVE     PRESERVE CALLERS ENVIRONMENT          06720000
+                                                                        06730000
+*--------------------------------------------------------------         06740000
+*   DETERMINE WHETHER MSG WILL BE ACQUIRED IN OWNED/UNOWNED STG         06750000
+*--------------------------------------------------------------         06760000
+         LR    R15,R1             WORKUNIT ORIGIN ADDRESS               06770000
+         USING @CB,R15            STANDARD PROLOG                       06780000
+         L     R2,@CBSTORQ        OWNED $GETSTOR STORAGE QUEUE          06790000
+         TM    @CBWUFLG,@CBWUFLG_MSGQRESM   MSGQ RESOURCE MGR DEFINED?  06800000
+         BNO   *+6                SKIP IF NOT                           06810000
+         SR    R2,R2              ACQUIRE MSG IN UNOWNED STORAGE        06820000
+         DROP  R15                WORKUNIT @CB                          06830000
+                                                                        06840000
+*--------------------------------------------------------------         06850000
+*   ACQUIRE MESSAGE AREA                                                06860000
+*--------------------------------------------------------------         06870000
+         LA    R3,TMSGHLN+TMSGSLN BASE LENGTH OF MSG ENTRY              06880000
+         A     R3,PTSINFOL        PLUS LENGTH OF TEXT BLOCK, IF ANY     06890000
+                                                                        06900000
+         $GETSTOR (R3),           ACQUIRE STORAGE                      X06910000
+               QHDR=(R2),                                              X06920000
+               COND=YES                                                 06930000
+                                                                        06940000
+         BNZ   *+8                                                      06950000
+         ST    R3,TMSGLEN-TMSG(,R1)                                     06960000
+                                                                        06970000
+         LM    R2,R14,REGSAVE+8   RETURN ACQUIRED STORAGE               06980000
+         LTR   R15,R15            REFLECT COMPLETION STATUS             06990000
+         BR    R14                RETURN TMSG VIA R1                    07000000
+                                                                        07010000
+         EJECT ,                                                        07020000
+***************************************************************         07030000
+*                                                                       07040000
+*   LOCAL READ-ONLY DATA AREAS                                          07050000
+*                                                                       07060000
+***************************************************************         07070000
+         LTORG ,                                                        07080000
+                                                                        07090000
+         EJECT                                                          07100000
+         PRINT NOGEN                                                    07110000
+         ICVT  ,                                                        07120000
+         ITASK ,                                                        07130000
+         IPCB  ,                                                        07140000
+         END                                                            07150000

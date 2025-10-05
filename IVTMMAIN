@@ -1,0 +1,1273 @@
+IVTMMAIN TITLE 'INTEGRATOR - VTAM SERVICES MAIN ENTRY'                  00010000
+                                                                        00020000
+         CMINCL ,                 INTEGRATOR CPI-C DEFINITIONS          00030000
+         L62INCL ,                INTEGRATOR LU6.2 DEFINITIONS          00040000
+                                                                        00050000
+**<DOC-ON>************************************************************* 00060000
+*                                                                       00070000
+* ROUTINE: IVTMMAIN - INTEGRATOR VTAM SERVICES MAIN ENTRY               00080000
+*                                                                       00090000
+* DESCRIPTION: 1) BUILD VTAM SERVICE ENVIRONMENT AT INITIALIZATION      00100000
+*              2) ROUTE MAIN TASK WORK ELEMENTS TO PROCESSING MODULES   00110000
+*                                                                       00120000
+* ON ENTRY:                                                             00130000
+*                                                                       00140000
+*    R15 = ENTRY POINT ADDRESS                                          00150000
+*    R14 = RETURN ADDRESS                                               00160000
+*    R13 = AVAILABLE SAVE AREA                                          00170000
+*    R11 = ICVT ADDRESS                                                 00180000
+*    R10 = ITASK ADDRESS                                                00190000
+*                                                                       00200000
+* ON EXIT:                                                              00210000
+*                                                                       00220000
+*    R15 = 0                                                            00230000
+*    R00 = 0                                                            00240000
+*    R01 = 0                                                            00250000
+*                                                                       00260000
+*    ALL OTHER REGISTERS ARE RESTORED                                   00270000
+*                                                                       00280000
+*                                                                       00290000
+**<DOC-OFF>************************************************************ 00300000
+                                                                        00310000
+         EJECT ,                                                        00320000
+*********************************************************************** 00330000
+*                                                                       00340000
+* MAINTENANCE:                                                          00350000
+*                                                                       00360000
+*   08/01/93 RANDY WITEK                                                00370000
+*   07/01/94 RANDY WITEK - LU6.2 SUPPORT                                00380000
+*   05/25/95 RANDY WITEK - IGNORE INBOUND ATTR 2 HI-ORDER BITS          00390000
+*   08/11/95 RANDY WITEK - ALLOW SHUTDOWN TO ABORT MAIN ACB OPEN        00400000
+*   08/18/95 RANDY WITEK - REASSEMBLE FOR $TIMER CHANGE                 00410000
+*   12/31/95 RANDY WITEK - 2.1 TRANSACTION PROGRAM VTAM WU SUPPORT      00420000
+*   01/23/96 RANDY WITEK - ALLOW STARTUP WITHOUT MAIN ACB               00430000
+*                                                                       00440000
+*********************************************************************** 00450000
+                                                                        00460000
+         EQUS  ,                  GENERAL EQUATES                       00470000
+                                                                        00480000
+RICVT    EQU   R11                                                      00490000
+RITASK   EQU   R10                                                      00500000
+RIVTAM   EQU   R9                                                       00510000
+RIACB    EQU   R8                                                       00520000
+RIRPL    EQU   R7                                                       00530000
+RIVUSER  EQU   R6                                                       00540000
+RIWE     EQU   R5                                                       00550000
+                                                                        00560000
+         USING ICVT,RICVT         ESTABLISH ADDRESSABILITY              00570000
+         USING ITASK,RITASK       ESTABLISH ADDRESSABILITY              00580000
+         USING IVTAMCVT,RIVTAM    ESTABLISH ADDRESSABILITY              00590000
+         USING IACB,RIACB         ESTABLISH ADDRESSABILITY              00600000
+         USING IRPL,RIRPL         ESTABLISH ADDRESSABILITY              00610000
+         USING IVUSER,RIVUSER     ESTABLISH ADDRESSABILITY              00620000
+         USING IWEVTAM,RIWE       ESTABLISH ADDRESSABILITY              00630000
+                                                                        00640000
+WORKAREA #WORK ,                  READ/WRITE WORKAREA                   00650000
+                                                                        00660000
+SUB0SAVE DS    18F                SUBROUTINE SAVE AREA                  00670000
+                                                                        00680000
+$TASKMFL $TASK MF=L               $TASK PLIST CONSTRUCTION              00690000
+                                                                        00700000
+ECODE    DS    F                  SAVED EVENT CODE                      00710000
+                                                                        00720000
+WRK256   DS    XL256              GENERAL WORKAREA                      00730000
+                                                                        00740000
+WAITTIME DS    F                  $TIMER WAIT INTERVAL (MILLISECONDS)   00750000
+TIMERID  DS    D                  $TIMER TIMER ID                       00760000
+                                                                        00770000
+RETR15   DS    F                  RETURN CODE VALUE                     00780000
+RETR0    DS    F                  RETURN REGISTER 0                     00790000
+RETR1    DS    F                  RETURN REGISTER 1                     00800000
+RETREGS  EQU   RETR15,*-RETR15    INCLUSIVE SYMBOL                      00810000
+                                                                        00820000
+FLAG     DS    X                                                        00830000
+FLAGLOCK EQU   X'80'              VTAM GLOBAL LOCK HELD                 00840000
+FLAGLCKD EQU   X'40'              VTAM GLOBAL LOCK HELD ON ENTRY        00850000
+FLAGRCOV EQU   X'20'              $RECVRY IN EFFECT                     00860000
+FLAGWORK EQU   X'10'              WORK ELEMENT PROCESSING IS ACTIVE     00870000
+         DS    XL3                PAD TO WORD                           00880000
+                                                                        00890000
+WRKPASS  DS    XL4096             PASSED WORK AREA                      00900000
+                                                                        00910000
+WORKLEN  #ENDWORK                 END OF WORKAREA                       00920000
+                                                                        00930000
+         $MSGDFT PREFIX=ICTPID,                                        +00940000
+               COMPID='VTM',                                           +00950000
+               TABLE=*#MSGS,                                           +00960000
+               WORKA=WRKPASS,                                          +00970000
+               MF=(E,WRK256),                                          +00980000
+               PRINT=NOGEN                                              00990000
+                                                                        01000000
+IVTMMAIN #ENTER BASE=R12,         ENTRY LINKAGE                        +01010000
+               SAVE=(YES,NOFRAME),                                     +01020000
+               AMODE=31,                                               +01030000
+               RMODE=ANY                                                01040000
+                                                                        01050000
+*---------------------------------------------------------------------- 01060000
+* ISSUE AN INFORMATIVE MESSAGE                                          01070000
+*---------------------------------------------------------------------- 01080000
+                                                                        01090000
+         $MSG  001                "INITIALIZING" MESSAGE                01100000
+                                                                        01110000
+*---------------------------------------------------------------------- 01120000
+* ALLOCATE THE IVTAMCVT BLOCK...VTAM SERVICES CVT                       01130000
+*---------------------------------------------------------------------- 01140000
+                                                                        01150000
+         $GETSTOR L'IVT,                                               +01160000
+               LOC=ANY,                                                +01170000
+               QHDR=0                                                   01180000
+                                                                        01190000
+         ST    R1,ICTVTCVT        ANCHOR IVTAMCVT IN ICVT               01200000
+         LR    RIVTAM,R1          SYMBOLIC REF TO IVTAMCVT              01210000
+         MVC   IVTID(8),=CL8'IVTAMCVT' SET EYECATCHER                   01220000
+         ST    RITASK,IVTITASK    SET $VTMTASK ITASK POINTER            01230000
+         MVC   IVTPCB,TSKPCBC     SET $VTMTASK PCB   POINTER            01240000
+                                                                        01250000
+         $VTAMWE L'IWE,           SIZE                                 +01260000
+               0                  CODE                                  01270000
+                                                                        01280000
+         LR    RIWE,R1             SET WORK ELEMENT POINTER             01290000
+         ST    RIWE,IVTWEQ         ESTABLISH FIRST WORK ELEMENT         01300000
+                                                                        01310000
+         $TASK SETEPB,                                                 +01320000
+               EPB=IVTWEEPB,                                           +01330000
+               ECB=IWEECB,                                             +01340000
+               ECODE=EC$VTWE,                                          +01350000
+               ERRET=ERR$TASK,                                         +01360000
+               MF=(E,$TASKMFL)    INITIALIZE EPB FOR FIRST EVENT        01370000
+                                                                        01380000
+*---------------------------------------------------------------------- 01390000
+* CUT A START-UP TRACE RECORD                                           01400000
+*---------------------------------------------------------------------- 01410000
+                                                                        01420000
+         LA    R1,TRC_IVTMMAIN_START                                    01430000
+         BAS   R14,MAINTRCE                                             01440000
+                                                                        01450000
+*---------------------------------------------------------------------- 01460000
+* INITIALIZE QUEUE HEADERS IN THE IVTAMCVT                              01470000
+*---------------------------------------------------------------------- 01480000
+                                                                        01490000
+         LA    R1,IVTIP1ST        ADDRESS OF IPOOL HEADER               01500000
+         S     R1,=A(IPONEXT-IPO) NORMALIZE ADDRESS                     01510000
+         O     R1,=X'80000000'    FLAG HI BIT ON                        01520000
+         ST    R1,IVTIP1ST        INITIALIZE POINTER                    01530000
+         ST    R1,IVTIPLST        INITIALIZE POINTER                    01540000
+                                                                        01550000
+         LA    R1,IVTIA1ST        ADDRESS OF IACB HEADER                01560000
+         S     R1,=A(IACNEXT-IAC) NORMALIZE ADDRESS                     01570000
+         O     R1,=X'80000000'    FLAG HI BIT ON                        01580000
+         ST    R1,IVTIA1ST        INITIALIZE POINTER                    01590000
+         ST    R1,IVTIALST        INITIALIZE POINTER                    01600000
+                                                                        01610000
+         LA    R1,IVTSQ1ST        ADDRESS OF ISQE HEADER                01620000
+         S     R1,=A(ISQNEXT-ISQ) NORMALIZE ADDRESS                     01630000
+         O     R1,=X'80000000'    FLAG HI BIT ON                        01640000
+         ST    R1,IVTSQ1ST        INITIALIZE POINTER                    01650000
+         ST    R1,IVTSQLST        INITIALIZE POINTER                    01660000
+                                                                        01670000
+         LA    R1,IVTSY1ST        ADDRESS OF ISYS HEADER                01680000
+         S     R1,=A(ISYNEXT-ISY) NORMALIZE ADDRESS                     01690000
+         O     R1,=X'80000000'    FLAG HI BIT ON                        01700000
+         ST    R1,IVTSY1ST        INITIALIZE POINTER                    01710000
+         ST    R1,IVTSYLST        INITIALIZE POINTER                    01720000
+                                                                        01730000
+         LA    R1,IVTTP1ST        ADDRESS OF TPB HEADER                 01740000
+         S     R1,=A(TPBNEXT-TPB) NORMALIZE ADDRESS                     01750000
+         O     R1,=X'80000000'    FLAG HI BIT ON                        01760000
+         ST    R1,IVTTP1ST        INITIALIZE POINTER                    01770000
+         ST    R1,IVTTPLST        INITIALIZE POINTER                    01780000
+                                                                        01790000
+*---------------------------------------------------------------------- 01800000
+* ALLOCATE THE IVUSER LOOKUP TABLE AND ANCHOR IT IN THE IVTAMCVT        01810000
+*---------------------------------------------------------------------- 01820000
+                                                                        01830000
+         L     R2,=A(1024*4)      ROOM FOR 1024 FULLWORD ANCHORS        01840000
+                                                                        01850000
+         $GETSTOR (R2),                                                +01860000
+               LOC=ANY,                                                +01870000
+               QHDR=0                                                   01880000
+                                                                        01890000
+         ST    R1,IVT@UTBL        ANCHOR THE USER LOOKUP TABLE          01900000
+                                                                        01910000
+*---------------------------------------------------------------------- 01920000
+* ALLOCATE THE ISQE LOOKUP TABLE AND ANCHOR IT IN THE IVTAMCVT          01930000
+*---------------------------------------------------------------------- 01940000
+                                                                        01950000
+         L     R2,=A(1024*4)      ROOM FOR 1024 FULLWORD ANCHORS        01960000
+                                                                        01970000
+         $GETSTOR (R2),                                                +01980000
+               LOC=ANY,                                                +01990000
+               QHDR=0                                                   02000000
+                                                                        02010000
+         ST    R1,IVT@SQTB        ANCHOR THE ISQE LOOKUP TABLE          02020000
+                                                                        02030000
+*---------------------------------------------------------------------- 02040000
+* ALLOCATE THE ISESS LOOKUP TABLE AND ANCHOR IT IN THE IVTAMCVT         02050000
+*---------------------------------------------------------------------- 02060000
+                                                                        02070000
+         L     R2,=A(4096*4)      ROOM FOR 4096 FULLWORD ANCHORS        02080000
+                                                                        02090000
+         $GETSTOR (R2),                                                +02100000
+               LOC=ANY,                                                +02110000
+               QHDR=0                                                   02120000
+                                                                        02130000
+         ST    R1,IVT@STBL        ANCHOR THE ISQE LOOKUP TABLE          02140000
+                                                                        02150000
+*---------------------------------------------------------------------- 02160000
+* PLUG MODULE ENTRY ADDRESSES & TRANSLATE TABLE ADDRESSES INTO IVTAMCVT 02170000
+*---------------------------------------------------------------------- 02180000
+                                                                        02190000
+         LA    R4,MODTABLE        TABLE OF VCONS TO SET IN VT           02200000
+         LA    R2,L'MODTNTRY      LENGTH OF A TABLE ENTRY               02210000
+         L     R3,MODLAST         ADDRESS OF LAST ENTRY                 02220000
+                                                                        02230000
+MODTLOOP DS    0H                                                       02240000
+                                                                        02250000
+         LH    R15,4(,R4)         OFFSET IN IVTAMCVT FOR ADDRESS        02260000
+         L     R1,0(,R4)          MODULE ADDRESS                        02270000
+         ST    R1,0(R15,RIVTAM)   SET MODULE ADDR IN IVTAMCVT           02280000
+         BXLE  R4,R2,MODTLOOP     LOOP THRU TABLE OF VCONS              02290000
+         B     ALLOCBLK           BRANCH WHEN TABLE EXHAUSTED           02300000
+                                                                        02310000
+*---------------------------------------------------------------------- 02320000
+* PLUG TRANSLATE TABLE ADDRESSES INTO THE IVTAMCVT                      02330000
+*---------------------------------------------------------------------- 02340000
+                                                                        02350000
+*---------------------------------------------------------------------- 02360000
+* BUILD CONTROL BLOCK MODELS AND ANCHOR IN THE IVTAMCVT                 02370000
+*---------------------------------------------------------------------- 02380000
+                                                                        02390000
+ALLOCBLK DS    0H                                                       02400000
+                                                                        02410000
+         L     R15,IVT@NBLK       CALL IVTMNBLK TO GENCB MODELS         02420000
+         BASR  R14,R15                                                  02430000
+                                                                        02440000
+*---------------------------------------------------------------------- 02450000
+* ALLOCATE AND OPEN THE INTEGRATOR PLU APPLICATION(S)                   02460000
+*---------------------------------------------------------------------- 02470000
+                                                                        02480000
+         $VTAM GETACB,                                                 +02490000
+               ACBNAME=ICTAPLID,                                       +02500000
+               POOL=0,            NO POOL ASSOCIATION                  +02510000
+               ERRET=ERR$VTAM,                                         +02520000
+               MF=(E,MFE_LIST)    ALLOCATE THE MAIN ACB                 02530000
+                                                                        02540000
+         LR    RIACB,R1                                                 02550000
+         ST    RIACB,IVTACB       ANCHOR MAIN ACB IN IVTAMCVT           02560000
+         L     R3,=A(IVTOTRY)     # OF OPEN ATTEMPTS BEFORE FAILURE     02570000
+         L     R4,=A(IVTOWAIT)    LENGTH OF WAIT (MILLISECONDS)         02580000
+         B     OPENMAIN           ATTEMPT TO OPEN                       02590000
+                                                                        02600000
+OPENWAIT DS    0H                                                       02610000
+                                                                        02620000
+         $TIMER WAIT,                                                  +02630000
+               TID=TIMERID,                                            +02640000
+               INTVL=(R4),                                             +02650000
+               MF=(E,MFE_LIST)    WAIT BEFORE ATTEMPTING OPEN           02660000
+                                                                        02670000
+         NI    IACF1,255-IACF1UNU CLEAR FLAG FROM PRIOR OPEN FAILURE    02680000
+                                                                        02690000
+OPENMAIN DS    0H                                                       02700000
+                                                                        02710000
+         $VTAM OPENACB,                                                +02720000
+               AREA=(RIACB),                                           +02730000
+               ERRET=OPENMERR,                                         +02740000
+               MF=(E,MFE_LIST)    OPEN MAIN ACB                         02750000
+                                                                        02760000
+         B     MAINOPEN                                                 02770000
+                                                                        02780000
+OPENMERR DS    0H                                                       02790000
+                                                                        02800000
+         LTR   R15,R15            CHECK FOR SPECIAL SHUTDOWN RC         02810000
+         BM    EXIT               BRANCH IF OPEN FAILED BY SHUTDOWN     02820000
+         BCT   R3,OPENWAIT        BRANCH IF TRIES NOT EXHAUSETED        02830000
+                                                                        02840000
+*---------------------------------------------------------------------- 02850000
+* ALLOCATE AND OPEN THE INTEGRATOR ACB FOR LU6.2 OPERATIONS             02860000
+*---------------------------------------------------------------------- 02870000
+                                                                        02880000
+MAINOPEN DS    0H                                                       02890000
+                                                                        02900000
+         $VTAM GETACB,                                                 +02910000
+               ACBNAME=ICTAPL62,                                       +02920000
+               POOL=0,            NO POOL ASSOCIATION                  +02930000
+               ERRET=ERR$LU62,                                         +02940000
+               MF=(E,MFE_LIST)    ALLOCATE THE LU6.2 ACB                02950000
+                                                                        02960000
+         LR    RIACB,R1                                                 02970000
+         ST    RIACB,IVTACB62     ANCHOR LU6.2 ACB IN IVTAMCVT          02980000
+         OI    IACF1,IACF162      MARK ACB FOR LU6.2 SESSIONS           02990000
+                                                                        03000000
+         $VTAM OPENACB,                                                +03010000
+               AREA=(RIACB),                                           +03020000
+               ERRET=ERR$LU62,                                         +03030000
+               MF=(E,MFE_LIST)    OPEN ACB FOR LU6.2 OPERATIONS         03040000
+                                                                        03050000
+         B     LU62OPEN           BRANCH IF ALLOCATED AND OPENED        03060000
+                                                                        03070000
+ERR$LU62 DS    0H                                                       03080000
+                                                                        03090000
+LU62OPEN DS    0H                                                       03100000
+                                                                        03110000
+*---------------------------------------------------------------------- 03120000
+* BUILD IPOOLS AND ASSOCIATED IACBS PER THE GLOBAL TABLE DEFINITIONS    03130000
+*---------------------------------------------------------------------- 03140000
+                                                                        03150000
+         @CALL ICFGPOOL,CTYPE=CVT                                       03160000
+                                                                        03170000
+*---------------------------------------------------------------------- 03180000
+* BUILD THE REMOTE SYSTEMS DEFINITIONS & ATTEMPT TO START CONNECTIONS   03190000
+*---------------------------------------------------------------------- 03200000
+                                                                        03210000
+         @CALL ICFGSYST,CTYPE=CVT                                       03220000
+                                                                        03230000
+*---------------------------------------------------------------------- 03240000
+* BUILD THE LU6.2 TRANSACTION PROGRAM DEFINITIONS                       03250000
+*---------------------------------------------------------------------- 03260000
+                                                                        03270000
+         @CALL ICFGTPGM,CTYPE=CVT                                       03280000
+                                                                        03290000
+*---------------------------------------------------------------------- 03300000
+*   ESTABLISH RECOVERY ENVIRONMENT                                      03310000
+*---------------------------------------------------------------------- 03320000
+                                                                        03330000
+         $RCVRY CREATE,RECOVRTN,PARM=(R13),MF=(E,MFE_LIST)              03340000
+                                                                        03350000
+         BNZ   ERRRCVRY           BRANCH IF $RCVRY ERROR                03360000
+         OI    FLAG,FLAGRCOV      INDICATE RECOVERY ENVIRON ESTABLISHED 03370000
+                                                                        03380000
+*---------------------------------------------------------------------- 03390000
+* RESET EPB'S AS NEEDED                                                 03400000
+*---------------------------------------------------------------------- 03410000
+                                                                        03420000
+WAIT     DS        0H                                                   03430000
+                                                                        03440000
+         CLC   ECODE,=A(EC$MSG)   WAS A MESSAGE PROCESSED?              03450000
+         BNE   WAITNMSG           BRANCH IF NOT                         03460000
+                                                                        03470000
+         $TASK SETEPB,            AWAIT INBOUND MESSAGES               +03480000
+               EPB=TSKMEPB,       INTER-TASK MESSAGING EPB             +03490000
+               ECODE=EC$MSG,      STD MSG DELIVERY CODE                +03500000
+               ERRET=ERR$TASK,                                         +03510000
+               MF=(E,$TASKMFL)                                          03520000
+                                                                        03530000
+         B     WAITWORK           GO WAIT THE TASK                      03540000
+                                                                        03550000
+WAITNMSG DS    0H                                                       03560000
+                                                                        03570000
+         CLC   ECODE,=A(EC$VTWE)  WAS VTAM WORK ELEMENT PROCESSED?      03580000
+         BNE   WAITWORK           BRANCH IF NOT                         03590000
+                                                                        03600000
+         $TASK SETEPB,                                                 +03610000
+               EPB=IVTWEEPB,                                           +03620000
+               ECB=IWEECB,                                             +03630000
+               ECODE=EC$VTWE,                                          +03640000
+               ERRET=ERR$TASK,                                         +03650000
+               MF=(E,$TASKMFL)    INITIALIZE EPB FOR FIRST EVENT        03660000
+                                                                        03670000
+*---------------------------------------------------------------------- 03680000
+* RELEASE STORAGE THAT HAS BEEN QUEUED FOR MAINTASK $RETSTOR.           03690000
+* WAIT FOR AN EVENT TO OCCUR AND JUMP TO THE PROCESSING ROUTINE.        03700000
+*---------------------------------------------------------------------- 03710000
+                                                                        03720000
+WAITWORK DS    0H                                                       03730000
+                                                                        03740000
+         ICM   R2,15,IVTRETQ      MAINTASK $RESTOR'S TO BE DONE?        03750000
+         BZ    WAITCHEK           BRANCH IF NOT                         03760000
+         SR    R1,R1              EMPTY THE Q                           03770000
+                                                                        03780000
+WAITSWAP DS    0H                                                       03790000
+                                                                        03800000
+         CS    R2,R1,IVTRETQ      SWAP NULL POINTER ONTO TOP            03810000
+         BNE   WAITSWAP           TRY AGAIN IF TOP CHANGED              03820000
+                                                                        03830000
+WAITFREE DS    0H                                                       03840000
+                                                                        03850000
+         LTR   R2,R2              HAS QUEUE BEEN FREED?                 03860000
+         BZ    WAITCHEK           BRANCH IF YES                         03870000
+         L     R3,0(,R2)          LINK TO NEXT BLOCK TO FREE            03880000
+                                                                        03890000
+         $RETSTOR (R2),                                                +03900000
+               OWNER=*IVTITASK    RELEASE THE BLOCK                     03910000
+                                                                        03920000
+         LR    R2,R3              THIS IS THE NEXT BLOCK                03930000
+         B     WAITFREE           GO RELEASE IT                         03940000
+                                                                        03950000
+WAITCHEK DS    0H                                                       03960000
+                                                                        03970000
+         TM    IVTF1,IVTF1TRM     IS TERMINATION STARTED?               03980000
+         BNO   WAITNOW            BRANCH IF NOT                         03990000
+         OC    IVT#USER,IVT#USER  ANY ACTIVE USER'S?                    04000000
+         BNZ   WAITNOW            BRANCH IF YES                         04010000
+         OC    IVTRPACT,IVTRPACT  ANY ACTIVE RPL'S?                     04020000
+         BNZ   WAITNOW            BRANCH IF YES                         04030000
+         OC    IVT#OPEN,IVT#OPEN  ANY OPEN ACB'S?                       04040000
+         BNZ   WAITNOW            BRANCH IF YES                         04050000
+         SR    R1,R1              NULL WORK ELEMENT ADDRESS             04060000
+         BAS   R14,QWEMAIN        TERMINATE THE WORK QUEUE              04070000
+                                                                        04080000
+WAITNOW  DS    0H                                                       04090000
+                                                                        04100000
+         $TASK WAIT,              WAIT FOR EVENT                       +04110000
+               MF=(E,$TASKMFL)                                          04120000
+                                                                        04130000
+         ST    R15,ECODE          SAVE THE EVENT CODE                   04140000
+                                                                        04150000
+         C     R15,=A(EC$VTWE)    IS IT A VTAM WORK ELEMENT?            04160000
+         BE    VWRK               BRANCH IF IT IS VTAM WORK             04170000
+                                                                        04180000
+         C     R15,=A(EC$VTUT)    IS IT A VTAM USER TERMINATION?        04190000
+         BE    VTRM               BRANCH IF IT IS USER TERMINATION      04200000
+                                                                        04210000
+         C     R15,=A(EC$MSG)     IS IT AN INTERTASK MESSAGE?           04220000
+         BE    TMSG               BRANCH IF YES                         04230000
+                                                                        04240000
+         C     R15,=A(EC$STOP)    IS TASK STOP REQUESTED?               04250000
+         BE    TSTP               BRANCH IF YES                         04260000
+                                                                        04270000
+         C     R15,=A(EC$CNCL)    IS TASK CANCEL REQUESTED?             04280000
+         BE    TCAN               BRANCH IF YES                         04290000
+                                                                        04300000
+         B     WAITWORK           IGNORE ANYTHING ELSE                  04310000
+                                                                        04320000
+*---------------------------------------------------------------------- 04330000
+* PROCESS A VTAM WORK ELEMENT                                           04340000
+*---------------------------------------------------------------------- 04350000
+                                                                        04360000
+VWRK     DS    0H                                                       04370000
+                                                                        04380000
+         L     R3,EPBECB-EPB(,R1) GET ADDRESS OF POSTED IWE             04390000
+         L     RIWE,IWELINK-IWE(,R3) ADDRESS OF IWE TO SERVICE          04400000
+                                                                        04410000
+         $VTAMFWE (R3)            FREE THE OLD IWE THAT WAS POSTED      04420000
+                                                                        04430000
+         ST    RIWE,IVTLASTW      SAVE ADDR OF LAST WORK ELEMENT        04440000
+                                                                        04450000
+         $TRACE *=A(TRC_IVTMMAIN_WORK),16 TRACE ENTRY W/16 USER BYTES   04460000
+                                                                        04470000
+         BNZ   NOWTRACE           BRANCH IF TRACING NOT AVAILABLE       04480000
+         LA    R14,IVTWEQ         QUEUE ADDRESS                         04490000
+         ST    R14,4(,R1)         TRACE QUEUE ADDRESS                   04500000
+         ST    RIWE,8(,R1)        TRACE WORK ELEMENT ADDRESS            04510000
+         LTR   RIWE,RIWE          NULL WORK ELEMENT?                    04520000
+         BZ    NOWTRACE           BRANCH IF YES                         04530000
+         MVC   0(4,R1),IWELCODE   TRACE THE WORK ELEMENT CODE           04540000
+                                                                        04550000
+NOWTRACE DS    0H                                                       04560000
+                                                                        04570000
+         LTR   RIWE,RIWE          WAS LINK FIELD NULL?                  04580000
+         BZ    EXIT               BRANCH YES, TIME TO EXIT              04590000
+                                                                        04600000
+         LA    R4,VWRKTBLE        ADDRESS OF JUMP TABLE                 04610000
+         LA    R2,L'VWRKNTRY      LENGTH OF AN ENTRY                    04620000
+         LA    R3,VWRKLAST        ADDRESS OF LAST ENTRY                 04630000
+                                                                        04640000
+VWRKLOOP DS    0H                                                       04650000
+                                                                        04660000
+         CLC   IWELCODE,0(R4)     DOES ENTRY MATCH WORK ELEMENT CODE?   04670000
+         BE    VWRKGO             BRANCH IF YES                         04680000
+         BXLE  R4,R2,VWRKLOOP     CHECK ALL TABLE ENTRIES               04690000
+                                                                        04700000
+         $MSG  981,               "UNKNOWN WORK ELEMENT"               +04710000
+               FIELDS=((RIWE),                                         +04720000
+               (RITASK),                                               +04730000
+               (TSKPCBC,4),                                            +04740000
+               (TSKNAME,8),                                            +04750000
+               (IWEID,4),                                              +04760000
+               (IWELEN,4),                                             +04770000
+               (IWELINK,4),                                            +04780000
+               (IWELCODE,4),                                           +04790000
+               (IWELQUAL,4),                                           +04800000
+               (IWEOWNER,4))                                            04810000
+                                                                        04820000
+         B     WAIT                                                     04830000
+                                                                        04840000
+VWRKGO   DS    0H                                                       04850000
+                                                                        04860000
+         L     R15,4(,R4)         OFFSET OF ROUTINE ENTRY POINT         04870000
+         L     R15,0(R15,RIVTAM)  ROUTINE ENTRY POINT                   04880000
+         LR    R1,RIWE            PASS IWE ADDRESS IN R1                04890000
+         STM   R0,R15,SUB0SAVE    SAVE RETRY REGISTERS                  04900000
+         OI    FLAG,FLAGWORK      SHOW WORK ELEMENT PROCESSING          04910000
+         BASR  R14,R15            LINK TO WORK ELEMENT ROUTINE          04920000
+                                                                        04930000
+VWRKRTRY DS    0H                                                       04940000
+                                                                        04950000
+         LM    R0,R15,SUB0SAVE    RESTORE REGISTERS                     04960000
+         NI    FLAG,255-FLAGWORK  CLEAR WORK ELEMENT PROCESSING         04970000
+         B     WAIT               AND WAIT FOR NEXT ELEMENT             04980000
+                                                                        04990000
+VWRKTBLE DS    0F                                                       05000000
+         DC    A(IWECXRPL,IVT@NRPL-IVTAMCVT) RPL     EXIT WORK ELEMENT  05010000
+VWRKNTRY EQU   VWRKTBLE,*-VWRKTBLE                                      05020000
+         DC    A(IWECRECA,IVT@NREC-IVTAMCVT) WE PROCESSOR RECEIVE-ANY   05030000
+         DC    A(IWECXLOG,IVT@NLOG-IVTAMCVT) LOGON   EXIT WORK ELEMENT  05040000
+         DC    A(IWECSIRQ,IVT@NLOG-IVTAMCVT) SESSION INIT WORK ELEMENT  05050000
+         DC    A(IWECXSCP,IVT@NSCP-IVTAMCVT) SCIP    EXIT WORK ELEMENT  05060000
+         DC    A(IWECTCPL,IVT@NTCP-IVTAMCVT) TCP/IP LOGON WORK ELEMENT  05070000
+         DC    A(IWECXTPN,IVT@NTPN-IVTAMCVT) TPEND   EXIT WORK ELEMENT  05080000
+         DC    A(IWECXDFA,IVT@NDFA-IVTAMCVT) DFASY   EXIT WORK ELEMENT  05090000
+         DC    A(IWECXLOS,IVT@NLOS-IVTAMCVT) LOSTERM EXIT WORK ELEMENT  05100000
+         DC    A(IWECXNSX,IVT@NNSX-IVTAMCVT) NS      EXIT WORK ELEMENT  05110000
+         DC    A(IWECXREL,IVT@NREL-IVTAMCVT) RELREQ  EXIT WORK ELEMENT  05120000
+         DC    A(IWECXRSP,IVT@NRSP-IVTAMCVT) RESP    EXIT WORK ELEMENT  05130000
+         DC    A(IWECXLER,IVT@NLER-IVTAMCVT) LERAD   EXIT WORK ELEMENT  05140000
+         DC    A(IWECXSYN,IVT@NSYN-IVTAMCVT) SYNAD   EXIT WORK ELEMENT  05150000
+         DC    A(IWECOPEN,IVT@NOPN-IVTAMCVT) WE PROCESSOR ACB OPEN/CLSE 05160000
+         DC    A(IWECGETS,IL6@NGTS-IVTAMCVT) WE PROCESSOR GET SESSION   05170000
+         DC    A(IWECDFPL,IL6@NDPL-IVTAMCVT) WE PROCESSOR DEF PART LU   05180000
+         DC    A(IWECSTTP,IL6@NSTP-IVTAMCVT) WE PROCESSOR START TP      05190000
+         DC    A(IWECLDTP,IL6@NLTP-IVTAMCVT) WE PROCESSOR LOAD TP       05200000
+         DC    A(IWECDLTP,IL6@NDTP-IVTAMCVT) WE PROCESSOR DELETE TP     05210000
+         DC    A(IWECLOSE,IVT@NOPN-IVTAMCVT) WE PROCESSOR ACB OPEN/CLSE 05220000
+         DC    A(IWECKILL,IVT@NKIL-IVTAMCVT) WE PROCESSOR KILL SESSION  05230000
+VWRKLAST EQU   *-L'VWRKNTRY                                             05240000
+                                                                        05250000
+*---------------------------------------------------------------------- 05260000
+* PROCESS VTAM COMPONENT TERMINATION                                    05270000
+*---------------------------------------------------------------------- 05280000
+                                                                        05290000
+TERM     DS    0H                                                       05300000
+                                                                        05310000
+         TM    IVTF1,IVTF1TRM              TERMINATION UNDERWAY?        05320000
+         BO    WAIT                        BRANCH IF YES                05330000
+         OI    IVTF1,IVTF1TRM              SHOW TERMINATION STARTED     05340000
+                                                                        05350000
+         BAS   R14,VTAMLOCK                                             05360000
+                                                                        05370000
+         LA    RIACB,IVTIA1ST              ADDRESS OF IACB CHAIN HEAD   05380000
+         S     RIACB,=A(IACNEXT-IAC)       NORMALIZE FOR CHAIN RUN      05390000
+                                                                        05400000
+TERMRUNC DS    0H                                                       05410000
+                                                                        05420000
+         ICM   RIACB,15,IACNEXT            LINK TO NEXT IACB            05430000
+         BM    TERMENDC                    BRANCH IF IACB NOT FOUND     05440000
+         TM    IACF1,IACF1OPN              IS THE ACB OPEN?             05450000
+         BNO   TERMRUNC                    BRANCH IF NOT                05460000
+         TM    IACF1,IACF1TPN+IACF1CLS     TPEND ALREADY SIGNALED?      05470000
+         BNZ   TERMRUNC                    BRANCH IF YES                05480000
+         OI    IACF1,IACF1CLS              SHOW CLOSE REQUESTED         05490000
+                                                                        05500000
+         $VTAMWE L'IWEX9,                                              +05510000
+               IWECXTPN                    ALLOCATE TPEND WORK ELEMENT  05520000
+                                                                        05530000
+         MVC   IWEX9RC-IWEVTAM(4,R1),=F'-1' SIMULATED TPEND RC          05540000
+         ST    RIACB,IWEX9ACB-IWEVTAM(,R1) SET THE ACB ADDRESS          05550000
+         BAS   R14,QWEMAIN                 QUEUE TPEND WE TO MAIN       05560000
+         B     TERMRUNC                    CHECK NEXT ACB               05570000
+                                                                        05580000
+TERMENDC DS    0H                                                       05590000
+                                                                        05600000
+         BAS   R14,VTAMUNLK                                             05610000
+                                                                        05620000
+         B     WAIT                        WAIT FOR TERMINATION         05630000
+                                                                        05640000
+*---------------------------------------------------------------------- 05650000
+* PROCESS VTAM USER TERMINATION                                         05660000
+*---------------------------------------------------------------------- 05670000
+                                                                        05680000
+VTRM     DS    0H                                                       05690000
+                                                                        05700000
+         B     WAIT               SEE IF MAIN TASK CAN EXIT NOW         05710000
+                                                                        05720000
+*---------------------------------------------------------------------- 05730000
+* PROCESS AN INTERTASK MESSAGE                                          05740000
+*---------------------------------------------------------------------- 05750000
+                                                                        05760000
+TMSG     DS    0H                                                       05770000
+                                                                        05780000
+         B     WAIT               IGNORE THE MESSAGE FOR NOW            05790000
+                                                                        05800000
+*---------------------------------------------------------------------- 05810000
+* PROCESS A TASK STOP REQUEST                                           05820000
+*---------------------------------------------------------------------- 05830000
+                                                                        05840000
+TSTP     DS    0H                                                       05850000
+                                                                        05860000
+         TM    IVTF1,IVTF1STP     FLAG ALREADY SET?                     05870000
+         BO    WAIT               BRANCH IF YES                         05880000
+         OI    IVTF1,IVTF1STP     SET THE STOP REQUEST FLAG             05890000
+                                                                        05900000
+         LA    R1,TRC_IVTMMAIN_STOP                                     05910000
+         BAS   R14,MAINTRCE                                             05920000
+                                                                        05930000
+         $MSG  990                "MAIN TASK STOP REQUESTED"            05940000
+                                                                        05950000
+         B     TERM               START VTAM COMPONENT TERMINATION      05960000
+                                                                        05970000
+*---------------------------------------------------------------------- 05980000
+* PROCESS A TASK CANCEL REQUEST                                         05990000
+*---------------------------------------------------------------------- 06000000
+                                                                        06010000
+TCAN     DS    0H                                                       06020000
+                                                                        06030000
+         LA    R1,TRC_IVTMMAIN_CANCEL                                   06040000
+         BAS   R14,MAINTRCE                                             06050000
+                                                                        06060000
+         $MSG  989                "MAIN TASK CANCEL REQUESTED"          06070000
+                                                                        06080000
+         OI    IVTF1,IVTF1CAN     SET THE CANCEL REQUEST FLAG           06090000
+         B     TERM               START VTAM COMPONENT TERMINATION      06100000
+                                                                        06110000
+*---------------------------------------------------------------------- 06120000
+* EXIT TO END VTAM SUBTASK                                              06130000
+*---------------------------------------------------------------------- 06140000
+                                                                        06150000
+EXIT     DS    0H                                                       06160000
+                                                                        06170000
+         TM    FLAG,FLAGRCOV      RECOVERY ENVIRON ESTABLISHED?         06180000
+         BNO   EXITNOW            DONE IF NOT                           06190000
+                                                                        06200000
+         $RCVRY DELETE,MF=(E,MFE_LIST)                                  06210000
+                                                                        06220000
+EXITNOW  DS    0H                                                       06230000
+                                                                        06240000
+         LA    R1,TRC_IVTMMAIN_END                                      06250000
+         BAS   R14,MAINTRCE                                             06260000
+                                                                        06270000
+         LM    R15,R1,RETREGS     LOAD RETURN REGISTERS                 06280000
+                                                                        06290000
+         #EXIT R1=YES             RETURN W/R15,R0,R1                    06300000
+                                                                        06310000
+*---------------------------------------------------------------------- 06320000
+* SUBROUTINE TO CUT START,STOP,CANCEL,END TRACE RECORDS                 06330000
+*                                                                       06340000
+*            R14 = RETURN ADDRESS                                       06350000
+*            R1  = TRACE CODE                                           06360000
+*---------------------------------------------------------------------- 06370000
+                                                                        06380000
+MAINTRCE DS    0H                                                       06390000
+                                                                        06400000
+         STM   R14,R2,SUB0SAVE    SAVE REGISTERS                        06410000
+         LR    R2,R1              TRACE CODE                            06420000
+                                                                        06430000
+         $TRACE (R2),16           TRACE ENTRY W/16 USER BYTES           06440000
+                                                                        06450000
+         BNZ   NOMTRACE           BRANCH IF TRACING NOT AVAILABLE       06460000
+         ST    RIVTAM,0(,R1)      TRACE IVTAMCVT ADDRESS                06470000
+         MVC   4(4,R1),IVT01DAT   TRACE VTAM LEVEL                      06480000
+         MVC   8(4,R1),IVT#OPEN   TRACE CURRENT NUMBER OF OPEN ACB'S    06490000
+         MVC   12(4,R1),IVT#USER  TRACE CURRENT NUMBER USER'S           06500000
+                                                                        06510000
+NOMTRACE DS    0H                                                       06520000
+                                                                        06530000
+         LM    R14,R2,SUB0SAVE    RESTORE REGISTERS                     06540000
+         BR    R14                                                      06550000
+                                                                        06560000
+*---------------------------------------------------------------------- 06570000
+* SUBROUTINE QWEMAIN - QUEUE A WORK ELEMENT TO THE MAIN TASK            06580000
+*                                                                       06590000
+*                      R14 = RETURN ADDRESS                             06600000
+*                      R1  = WORK ELEMENT                               06610000
+*---------------------------------------------------------------------- 06620000
+                                                                        06630000
+QWEMAIN  DS    0H                                                       06640000
+                                                                        06650000
+         STM   R14,R3,SUB0SAVE    SAVE REGISTERS                        06660000
+                                                                        06670000
+         LR    R3,R1              SAVE QUEUE ADDRESS                    06680000
+                                                                        06690000
+         $VTAMQ (R3),             WORK ELEMENT                         +06700000
+               IVTWEQ             QUEUE                                 06710000
+                                                                        06720000
+         LM    R14,R3,SUB0SAVE    RESTORE REGISTERS                     06730000
+         BR    R14                AND RETURN TO CALLER                  06740000
+                                                                        06750000
+*---------------------------------------------------------------------- 06760000
+*   SUBROUTINE: OBTAIN VTAM GLOBAL LOCK                                 06770000
+*---------------------------------------------------------------------- 06780000
+                                                                        06790000
+VTAMLOCK DS    0H                                                       06800000
+                                                                        06810000
+         TM    FLAG,FLAGLOCK        HAVE WE ALREADY GOTTEN THE LOCK?    06820000
+         BOR   R14                  BRANCH IF YES                       06830000
+         STM   R14,R2,SUB0SAVE      SAVE CALLER'S REGISTERS             06840000
+                                                                        06850000
+         $SER  OBTAIN,                                                 +06860000
+               VTAM                                                     06870000
+                                                                        06880000
+         C     R15,=F'4'            WAS LOCK ALREADY HELD?              06890000
+         BNE   VTAMLOEX             BRANCH IF NOT                       06900000
+         OI    FLAG,FLAGLCKD        REMEMBER LOCK HELD ON ENTRY         06910000
+                                                                        06920000
+VTAMLOEX DS    0H                                                       06930000
+                                                                        06940000
+         OI    FLAG,FLAGLOCK        REMEMBER LOCK IS HELD               06950000
+         LM    R14,R2,SUB0SAVE      RESTORE CALLER'S REGISTERS          06960000
+         BR    R14                  RETURN                              06970000
+                                                                        06980000
+*---------------------------------------------------------------------- 06990000
+*   SUBROUTINE: RELEASE VTAM GLOBAL LOCK                                07000000
+*---------------------------------------------------------------------- 07010000
+                                                                        07020000
+VTAMUNLK DS    0H                                                       07030000
+                                                                        07040000
+         TM    FLAG,FLAGLOCK        IS LOCK HELD?                       07050000
+         BNOR  R14                  BRANCH IF NOT                       07060000
+         TM    FLAG,FLAGLCKD        WAS LOCK HELD ON ENTRY?             07070000
+         BOR   R14                  DON'T RELEASE IF IT WAS             07080000
+         STM   R14,R2,SUB0SAVE      SAVE CALLER'S REGISTERS             07090000
+                                                                        07100000
+         $SER  RELEASE,                                                +07110000
+               VTAM                                                     07120000
+                                                                        07130000
+         NI    FLAG,255-FLAGLOCK    SHOW LOCK NOT HELD                  07140000
+         LM    R14,R2,SUB0SAVE      RESTORE CALLER'S REGISTERS          07150000
+         BR    R14                  RETURN                              07160000
+                                                                        07170000
+*---------------------------------------------------------------------- 07180000
+* ERROR ROUTINES                                                        07190000
+*---------------------------------------------------------------------- 07200000
+                                                                        07210000
+ERR$TASK DS    0H                                                       07220000
+                                                                        07230000
+         $ABEND ABE_VTDIAG,                                            +07240000
+               SCOPE=PCB,                                              +07250000
+               TITLE='$TASK FAILURE'                                    07260000
+                                                                        07270000
+ERR$VTAM DS    0H                                                       07280000
+                                                                        07290000
+         $ABEND ABE_VTDIAG,                                            +07300000
+               SCOPE=PCB,                                              +07310000
+               TITLE='$VTAM FAILURE'                                    07320000
+                                                                        07330000
+ERRVTAM  DS    0H                                                       07340000
+                                                                        07350000
+         $ABEND ABE_VTDIAG,                                            +07360000
+               SCOPE=PCB,                                              +07370000
+               TITLE='VTAM DOES NOT PROVIDE REQUIRED FACILITIES'        07380000
+                                                                        07390000
+ERRRCVRY DS    0H                                                       07400000
+                                                                        07410000
+         $ABEND ABE_TCDIAG,                                            +07420000
+               SCOPE=PCB,                                              +07430000
+               TITLE='$RCVRY FAILURE'                                   07440000
+                                                                        07450000
+*---------------------------------------------------------------------- 07460000
+*     RECOVERY: RECOVRTN                                                07470000
+*        ENTRY: R1 = ADDRESS OF VTAM MAIN TASK SAVE/WORK AREA           07480000
+*---------------------------------------------------------------------- 07490000
+                                                                        07500000
+RECOVRTN DS    0H                                                       07510000
+                                                                        07520000
+         PUSH  USING              PRESERVE STD ENVIRONMENT              07530000
+         DROP  R13                PRECLUDE UNINTENTIONAL REFERENCES     07540000
+                                                                        07550000
+         STM   R14,R12,12(R13)    SAVE ENTRANCE REGS                    07560000
+         CR    R0,R10             RUNNING UNDER HOME ITASK?             07570000
+         BNE   RECPERC            CANT HANDLE OTHERWISE                 07580000
+                                                                        07590000
+W        USING WORKAREA,R3        ADDRESSABILITY                        07600000
+         LR    R3,R1              RESTORE ORIGINAL WORKAREA ADDR        07610000
+         TM    W.FLAG,FLAGWORK    IS A WORK ELEMENT ACTIVE?             07620000
+         BNO   RECPERC            BRANCH IF NOT, JUST FAIL              07630000
+         B     RECRETRY           ATTEMPT RETRY                         07640000
+         DROP  W                                                        07650000
+                                                                        07660000
+RECRETRY DS    0H                                                       07670000
+                                                                        07680000
+         ST    R12,TSKERCVR+(R12*4) SET BASE REGISTER FOR RETRY         07690000
+         ST    R3,TSKERCVR+(R13*4)  SET SAVE/WORK AREA ADDRESS          07700000
+         L     R15,=A(VWRKRTRY)     ADDRESS OF RETRY ROUTINE            07710000
+         B     RECRET                                                   07720000
+                                                                        07730000
+RECPERC  DS    0H                 PERCOLATE                             07740000
+                                                                        07750000
+         SR    R15,R15                                                  07760000
+                                                                        07770000
+RECRET   DS    0H                 RETURN                                07780000
+                                                                        07790000
+         L     R14,12(,R13)                                             07800000
+         LM    R0,R12,20(R13)                                           07810000
+         BR    R14                                                      07820000
+                                                                        07830000
+         POP   USING                                                    07840000
+                                                                        07850000
+*---------------------------------------------------------------------- 07860000
+* LITERALS                                                              07870000
+*---------------------------------------------------------------------- 07880000
+                                                                        07890000
+         LTORG ,                                                        07900000
+                                                                        07910000
+*---------------------------------------------------------------------- 07920000
+* MODULE LOAD TABLE                                                     07930000
+*---------------------------------------------------------------------- 07940000
+                                                                        07950000
+MODLAST  DC    A(MODTLAST)                                              07960000
+                                                                        07970000
+MODTABLE DS    0F                                                       07980000
+*-------------------------------------------------------------- MAIN    07990000
+         DC    V(IVTMNBIA),AL2(IVT@NBIA-IVTAMCVT,0)                     08000000
+MODTNTRY EQU   MODTABLE,*-MODTABLE                                      08010000
+         DC    V(IVTMNBLK),AL2(IVT@NBLK-IVTAMCVT,0)                     08020000
+         DC    V(IVTMNDFA),AL2(IVT@NDFA-IVTAMCVT,0)                     08030000
+         DC    V(IVTMNKIL),AL2(IVT@NKIL-IVTAMCVT,0)                     08040000
+         DC    V(IVTMNLER),AL2(IVT@NLER-IVTAMCVT,0)                     08050000
+         DC    V(IVTMNLOG),AL2(IVT@NLOG-IVTAMCVT,0)                     08060000
+         DC    V(IVTMNLOS),AL2(IVT@NLOS-IVTAMCVT,0)                     08070000
+         DC    V(IVTMNOPN),AL2(IVT@NOPN-IVTAMCVT,0)                     08080000
+         DC    V(IVTMNNSX),AL2(IVT@NNSX-IVTAMCVT,0)                     08090000
+         DC    V(IVTMNREC),AL2(IVT@NREC-IVTAMCVT,0)                     08100000
+         DC    V(IVTMNREL),AL2(IVT@NREL-IVTAMCVT,0)                     08110000
+         DC    V(IVTMNRPL),AL2(IVT@NRPL-IVTAMCVT,0)                     08120000
+         DC    V(IVTMNRSP),AL2(IVT@NRSP-IVTAMCVT,0)                     08130000
+         DC    V(IVTMNSCP),AL2(IVT@NSCP-IVTAMCVT,0)                     08140000
+         DC    V(IVTMNSYN),AL2(IVT@NSYN-IVTAMCVT,0)                     08150000
+         DC    V(IVTMNTPN),AL2(IVT@NTPN-IVTAMCVT,0)                     08160000
+         DC    V(IVTMNXPG),AL2(IVT@NXPG-IVTAMCVT,0)                     08170000
+*------------------------------------------------------ TEST DRIVERS    08180000
+         DC    V(IVTMTPIN),AL2(IVT@TPIN-IVTAMCVT,0)                     08190000
+         DC    V(IVTMTPL2),AL2(IVT@TPL2-IVTAMCVT,0)                     08200000
+         DC    V(IVTMTSIN),AL2(IVT@TSIN-IVTAMCVT,0)                     08210000
+         DC    V(IVTMTSL2),AL2(IVT@TSL2-IVTAMCVT,0)                     08220000
+*----------------------------------------------------------- SESSION    08230000
+         DC    V(IVTMSBND),AL2(IVT@SBND-IVTAMCVT,0)                     08240000
+         DC    V(IVTMSDAT),AL2(IVT@SDAT-IVTAMCVT,0)                     08250000
+         DC    V(IVTMSDFA),AL2(IVT@SDFA-IVTAMCVT,0)                     08260000
+         DC    V(IVTMSDIN),AL2(IVT@SDIN-IVTAMCVT,0)                     08270000
+         DC    V(IVTMSDST),AL2(IVT@SDST-IVTAMCVT,0)                     08280000
+         DC    V(IVTMSD02),AL2(IVT@SD02-IVTAMCVT,0)                     08290000
+         DC    V(IVTMSESS),AL2(IVT@SESS-IVTAMCVT,0)                     08300000
+         DC    V(IVTMSLOG),AL2(IVT@SLOG-IVTAMCVT,0)                     08310000
+         DC    V(IVTMSLOS),AL2(IVT@SLOS-IVTAMCVT,0)                     08320000
+         DC    V(IVTMSMGR),AL2(IVT@SMGR-IVTAMCVT,0)                     08330000
+         DC    V(IVTMSNSX),AL2(IVT@SNSX-IVTAMCVT,0)                     08340000
+         DC    V(IVTMSPST),AL2(IVT@SPST-IVTAMCVT,0)                     08350000
+         DC    V(IVTMSREC),AL2(IVT@SREC-IVTAMCVT,0)                     08360000
+         DC    V(IVTMSREQ),AL2(IVT@SREQ-IVTAMCVT,0)                     08370000
+         DC    V(IVTMSRIP),AL2(IVT@SRIP-IVTAMCVT,0)                     08380000
+         DC    V(IVTMSRSP),AL2(IVT@SRSP-IVTAMCVT,0)                     08390000
+         DC    V(IVTMSSCP),AL2(IVT@SSCP-IVTAMCVT,0)                     08400000
+         DC    V(IVTMSSFP),AL2(IVT@SSFP-IVTAMCVT,0)                     08410000
+         DC    V(IVTMSSIP),AL2(IVT@SSIP-IVTAMCVT,0)                     08420000
+         DC    V(IVTMSSIR),AL2(IVT@SSIR-IVTAMCVT,0)                     08430000
+         DC    V(IVTMSTMX),AL2(IVT@STMX-IVTAMCVT,0)                     08440000
+         DC    V(IVTMSTMS),AL2(IVT@STMS-IVTAMCVT,0)                     08450000
+         DC    V(IVTMSTMC),AL2(IVT@STMC-IVTAMCVT,0)                     08460000
+*-------------------------------------------------------------- USER    08470000
+         DC    V(IVTMULOG),AL2(IVT@ULOG-IVTAMCVT,0)                     08480000
+         DC    V(IVTMUMGR),AL2(IVT@UMGR-IVTAMCVT,0)                     08490000
+         DC    V(IVTMUSER),AL2(IVT@USER-IVTAMCVT,0)                     08500000
+         DC    V(IVTMUXPG),AL2(IVT@UXPG-IVTAMCVT,0)                     08510000
+*------------------------------------------------------------- EXITS    08520000
+         DC    V(IVTMXDFA),AL2(IVT@XDFA-IVTAMCVT,0)                     08530000
+         DC    V(IVTMXLER),AL2(IVT@XLER-IVTAMCVT,0)                     08540000
+         DC    V(IVTMXLOG),AL2(IVT@XLOG-IVTAMCVT,0)                     08550000
+         DC    V(IVTMXLOS),AL2(IVT@XLOS-IVTAMCVT,0)                     08560000
+         DC    V(IVTMXNSX),AL2(IVT@XNSX-IVTAMCVT,0)                     08570000
+         DC    V(IVTMXRCV),AL2(IVT@XRCV-IVTAMCVT,0)                     08580000
+         DC    V(IVTMXREL),AL2(IVT@XREL-IVTAMCVT,0)                     08590000
+         DC    V(IVTMXRPL),AL2(IVT@XRPL-IVTAMCVT,0)                     08600000
+         DC    V(IVTMXRSP),AL2(IVT@XRSP-IVTAMCVT,0)                     08610000
+         DC    V(IVTMXSCP),AL2(IVT@XSCP-IVTAMCVT,0)                     08620000
+         DC    V(IVTMXSYN),AL2(IVT@XSYN-IVTAMCVT,0)                     08630000
+         DC    V(IVTMXTPN),AL2(IVT@XTPN-IVTAMCVT,0)                     08640000
+*--------------------------------------------------------------- API    08650000
+         DC    V(IVTMAPI1),AL2(IVT@API1-IVTAMCVT,0)                     08660000
+         DC    V(IVTMAPI2),AL2(IVT@API2-IVTAMCVT,0)                     08670000
+         DC    V(IVTMAPI3),AL2(IVT@API3-IVTAMCVT,0)                     08680000
+         DC    V(IVTMATSP),AL2(IVT@ATSP-IVTAMCVT,0)                     08690000
+         DC    V(ISESAPI),AL2(ISE@API-IVTAMCVT,0)                       08700000
+         DC    V(ISESAPI1),AL2(ISE@API1-IVTAMCVT,0)                     08710000
+         DC    V(ISESAPI2),AL2(ISE@API2-IVTAMCVT,0)                     08720000
+         DC    V(ISYSAPI1),AL2(ISY@API1-IVTAMCVT,0)                     08730000
+*----------------------------------------------------------- SYSTEMS    08740000
+         DC    V(ISYSDRVR),AL2(ISY@DRVR-IVTAMCVT,0)                     08750000
+         DC    V(ISYSRECV),AL2(ISY@RECV-IVTAMCVT,0)                     08760000
+         DC    V(ISYSRU),AL2(ISY@RU-IVTAMCVT,0)                         08770000
+         DC    V(ISYSMGR),AL2(ISY@MGR-IVTAMCVT,0)                       08780000
+*--------------------------------------------------------------- LU2    08790000
+         DC    V(ILU2APEU),AL2(ILU@APEU-IVTAMCVT,0)                     08800000
+         DC    V(ILU2APRC),AL2(ILU@APRC-IVTAMCVT,0)                     08810000
+         DC    V(ILU2APRD),AL2(ILU@APRD-IVTAMCVT,0)                     08820000
+         DC    V(ILU2APRQ),AL2(ILU@APRQ-IVTAMCVT,0)                     08830000
+         DC    V(ILU2APSF),AL2(ILU@APSF-IVTAMCVT,0)                     08840000
+         DC    V(ILU2APSP),AL2(ILU@APSP-IVTAMCVT,0)                     08850000
+         DC    V(ILU2APUP),AL2(ILU@APUP-IVTAMCVT,0)                     08860000
+         DC    V(ILU2APWR),AL2(ILU@APWR-IVTAMCVT,0)                     08870000
+*-------------------------------------------------- SERVICE ROUTINES    08880000
+         DC    V(ISVCTRTL),AL2(ISV@TRTL-IVTAMCVT,0)                     08890000
+         DC    V(ISVCSBUF),AL2(ISV@SBUF-IVTAMCVT,0)                     08900000
+         DC    V(ISVCSBPK),AL2(ISV@SBPK-IVTAMCVT,0)                     08910000
+         DC    V(ISVCAENT),AL2(ISV@AENT-IVTAMCVT,0)                     08920000
+*-------------------------------------------------- TRANSLATE TABLES    08930000
+         DC    A(ORDR),AL2(IVTXORDR-IVTAMCVT,0)                         08940000
+         DC    A(SIXB),AL2(IVTXSIXB-IVTAMCVT,0)                         08950000
+         DC    A(ATTO),AL2(IVTXATTO-IVTAMCVT,0)                         08960000
+         DC    A(ATTI),AL2(IVTXATTI-IVTAMCVT,0)                         08970000
+         DC    A(XATT),AL2(IVTXXATT-IVTAMCVT,0)                         08980000
+         DC    A(NON0),AL2(IVTXNON0-IVTAMCVT,0)                         08990000
+         DC    A(NLAT),AL2(IVTXNLAT-IVTAMCVT,0)                         09000000
+         DC    A(SFID),AL2(IVTXSFID-IVTAMCVT,0)                         09010000
+         DC    A(COMM),AL2(IVTXCOMM-IVTAMCVT,0)                         09020000
+*--------------------------------------------------------------- LU6.2  09030000
+         DC    V(IL62NDPL),AL2(IL6@NDPL-IVTAMCVT,0)                     09040000
+         DC    V(IL62NDTP),AL2(IL6@NDTP-IVTAMCVT,0)                     09050000
+         DC    V(IL62NGTS),AL2(IL6@NGTS-IVTAMCVT,0)                     09060000
+         DC    V(IL62NLTP),AL2(IL6@NLTP-IVTAMCVT,0)                     09070000
+         DC    V(IL62NSTP),AL2(IL6@NSTP-IVTAMCVT,0)                     09080000
+         DC    V(IL62UBID),AL2(IL6@UBID-IVTAMCVT,0)                     09090000
+         DC    V(IL62UBIS),AL2(IL6@UBIS-IVTAMCVT,0)                     09100000
+         DC    V(IL62UDFS),AL2(IL6@UDFS-IVTAMCVT,0)                     09110000
+         DC    V(IL62UFRS),AL2(IL6@UFRS-IVTAMCVT,0)                     09120000
+         DC    V(IL62UGTS),AL2(IL6@UGTS-IVTAMCVT,0)                     09130000
+         DC    V(IL62UPCV),AL2(IL6@UPCV-IVTAMCVT,0)                     09140000
+         DC    V(IL62USCN),AL2(IL6@USCN-IVTAMCVT,0)                     09150000
+         DC    V(IL62USDC),AL2(IL6@USDC-IVTAMCVT,0)                     09160000
+         DC    V(IL62USRQ),AL2(IL6@USRQ-IVTAMCVT,0)                     09170000
+         DC    V(IL62USTS),AL2(IL6@USTS-IVTAMCVT,0)                     09180000
+         DC    V(IL62USUC),AL2(IL6@USUC-IVTAMCVT,0)                     09190000
+         DC    V(IL62SBND),AL2(IL6@SBND-IVTAMCVT,0)                     09200000
+         DC    V(IL62SHIP),AL2(IL6@SHIP-IVTAMCVT,0)                     09210000
+         DC    V(IL62TPMG),AL2(IL6@TPMG-IVTAMCVT,0)                     09220000
+         DC    V(IL62XINI),AL2(IL6@XINI-IVTAMCVT,0)                     09230000
+         DC    V(IL62XKIL),AL2(IL6@XKIL-IVTAMCVT,0)                     09240000
+         DC    V(IL6XCNS),AL2(IL6@XCNS-IVTAMCVT,0)                      09250000
+         DC    V(IL62APST),AL2(IL6@APST-IVTAMCVT,0)                     09260000
+         DC    V(IL62AISL),AL2(IL6@AISL-IVTAMCVT,0)                     09270000
+         DC    V(IL62ACSL),AL2(IL6@ACSL-IVTAMCVT,0)                     09280000
+         DC    V(IL62ARSL),AL2(IL6@ARSL-IVTAMCVT,0)                     09290000
+         DC    V(IL62ADTK),AL2(IL6@ADTK-IVTAMCVT,0)                     09300000
+         DC    V(IL62ADRC),AL2(IL6@ADRC-IVTAMCVT,0)                     09310000
+         DC    V(IL62ADPL),AL2(IL6@ADPL-IVTAMCVT,0)                     09320000
+         DC    V(IL62ASPL),AL2(IL6@ASPL-IVTAMCVT,0)                     09330000
+         DC    V(IL62ADMD),AL2(IL6@ADMD-IVTAMCVT,0)                     09340000
+         DC    V(IL62ASMD),AL2(IL6@ASMD-IVTAMCVT,0)                     09350000
+         DC    V(IL62AGTS),AL2(IL6@AGTS-IVTAMCVT,0)                     09360000
+         DC    V(IL62ALOG),AL2(IL6@ALOG-IVTAMCVT,0)                     09370000
+         DC    V(IL62ALTP),AL2(IL6@ALTP-IVTAMCVT,0)                     09380000
+         DC    V(IL62ALRC),AL2(IL6@ALRC-IVTAMCVT,0)                     09390000
+         DC    V(IL62ADTP),AL2(IL6@ADTP-IVTAMCVT,0)                     09400000
+         DC    V(IL62ASTP),AL2(IL6@ASTP-IVTAMCVT,0)                     09410000
+         DC    V(IL62ATSP),AL2(IL6@ATSP-IVTAMCVT,0)                     09420000
+         DC    V(IL62DRCV),AL2(IL6@DRCV-IVTAMCVT,0)                     09430000
+         DC    V(IL62DREC),AL2(IL6@DREC-IVTAMCVT,0)                     09440000
+         DC    V(IL62DREX),AL2(IL6@DREX-IVTAMCVT,0)                     09450000
+         DC    V(IL62DRRM),AL2(IL6@DRRM-IVTAMCVT,0)                     09460000
+         DC    V(IL62DRU),AL2(IL6@DRU-IVTAMCVT,0)                       09470000
+         DC    V(IL62DRVR),AL2(IL6@DRVR-IVTAMCVT,0)                     09480000
+         DC    V(IL62TSNS),AL2(IL6@TSNS-IVTAMCVT,0)                     09490000
+*--------------------------------------------------------------- CPI-C  09500000
+         DC    V(ICPIACCP),AL2(ICP@ACCP-IVTAMCVT,0)                     09510000
+         DC    V(ICPIALLC),AL2(ICP@ALLC-IVTAMCVT,0)                     09520000
+         DC    V(ICPICFM),AL2(ICP@CFM-IVTAMCVT,0)                       09530000
+         DC    V(ICPICFMD),AL2(ICP@CFMD-IVTAMCVT,0)                     09540000
+         DC    V(ICPIDEAL),AL2(ICP@DEAL-IVTAMCVT,0)                     09550000
+         DC    V(ICPIECS),AL2(ICP@ECS-IVTAMCVT,0)                       09560000
+         DC    V(ICPIECT),AL2(ICP@ECT-IVTAMCVT,0)                       09570000
+         DC    V(ICPIEMN),AL2(ICP@EMN-IVTAMCVT,0)                       09580000
+         DC    V(ICPIEPLN),AL2(ICP@EPLN-IVTAMCVT,0)                     09590000
+         DC    V(ICPIESL),AL2(ICP@ESL-IVTAMCVT,0)                       09600000
+         DC    V(ICPIFLUS),AL2(ICP@FLUS-IVTAMCVT,0)                     09610000
+         DC    V(ICPIINIT),AL2(ICP@INIT-IVTAMCVT,0)                     09620000
+         DC    V(ICPIPTR),AL2(ICP@PTR-IVTAMCVT,0)                       09630000
+         DC    V(ICPIRCV),AL2(ICP@RCV-IVTAMCVT,0)                       09640000
+         DC    V(ICPIRTS),AL2(ICP@RTS-IVTAMCVT,0)                       09650000
+         DC    V(ICPISEND),AL2(ICP@SEND-IVTAMCVT,0)                     09660000
+         DC    V(ICPISERR),AL2(ICP@SERR-IVTAMCVT,0)                     09670000
+         DC    V(ICPISCT),AL2(ICP@SCT-IVTAMCVT,0)                       09680000
+         DC    V(ICPISDT),AL2(ICP@SDT-IVTAMCVT,0)                       09690000
+         DC    V(ICPISED),AL2(ICP@SED-IVTAMCVT,0)                       09700000
+         DC    V(ICPISF),AL2(ICP@SF-IVTAMCVT,0)                         09710000
+         DC    V(ICPISLD),AL2(ICP@SLD-IVTAMCVT,0)                       09720000
+         DC    V(ICPISMN),AL2(ICP@SMN-IVTAMCVT,0)                       09730000
+         DC    V(ICPISPLN),AL2(ICP@SPLN-IVTAMCVT,0)                     09740000
+         DC    V(ICPISPTR),AL2(ICP@SPTR-IVTAMCVT,0)                     09750000
+         DC    V(ICPISRT),AL2(ICP@SRT-IVTAMCVT,0)                       09760000
+         DC    V(ICPISRC),AL2(ICP@SRC-IVTAMCVT,0)                       09770000
+         DC    V(ICPISST),AL2(ICP@SST-IVTAMCVT,0)                       09780000
+         DC    V(ICPISSL),AL2(ICP@SSL-IVTAMCVT,0)                       09790000
+         DC    V(ICPISTPN),AL2(ICP@STPN-IVTAMCVT,0)                     09800000
+         DC    V(ICPITRTS),AL2(ICP@TRTS-IVTAMCVT,0)                     09810000
+         DC    V(ICPSSBUF),AL2(ICP@SBUF-IVTAMCVT,0)                     09820000
+         DC    V(ICPSLOC),AL2(ICP@LOC-IVTAMCVT,0)                       09830000
+         DC    V(ICPXRNOT),AL2(ICP@RNOT-IVTAMCVT,0)                     09840000
+         DC    V(ICPXECST),AL2(ICP@ECST-IVTAMCVT,0)                     09850000
+         DC    V(ICPXECSU),AL2(ICP@ECSU-IVTAMCVT,0)                     09860000
+         DC    V(ICPXSCSP),AL2(ICP@SCSP-IVTAMCVT,0)                     09870000
+         DC    V(ICPXSCST),AL2(ICP@SCST-IVTAMCVT,0)                     09880000
+         DC    V(ICPXSCSU),AL2(ICP@SCSU-IVTAMCVT,0)                     09890000
+         DC    V(ICPXPCV),AL2(ICP@PCV-IVTAMCVT,0)                       09900000
+*-------------------------------------------------------------- TCP/IP  09910000
+         DC    V(IVTMNTCP),AL2(IVT@NTCP-IVTAMCVT,0)                     09920000
+         DC    V(IVTMUTCP),AL2(IVT@UTCP-IVTAMCVT,0)                     09930000
+                                                                        09940000
+MODTLAST EQU   *-L'MODTNTRY                                             09950000
+                                                                        09960000
+*---------------------------------------------------------------------- 09970000
+* TRANSLATE TABLE FOR LOCATING NON-NULL CHARACTER                       09980000
+*---------------------------------------------------------------------- 09990000
+                                                                        10000000
+*                0 1 2 3 4 5 6 7 8 9 A B C D E F                        10010000
+                                                                        10020000
+NON0     DC    X'00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFF' 00-0F                10030000
+NON0_10  DC    X'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF' 10-1F                10040000
+NON0_20  DC    X'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF' 20-2F                10050000
+NON0_30  DC    X'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF' 30-3F                10060000
+NON0_40  DC    X'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF' 40-4F                10070000
+NON0_50  DC    X'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF' 50-5F                10080000
+NON0_60  DC    X'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF' 60-6F                10090000
+NON0_70  DC    X'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF' 70-7F                10100000
+NON0_80  DC    X'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF' 80-8F                10110000
+NON0_90  DC    X'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF' 90-9F                10120000
+NON0_A0  DC    X'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF' A0-AF                10130000
+NON0_B0  DC    X'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF' B0-BF                10140000
+NON0_C0  DC    X'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF' C0-CF                10150000
+NON0_D0  DC    X'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF' D0-DF                10160000
+NON0_E0  DC    X'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF' E0-EF                10170000
+NON0_F0  DC    X'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF' F0-FF                10180000
+                                                                        10190000
+*---------------------------------------------------------------------- 10200000
+* TRANSLATE TABLE FOR IDENTIFYING 3270 COMMAND BYTES                    10210000
+*---------------------------------------------------------------------- 10220000
+                                                                        10230000
+*                0 1 2 3 4 5 6 7 8 9 A B C D E F                        10240000
+                                                                        10250000
+COMM     DC    X'00000000000000000000000000000000' 00-0F                10260000
+COMM_10  DC    X'00000000000000000000000000000000' 10-1F                10270000
+COMM_20  DC    X'00000000000000000000000000000000' 20-2F                10280000
+COMM_30  DC    X'00000000000000000000000000000000' 30-3F                10290000
+COMM_40  DC    X'00000000000000000000000000000000' 40-4F                10300000
+COMM_50  DC    X'00000000000000000000000000000000' 50-5F                10310000
+COMM_60  DC    X'00000000000000000000000000000102' 60-6F                10320000
+COMM_70  DC    X'00000000000000000000000000000300' 70-7F                10330000
+COMM_80  DC    X'00000000000000000000000000000000' 80-8F                10340000
+COMM_90  DC    X'00000000000000000000000000000000' 90-9F                10350000
+COMM_A0  DC    X'00000000000000000000000000000000' A0-AF                10360000
+COMM_B0  DC    X'00000000000000000000000000000000' B0-BF                10370000
+COMM_C0  DC    X'00000000000000000000000000000000' C0-CF                10380000
+COMM_D0  DC    X'00000000000000000000000000000000' D0-DF                10390000
+COMM_E0  DC    X'00000000000000000000000000000000' E0-EF                10400000
+COMM_F0  DC    X'00040506000708000000000000000000' F0-FF                10410000
+                                                                        10420000
+*---------------------------------------------------------------------- 10430000
+* TRANSLATE TABLE FOR LOCATING 3270 DATASTREAM ORDERS                   10440000
+*---------------------------------------------------------------------- 10450000
+                                                                        10460000
+*                0 1 2 3 4 5 6 7 8 9 A B C D E F                        10470000
+                                                                        10480000
+ORDR     DC    X'000B0B0B0B010B0B020B0B0B00000B0B' 00-0F                10490000
+ORDR_10  DC    X'0B0304050B000B0B0B000B0B00060B0B' 10-1F                10500000
+ORDR_20  DC    X'0B0B0B0B0B0B0B0B07080B0B090B0B0B' 20-2F                10510000
+ORDR_30  DC    X'0B0B0B0B0B0B0B0B0B0B0B0B0A0B0B0B' 30-3F                10520000
+ORDR_40  DC    X'00000000000000000000000000000000' 40-4F                10530000
+ORDR_50  DC    X'00000000000000000000000000000000' 50-5F                10540000
+ORDR_60  DC    X'00000000000000000000000000000000' 60-6F                10550000
+ORDR_70  DC    X'00000000000000000000000000000000' 70-7F                10560000
+ORDR_80  DC    X'00000000000000000000000000000000' 80-8F                10570000
+ORDR_90  DC    X'00000000000000000000000000000000' 90-9F                10580000
+ORDR_A0  DC    X'00000000000000000000000000000000' A0-AF                10590000
+ORDR_B0  DC    X'00000000000000000000000000000000' B0-BF                10600000
+ORDR_C0  DC    X'00000000000000000000000000000000' C0-CF                10610000
+ORDR_D0  DC    X'00000000000000000000000000000000' D0-DF                10620000
+ORDR_E0  DC    X'00000000000000000000000000000000' E0-EF                10630000
+ORDR_F0  DC    X'00000000000000000000000000000000' F0-FF                10640000
+                                                                        10650000
+*---------------------------------------------------------------------- 10660000
+* TRANSLATE SIX-BIT VALUES TO 3270 GRAPHIC CODES                        10670000
+*---------------------------------------------------------------------- 10680000
+                                                                        10690000
+*                0 1 2 3 4 5 6 7 8 9 A B C D E F                        10700000
+                                                                        10710000
+SIXB     DC    X'40C1C2C3C4C5C6C7C8C94A4B4C4D4E4F' 00-0F                10720000
+SIXB_10  DC    X'50D1D2D3D4D5D6D7D8D95A5B5C5D5E5F' 10-1F                10730000
+SIXB_20  DC    X'6061E2E3E4E5E6E7E8E96A6B6C6D6E6F' 20-2F                10740000
+SIXB_30  DC    X'F0F1F2F3F4F5F6F7F8F97A7B7C7D7E7F' 30-3F                10750000
+SIXB_40  DC    X'00000000000000000000000000000000' 40-4F                10760000
+SIXB_50  DC    X'00000000000000000000000000000000' 50-5F                10770000
+SIXB_60  DC    X'00000000000000000000000000000000' 60-6F                10780000
+SIXB_70  DC    X'00000000000000000000000000000000' 70-7F                10790000
+SIXB_80  DC    X'00000000000000000000000000000000' 80-8F                10800000
+SIXB_90  DC    X'00000000000000000000000000000000' 90-9F                10810000
+SIXB_A0  DC    X'00000000000000000000000000000000' A0-AF                10820000
+SIXB_B0  DC    X'00000000000000000000000000000000' B0-BF                10830000
+SIXB_C0  DC    X'00000000000000000000000000000000' C0-CF                10840000
+SIXB_D0  DC    X'00000000000000000000000000000000' D0-DF                10850000
+SIXB_E0  DC    X'00000000000000000000000000000000' E0-EF                10860000
+SIXB_F0  DC    X'00000000000000000000000000000000' F0-FF                10870000
+                                                                        10880000
+*---------------------------------------------------------------------- 10890000
+* TRANSLATE TABLE FOR LOCATING NULL OR INTERNAL ATTRIBUTE               10900000
+*---------------------------------------------------------------------- 10910000
+                                                                        10920000
+*                0 1 2 3 4 5 6 7 8 9 A B C D E F                        10930000
+                                                                        10940000
+NLAT     DC    X'01000000000000000000000000000000' 00-0F                10950000
+NLAT_10  DC    X'00000000000000000000000000000000' 10-1F                10960000
+NLAT_20  DC    X'02020202020202020202020202020202' 20-2F                10970000
+NLAT_30  DC    X'02020202020202020202020202020202' 30-3F                10980000
+NLAT_40  DC    X'00000000000000000000000000000000' 40-4F                10990000
+NLAT_50  DC    X'00000000000000000000000000000000' 50-5F                11000000
+NLAT_60  DC    X'00000000000000000000000000000000' 60-6F                11010000
+NLAT_70  DC    X'00000000000000000000000000000000' 70-7F                11020000
+NLAT_80  DC    X'00000000000000000000000000000000' 80-8F                11030000
+NLAT_90  DC    X'00000000000000000000000000000000' 90-9F                11040000
+NLAT_A0  DC    X'00000000000000000000000000000000' A0-AF                11050000
+NLAT_B0  DC    X'00000000000000000000000000000000' B0-BF                11060000
+NLAT_C0  DC    X'00000000000000000000000000000000' C0-CF                11070000
+NLAT_D0  DC    X'00000000000000000000000000000000' D0-DF                11080000
+NLAT_E0  DC    X'00000000000000000000000000000000' E0-EF                11090000
+NLAT_F0  DC    X'00000000000000000000000000000000' F0-FF                11100000
+                                                                        11110000
+*---------------------------------------------------------------------- 11120000
+* TRANSLATE INTERNAL ATTRIBUTES (20-3F) TO 3270 DATASTREAM VALUES       11130000
+*---------------------------------------------------------------------- 11140000
+                                                                        11150000
+*                0 1 2 3 4 5 6 7 8 9 A B C D E F                        11160000
+                                                                        11170000
+ATTO     DC    X'00000000000000000000000000000000' 00-0F                11180000
+ATTO_10  DC    X'00000000000000000000000000000000' 10-1F                11190000
+ATTO_20  DC    X'40C1C4C5C8C94C4D50D1D4D5D8D95C5D' 20-2F                11200000
+ATTO_30  DC    X'6061E4E5E8E96C6DF0F1F4F5F8F97C7D' 30-3F                11210000
+ATTO_40  DC    X'00000000000000000000000000000000' 40-4F                11220000
+ATTO_50  DC    X'00000000000000000000000000000000' 50-5F                11230000
+ATTO_60  DC    X'00000000000000000000000000000000' 60-6F                11240000
+ATTO_70  DC    X'00000000000000000000000000000000' 70-7F                11250000
+ATTO_80  DC    X'00000000000000000000000000000000' 80-8F                11260000
+ATTO_90  DC    X'00000000000000000000000000000000' 90-9F                11270000
+ATTO_A0  DC    X'00000000000000000000000000000000' A0-AF                11280000
+ATTO_B0  DC    X'00000000000000000000000000000000' B0-BF                11290000
+ATTO_C0  DC    X'00000000000000000000000000000000' C0-CF                11300000
+ATTO_D0  DC    X'00000000000000000000000000000000' D0-DF                11310000
+ATTO_E0  DC    X'00000000000000000000000000000000' E0-EF                11320000
+ATTO_F0  DC    X'00000000000000000000000000000000' F0-FF                11330000
+                                                                        11340000
+*---------------------------------------------------------------------- 11350000
+* TRANSLATE 3270 DATASTREAM ATTRIBUTES TO INTERNAL VALUES (20-3F)       11360000
+*---------------------------------------------------------------------- 11370000
+                                                                        11380000
+*                0 1 2 3 4 5 6 7 8 9 A B C D E F                        11390000
+                                                                        11400000
+ATTI     DC    X'20210000222300002425000026270000' 00-0F                11410000
+ATTI_10  DC    X'282900002A2B00002C2D00002E2F0000' 10-1F                11420000
+ATTI_20  DC    X'30310000323300003435000036370000' 20-2F                11430000
+ATTI_30  DC    X'383900003A3B00003C3D00003E3F0000' 30-3F                11440000
+ATTI_40  DC    X'20210000222300002425000026270000' 40-4F                11450000
+ATTI_50  DC    X'282900002A2B00002C2D00002E2F0000' 50-5F                11460000
+ATTI_60  DC    X'30310000323300003435000036370000' 60-6F                11470000
+ATTI_70  DC    X'383900003A3B00003C3D00003E3F0000' 70-7F                11480000
+ATTI_80  DC    X'20210000222300002425000026270000' 80-8F                11490000
+ATTI_90  DC    X'282900002A2B00002C2D00002E2F0000' 90-9F                11500000
+ATTI_A0  DC    X'30310000323300003435000036370000' A0-AF                11510000
+ATTI_B0  DC    X'383900003A3B00003C3D00003E3F0000' B0-BF                11520000
+ATTI_C0  DC    X'20210000222300002425000026270000' C0-CF                11530000
+ATTI_D0  DC    X'282900002A2B00002C2D00002E2F0000' D0-DF                11540000
+ATTI_E0  DC    X'30310000323300003435000036370000' E0-EF                11550000
+ATTI_F0  DC    X'383900003A3B00003C3D00003E3F0000' F0-FF                11560000
+                                                                        11570000
+*---------------------------------------------------------------------- 11580000
+* TRANSLATE TABLE FOR IDENTIFYING 3270 EXTENDED ATTRIBUTE TYPE VALUES   11590000
+*---------------------------------------------------------------------- 11600000
+                                                                        11610000
+*                0 1 2 3 4 5 6 7 8 9 A B C D E F                        11620000
+                                                                        11630000
+XATT     DC    X'01000000000000000000000000000000' 00-0F                11640000
+XATT_10  DC    X'00000000000000000000000000000000' 10-1F                11650000
+XATT_20  DC    X'00000000000000000000000000000000' 20-2F                11660000
+XATT_30  DC    X'00000000000000000000000000000000' 30-3F                11670000
+XATT_40  DC    X'00020304000506000000000000000000' 40-4F                11680000
+XATT_50  DC    X'00000000000000000000000000000000' 50-5F                11690000
+XATT_60  DC    X'00000000000000000000000000000000' 60-6F                11700000
+XATT_70  DC    X'00000000000000000000000000000000' 70-7F                11710000
+XATT_80  DC    X'00000000000000000000000000000000' 80-8F                11720000
+XATT_90  DC    X'00000000000000000000000000000000' 90-9F                11730000
+XATT_A0  DC    X'00000000000000000000000000000000' A0-AF                11740000
+XATT_B0  DC    X'00000000000000000000000000000000' B0-BF                11750000
+XATT_CO  DC    X'07080900000000000000000000000000' C0-CF                11760000
+XATT_D0  DC    X'00000000000000000000000000000000' D0-DF                11770000
+XATT_EO  DC    X'00000000000000000000000000000000' E0-EF                11780000
+XATT_F0  DC    X'00000000000000000000000000000000' F0-FF                11790000
+                                                                        11800000
+*---------------------------------------------------------------------- 11810000
+* TRANSLATE TABLE FOR IDENTIFYING 3270 STRUCTURED FIELD TYPES           11820000
+*---------------------------------------------------------------------- 11830000
+                                                                        11840000
+*                0 1 2 3 4 5 6 7 8 9 A B C D E F                        11850000
+                                                                        11860000
+SFID     DC    X'01030004000000000000000101010102' 00-0F                11870000
+SFID_10  DC    X'00000000000000000000000000000000' 10-1F                11880000
+SFID_20  DC    X'00000000000000000000000000000000' 20-2F                11890000
+SFID_30  DC    X'00000000000000000000000000000000' 30-3F                11900000
+SFID_40  DC    X'05000000000000000000000000000000' 40-4F                11910000
+SFID_50  DC    X'00000000000000000000000000000000' 50-5F                11920000
+SFID_60  DC    X'00000000000000000000000000000000' 60-6F                11930000
+SFID_70  DC    X'00000000000000000000000000000000' 70-7F                11940000
+SFID_80  DC    X'00000000000000000000000000000000' 80-8F                11950000
+SFID_90  DC    X'00000000000000000000000000000000' 90-9F                11960000
+SFID_A0  DC    X'00000000000000000000000000000000' A0-AF                11970000
+SFID_B0  DC    X'00000000000000000000000000000000' B0-BF                11980000
+SFID_CO  DC    X'00000000000000000000000000000000' C0-CF                11990000
+SFID_D0  DC    X'00000000000000000000000000000000' D0-DF                12000000
+SFID_EO  DC    X'00000000000000000000000000000000' E0-EF                12010000
+SFID_F0  DC    X'00000000000000000000000000000000' F0-FF                12020000
+                                                                        12030000
+*---------------------------------------------------------------------- 12040000
+* DSECTS                                                                12050000
+*---------------------------------------------------------------------- 12060000
+                                                                        12070000
+         PRINT NOGEN                                                    12080000
+         IHAPSA ,                 MVS PREFIXED SAVE AREA                12090000
+         PRINT GEN                                                      12100000
+         EJECT                                                          12110000
+         ISTDBIND ,               VTAM BIND IMAGE                       12120000
+         EJECT                                                          12130000
+         ISTRH ,                  VTAM SNA RH                           12140000
+         EJECT                                                          12150000
+         ISTFM5 ,                 VTAM FMH-5                            12160000
+         EJECT                                                          12170000
+         TRACODES ,               INTEGRATOR TRACE CODE EQUATES         12180000
+         EJECT                                                          12190000
+         ICVT  ,                  INTEGRATOR CVT                        12200000
+         EJECT                                                          12210000
+         IVTAMCVT ,               INTEGRATOR VTAM CVT                   12220000
+         EJECT                                                          12230000
+         IRPL ,                   INTEGRATOR VTAM RPL+                  12240000
+         EJECT                                                          12250000
+         IACB ,                   INTEGRATOR VTAM ACB+                  12260000
+         EJECT                                                          12270000
+         INIB ,                   INTEGRATOR VTAM NIB+                  12280000
+         EJECT                                                          12290000
+         ISESS ,                  INTEGRATOR SESSION BLOCK              12300000
+         EJECT                                                          12310000
+         IRQE ,                   INTEGRATOR REQUEST QUEUE ELEMENT      12320000
+         EJECT                                                          12330000
+         ISQE ,                   INTEGRATOR SESSION INIT QUEUE ELEMENT 12340000
+         EJECT                                                          12350000
+         IBQE ,                   INTEGRATOR BIND QUEUE ELEMENT         12360000
+         EJECT                                                          12370000
+         IPOOL ,                  INTEGRATOR POOL BLOCK                 12380000
+         EJECT                                                          12390000
+         IVUSER ,                 INTEGRATOR VTAM USER BLOCK            12400000
+         EJECT                                                          12410000
+         ITASK ,                  INTEGRATOR TASK BLOCK                 12420000
+         EJECT                                                          12430000
+         IWEVTAM ,                INTEGRATOR VTAM WORK ELEMENT          12440000
+         EJECT                                                          12450000
+         TMSG  ,                  INTEGRATOR INTERTASK MSG FORMAT       12460000
+         EJECT                                                          12470000
+         EVCODES ,                INTEGRATOR EVENT CODES                12480000
+         EJECT                                                          12490000
+         ABCODES ,                INTEGRATOR $ABEND CODES               12500000
+         EJECT                                                          12510000
+         MSGCODES ,               INTEGRATOR INTERTASK MSGING CODES     12520000
+         EJECT                                                          12530000
+         @EPB ,                   INTEGRATOR EVENT PROCESS BLOCK        12540000
+         EJECT                                                          12550000
+         $TASK DSECT=YES          INTEGRATOR $TASK SERVICES             12560000
+         EJECT                                                          12570000
+         $PROC DSECT=YES          INTEGRATOR $PROC SERVICES             12580000
+         EJECT                                                          12590000
+         $VTAM DSECT=YES          INTEGRATOR $VTAM SERVICES             12600000
+         EJECT                                                          12610000
+         $SESS DSECT=YES          INTEGRATOR $VTAM SESSION SERVICES     12620000
+         EJECT                                                          12630000
+         SBUF  DSECT=YES          INTEGRATOR SBUF SERVICES              12640000
+         EJECT                                                          12650000
+         $RESMGR DSECT=YES        INTEGRATOR $RESMGR SERVICES           12660000
+         EJECT                                                          12670000
+         $SYSTEMS DSECT=YES       INTEGRATOR $SYSTEMS SERVICES          12680000
+         EJECT                                                          12690000
+         $TIMER DSECT=YES         INTEGRATOR $TIMER SERVICES            12700000
+         EJECT                                                          12710000
+         IFGEXLST ,               VTAM EXIT LIST                        12720000
+         END   ,                                                        12730000

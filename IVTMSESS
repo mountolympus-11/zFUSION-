@@ -1,0 +1,964 @@
+IVTMSESS TITLE 'INTEGRATOR - VTAM SESS PROC MAIN ENTRY'
+***********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005          *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*      KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*      REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*      IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*   01/26/05   BXK   RMMSG        REMOVE SOME MESSAGES TO FIX         *
+*                                 ADDRESSABILITY ISSUES.              *
+*                                 NOTE: MOD SHOULD BE RESTRUCTURED!   *
+***********************************************************************
+**<DOC-ON>*************************************************************
+*
+* ROUTINE: IVTMSESS - INTEGRATOR VTAM SESS PROC MAIN ENTRY
+*
+* DESCRIPTION:
+*
+*
+*
+*
+*
+* ON ENTRY:
+*
+*    R15 = ENTRY POINT ADDRESS
+*    R14 = RETURN ADDRESS
+*    R13 = AVAILABLE SAVE AREA
+*    R11 = ICVT ADDRESS
+*    R10 = ITASK ADDRESS
+*    R01 = ADDRESS OF STAGING WORK ELEMENT (IWE)
+*          IWELCODE CONTAINS THE ISESS BLOCK ADDRESS
+*
+* ON EXIT:
+*
+*    R15 = 0
+*    R00 = 0
+*    R01 = 0
+*
+*    ALL OTHER REGISTERS ARE RESTORED
+*
+*
+**<DOC-OFF>************************************************************
+
+         EJECT ,
+***********************************************************************
+*
+* MAINTENANCE:
+*
+*   08/01/93 RANDY WITEK
+*   07/01/94 RANDY WITEK - LU6.2 SUPPORT
+*   08/16/95 RANDY WITEK - SERIALIZE SETTING OF TERM FLAG
+*   08/18/95 RANDY WITEK - REWORKED TO USE $TIMER SERVICE
+*
+***********************************************************************
+
+         EQUS  ,                  GENERAL EQUATES
+
+RICVT    EQU   R11
+RITASK   EQU   R10
+RIVTAM   EQU   R9
+RISESS   EQU   R8
+RIACB    EQU   R7
+RIRPL    EQU   R6
+RIWE     EQU   R5
+
+         USING ICVT,RICVT         ESTABLISH ADDRESSABILITY
+         USING ITASK,RITASK       ESTABLISH ADDRESSABILITY
+         USING IVTAMCVT,RIVTAM    ESTABLISH ADDRESSABILITY
+         USING IACB,RIACB         ESTABLISH ADDRESSABILITY
+         USING IRPL,RIRPL         ESTABLISH ADDRESSABILITY
+         USING ISESS,RISESS       ESTABLISH ADDRESSABILITY
+         USING IWEVTAM,RIWE       ESTABLISH ADDRESSABILITY
+
+WORKAREA #WORK ,                  READ/WRITE WORKAREA
+SUB0SAVE DS    18F                SUBROUTINE SAVE AREA
+SUB1SAVE DS    18F                SUBROUTINE SAVE AREA
+$TASKMFL $TASK MF=L               $TASK PLIST CONSTRUCTION
+$PROCMFL $PROC MF=L               $PROC PLIST CONSTRUCTION
+ECODE    DS    F                  SAVED EVENT CODE
+WRK256   DS    XL256              GENERAL WORKAREA
+RETR15   DS    F                  RETURN CODE VALUE
+RETR0    DS    F                  RETURN REGISTER 0
+RETR1    DS    F                  RETURN REGISTER 1
+RETREGS  EQU   RETR15,*-RETR15    INCLUSIVE SYMBOL
+PROCR15  DS    F                  $PROC RC
+PROCR0   DS    F                  $PROC RSN
+FLAG     DS    X
+FLAGLOCK EQU   X'80'              VTAM LOCK IS HELD
+FLAGLCKD EQU   X'40'              VTAM LOCK WAS HELD ON ENTRY
+WORKLEN  #ENDWORK                 END OF WORKAREA
+
+         $MSGDFT PREFIX=ICTPID,                                        +
+               COMPID='VTM',                                           +
+               TABLE=*#MSGS,                                           +
+               WORKA=0,                                                +
+               MF=(E,WRK256),                                          +
+               PRINT=NOGEN
+
+IVTMSESS #ENTER BASE=R12,         ENTRY LINKAGE                        +
+               PREG=RIWE,                                              +
+               SAVE=(YES,NOFRAME),                                     +
+               COPYRITE=NO,                                            +
+               AMODE=31,                                               +
+               RMODE=ANY
+
+
+*---------------------------------------------------------------------- 01050000
+* INVOKE XDC                                               HPNSTST      01060000
+*---------------------------------------------------------------------- 01070000
+         B    NOXDC
+MAINXDC  #XDCHOOK MAPS=YES
+NOXDC    DS   0H
+*----------------------------------------------------------------------
+* COLLECT PARAMETERS
+*----------------------------------------------------------------------
+
+         L     RISESS,IWELCODE    ISESS ADDRESS WAS TUCKED IN HERE
+         MVC   ECODE,=A(EC$VTWE)  THIS CAUSES EPB TO BE INITIALIZED
+
+*----------------------------------------------------------------------
+* ISSUE AN INFORMATIVE MESSAGE AND CUT A TRACE RECORD
+*----------------------------------------------------------------------
+
+         $TRACE *=A(TRC_ISESS_START),32 TRACE ENTRY WITH 32 USER BYTES
+
+         BNZ   NOSTRACE           BRANCH IF TRACING NOT AVAILABLE
+
+         ST    RISESS,0(,R1)      TRACE ISESS ADDRESS
+         MVC   4(4,R1),ISECID     TRACE VTAM CID
+         MVC   8(8,R1),ISETK      TRACE SESSION TOKEN
+         MVC   16(8,R1),TSKNAME   TRACE TASK NAME (I.E. LUNAME)
+         MVC   24(8,R1),IACNAME   TRACE IACB NAME
+
+NOSTRACE DS    0H
+
+         $MSG  007,               "VTAM ISESS PROCESS STARTING"        +
+               FIELDS=((IWELCODE,4), ISESS ADDRESS                     +
+               (ISETKUSR,4),         IVUSER TOKEN                      +
+               (ISETKSES,4),         ISESS  TOKEN                      +
+               (RITASK),             ITASK ADDRESS                     +
+               (TSKPCBC,4),          IPROC ADDRESS                     +
+               (TSKNAME,8))          ITASK NAME
+
+*----------------------------------------------------------------------
+* RESET EPB'S AS NEEDED
+*----------------------------------------------------------------------
+
+WAIT     DS    0H
+
+         CLC   ECODE,=A(EC$VTWE)  WAS VTAM WORK ELEMENT PROCESSED?
+         BNE   WAITWORK           BRANCH IF NOT
+
+         $TASK SETEPB,                                                 +
+               EPB=ISEWEEPB,                                           +
+               ECB=IWEECB,                                             +
+               ECODE=EC$VTWE,                                          +
+               ERRET=ERR$TASK,                                         +
+               MF=(E,$TASKMFL)    INITIALIZE EPB FOR FIRST EVENT
+
+*----------------------------------------------------------------------
+* WAIT FOR AN EVENT TO OCCUR AND JUMP TO THE PROCESSING ROUTINE
+*----------------------------------------------------------------------
+
+WAITWORK DS    0H
+
+         L     R14,ISEIVUSR       IVUSER BLOCK ADDRESS
+X        USING IVUSER,R14
+         LA    R14,X.IVURETQ      QUEUE OF STORAGE TO BE RELEASED
+         DROP  X
+
+         ICM   R2,15,0(R14)       $RESTOR'S TO BE DONE?
+         BZ    WAITCHEK           BRANCH IF NOT
+         SR    R1,R1              EMPTY THE Q
+
+WAITSWAP DS    0H
+
+         CS    R2,R1,0(R14)       SWAP NULL POINTER ONTO TOP
+         BNE   WAITSWAP           TRY AGAIN IF TOP CHANGED
+
+WAITFREE DS    0H
+
+         LTR   R2,R2              HAS QUEUE BEEN FREED?
+         BZ    WAITCHEK           BRANCH IF YES
+         L     R3,0(,R2)          LINK TO NEXT BLOCK TO FREE
+
+         $RETSTOR (R2),                                                +
+               OWNER=(RITASK)     RELEASE THE BLOCK
+
+         LR    R2,R3              THIS IS THE NEXT BLOCK
+         B     WAITFREE           GO RELEASE IT
+
+WAITCHEK DS    0H
+
+         TM    ISEF1,ISEF1TRM     IS TERMINATION UNDERWAY?
+         BNO   WAITNOW            BRANCH IF NOT, WORK TO DO
+         TM    ISEF1,ISEF1ACT     IS THE SESSION ACTIVE?
+         BO    WAITNOW            BRANCH IF YES, WORK TO DO
+         OC    ISERPACT,ISERPACT  ARE THERE ANY ACTIVE RPL'S?
+         BNZ   WAITNOW            BRANCH IF YES, WORK TO DO
+         TM    ISEF1,ISEF1DRV     IS THE SESSION DRIVER ACTIVE?
+         BNO   WAITQLST           BRANCH IF NOT, TERMINATE WORK QUEUE
+         BAS   R14,STOPDRVR       LINK TO STOP THE DRIVER PROCESS
+         B     WAITNOW            AND CONTINUE ON WITH THE WORK
+
+WAITQLST DS    0H
+
+         TM    ISEF1,ISEF1QTM     IS THE WORK QUEUE TERMINATED?
+         BO    WAITNOW            BRANCH IF YES
+         TM    ISEF4,ISEF4STR     IS STARTUP WORK ELEMENT PROCESSED?
+         BO    WAITNOW            BRANCH IF NOT
+         OI    ISEF1,ISEF1QTM     SHOW THAT THE QUEUE IS TERMINATED
+
+         $VTAMQ 0,                NULL WORK ELEMENT TERMINATES QUEUE   +
+               ISEWEQ             QUEUE
+
+WAITNOW  DS    0H
+
+         $TASK WAIT,              WAIT FOR EVENT                       +
+               MF=(E,$TASKMFL)
+
+         ST    R15,ECODE          SAVE THE EVENT CODE
+
+         C     R15,=A(EC$VTWE)    IS IT A VTAM WORK ELEMENT?
+         BE    VWRK               BRANCH IF IT IS VTAM WORK
+
+         C     R15,=A(EC$ISES)    IS IT AN INTERNAL $SESS REQUEST?
+         BE    ISRQ               BRANCH IF YES
+
+         C     R15,=A(EC$VTDT)    IS IT DRIVER TERMINATION?
+         BE    DTRM               BRANCH IF IT IS DRIVER TERMINATION
+
+         C     R15,=A(EC$STOP)    IS PROC STOP REQUESTED?
+         BE    PSTP               BRANCH IF YES
+
+         C     R15,=A(EC$CNCL)    IS PROC CANCEL REQUESTED?
+         BE    PCAN               BRANCH IF YES
+
+         B     WAITWORK           IGNORE ANYTHING ELSE
+
+*----------------------------------------------------------------------
+* PROCESS A VTAM WORK ELEMENT
+*----------------------------------------------------------------------
+
+VWRK     DS    0H
+
+         L     R3,EPBECB-EPB(,R1)            GET ADDRESS OF POSTED IWE
+         L     RIWE,IWELINK-IWE(,R3)         ADDRESS OF IWE TO SERVICE
+
+         $VTAMFWE (R3)            RELEASE THE OLD IWE THAT WAS POSTED
+
+         ST    RIWE,ISELASTW      SET LAST WORK ELEMENT FOR CLEANUP
+
+         $TRACE *=A(TRC_ISESS_WORK),32 TRACE ENTRY W/32 USER BYTES
+
+         BNZ   NOWTRACE           BRANCH IF TRACING NOT AVAILABLE
+         ST    RISESS,0(,R1)      TRACE THE ISESS BLOCK
+         MVC   4(4,R1),ISECID     TRACE THE SESSION CID
+         MVC   8(8,R1),ISETK      TRACE THE SESSION TOKEN
+         LA    R14,ISEWEQ         QUEUE ADDRESS
+         ST    R14,20(,R1)        TRACE QUEUE ADDRESS
+         ST    RIWE,24(,R1)       TRACE WORK ELEMENT ADDRESS
+         LTR   RIWE,RIWE          NULL WORK ELEMENT?
+         BZ    NOWTRACE           BRANCH IF YES
+         MVC   16(4,R1),IWELCODE  TRACE THE WORK ELEMENT CODE
+
+NOWTRACE DS    0H
+
+         LTR   RIWE,RIWE          WAS LINK FIELD NULL?
+         BZ    EXIT               BRANCH YES, TIME TO EXIT
+
+         LA    R4,VWRKTBLE        ADDRESS OF JUMP TABLE
+         LA    R2,L'VWRKNTRY      LENGTH OF AN ENTRY
+         LA    R3,VWRKLAST        ADDRESS OF LAST ENTRY
+
+VWRKLOOP DS    0H
+
+         CLC   IWELCODE,0(R4)     DOES ENTRY MATCH WORK ELEMENT CODE?
+         BE    VWRKGO             BRANCH IF YES
+         BXLE  R4,R2,VWRKLOOP     CHECK ALL TABLE ENTRIES
+
+         $MSG  981,                                                    +
+               FIELDS=((RIWE),                                         +
+               (RITASK),                                               +
+               (TSKPCBC,4),                                            +
+               (TSKNAME,8),                                            +
+               (IWEID,4),                                              +
+               (IWELEN,4),                                             +
+               (IWELINK,4),                                            +
+               (IWELCODE,4),                                           +
+               (IWELQUAL,4),                                           +
+               (IWEOWNER,4))
+
+         B     WAIT
+
+VWRKGO   DS    0H
+
+         ICM   R15,15,4(R4)       OFFSET OR ADDRESS OF ROUTINE
+         BM    VWRKADDR           BRANCH IF ADDRESS
+         ALR   R15,RIVTAM         ADDRESS OF ROUTINE ENTRY POINT
+         L     R15,0(,R15)        ROUTINE ENTRY POINT
+
+VWRKADDR DS    0H
+
+         LR    R1,RIWE            PASS IWE ADDRESS IN R1
+         BASR  R14,R15            LINK TO WORK ELEMENT ROUTINE
+         B     WAIT               AND WAIT FOR NEXT ELEMENT
+
+VWRKTBLE DS    0F
+         DC    A(IWECSESS,IVT@SREQ-IVTAMCVT) $SESS REQUEST WORK ELEMENT
+VWRKNTRY EQU   VWRKTBLE,*-VWRKTBLE
+         DC    A(IWECXRPL,IVT@NRPL-IVTAMCVT) RPL EXIT     WORK ELEMENT
+         DC    A(IWECDATA,IVT@SDAT-IVTAMCVT) DFSYN DATA   WORK ELEMENT
+         DC    A(IWECSHIP,IL6@SHIP-IVTAMCVT) CPIC SHIP    WORK ELEMENT
+         DC    A(IWECRECV,IL6@SHIP-IVTAMCVT) CPIC RECEIVE WORK ELEMENT
+         DC    A(IWECCFMD,IL6@SHIP-IVTAMCVT) CPIC CFMD    WORK ELEMENT
+         DC    A(IWECRTS,IL6@SHIP-IVTAMCVT)  CPIC RTS     WORK ELEMENT
+         DC    A(IWECXRSP,IVT@SRSP-IVTAMCVT) RESPONSE     WORK ELEMENT
+         DC    A(IWECXSCP,IVT@SSCP-IVTAMCVT) SCIP         WORK ELEMENT
+         DC    A(IWECXDFA,IVT@SDFA-IVTAMCVT) DFASY        WORK ELEMENT
+         DC    A(IWECSERR,IL6@SHIP-IVTAMCVT) CPIC SENDERR WORK ELEMENT
+         DC    A(IWECBID,IL6@SHIP-IVTAMCVT)  CPIC BID     WORK ELEMENT
+         DC    A(IWECYLD,IL6@SHIP-IVTAMCVT)  CPIC YIELD   WORK ELEMENT
+         DC    A(IWECBS,IL6@SHIP-IVTAMCVT)   CPIC BID SYNCWORK ELEMENT
+         DC    A(IWECBISR,IL6@SHIP-IVTAMCVT) CPIC BISR    WORK ELEMENT
+         DC    A(IWECCLUP,IL6@SHIP-IVTAMCVT) LU62 TP CLUP WORK ELEMENT
+         DC    A(IWECXLOS,IVT@SLOS-IVTAMCVT) LOSTERM      WORK ELEMENT
+         DC    A(IWECXNSX,IVT@SNSX-IVTAMCVT) NSEXIT       WORK ELEMENT
+         DC    A(IWECXLOG,IVT@SLOG-IVTAMCVT) LOGON EXIT   WORK ELEMENT
+         DC    A(IWECSIRQ,IVT@SSIR-IVTAMCVT) SESS INIT    WORK ELEMENT
+         DC    A(IWECSUBA,X'80000000'+SUBA)  SESS UNBIND ACK. WE
+         DC    A(IWECSICM,X'80000000'+SICM)  SESS INIT COMPLETION WE
+         DC    A(IWECENDS,X'80000000'+ENDS)  END SESSION  WORK ELEMENT
+         DC    A(IWECSTMR,X'80000000'+STMR)  SESS $TIMER POP
+VWRKLAST EQU   *-L'VWRKNTRY
+
+*----------------------------------------------------------------------
+* PROCESS AN INTERNAL $SESS REQUEST
+*----------------------------------------------------------------------
+
+ISRQ     DS    0H
+
+         L     R15,ISEWTG@        COMPLETION ROUTINE ENTRY POINT
+         BASR  R14,R15            LINK TO THE COMPLETION ROUTINE
+         B     WAIT               AND WAIT FOR MORE WORK
+
+*----------------------------------------------------------------------
+* PROCESS A SESSION STIMERM POP
+*----------------------------------------------------------------------
+
+STMR     DS    0H
+
+         L     RIACB,ISEACB@      ESTABLISH ACB ADDRESSABILITY
+
+         LA    R2,ISETID01        ADDRESS OF TIMER ID TABLE
+         LA    R0,$SESSTMR_CLASS_MAXIMUM
+
+STMRFIND DS    0H
+
+         CLC   0(8,R2),IWEXOTID   IS THIS THE TIMER THAT POPPED?
+         BE    STMRGOT            BRANCH IF YES
+         LA    R2,8(,R2)          ADDRESS OF NEXT SLOT
+         BCT   R0,STMRFIND        CHECK NEXT SLOT
+         B     WAIT               INVALID TIMER ID
+
+STMRGOT  DS    0H
+
+         XC    0(8,R2),0(R2)      SHOW NO TIMER
+         LA    R1,ISETID01        ADDRESS OF FIRST SLOT
+         SR    R2,R1              OFFSET TO TIMER SLOT
+         SRL   R2,1               ((CLASS-1)*4)
+         B     STMRJUMP(R2)       JUMP TO THE CLASS ROUTINE
+
+STMRJUMP B     STMRBIND           CLASS=1: BIND TIMER
+         B     STMRDATA           CLASS=2: RECEIVE DATA TIMER
+
+*
+* BIND TIMER POP
+*----------------------------------------------------------------------
+
+STMRBIND DS    0H
+
+         TM    ISEF1,ISEF1ACT     IS THERE NOW AN ACTIVE SESSION?
+         BO    WAIT               BRANCH IF YES
+
+         ICM   R1,15,ISEBQSIM     IS THERE A SIMLOGON BIND PENDING?
+         BZ    ENDS               BRANCH IF NOT
+         XC    ISEBQSIM,ISEBQSIM  SHOW NO BIND QUEUED
+         XC    ISEPRTLS(40),ISEPRTLS CLEAR THE PARTNER LIST
+         B     SUBABACC           GO ACCEPT THE PENDING BIND
+
+*
+* RECEIVE DATA TIMER POP
+*----------------------------------------------------------------------
+
+STMRDATA DS    0H
+
+         $GETSTOR L'IRQ,            ALLOCATE AN IRQE                   +
+               LOC=ANY,                                                +
+               OWNER=(RITASK)
+
+X        USING IRQE,R1              ESTABLISH ADDRESSIBILITY
+
+         MVC   X.IRQID,=CL8'IRQE'   SET BLOCK ID
+         OI    X.IRQF1,IRQF1TOT     SHOW THIS IS RECEIVE TIMEOUT IRQE
+
+         L     R3,ISERCVTL          LAST IRQE ON THE QUEUE
+         L     R2,IRQNEXT-IRQ(,R3)  NULL ELEMENT POINTER
+         ST    R1,IRQNEXT-IRQ(,R3)  SET NEXT POINTER IN LAST IRQE
+         ST    R1,IRQPREV-IRQ(,R2)  SET PREV POINTER IN ISERCVTL
+         STM   R2,R3,X.IRQNEXT      LINK NEW ELEMENT NEXT/PREV
+
+         L     R15,IVT@SREC         RECEIVE PROCESSING MODULE
+         BASR  R14,R15              SATISFY OUTSTANDING $SESS RECEIVE
+         B     WAIT
+
+         DROP  X
+
+*----------------------------------------------------------------------
+* PROCESS A SESSION UNBIND ACKNOWLEDGEMENT
+*----------------------------------------------------------------------
+
+SUBA     DS    0H
+
+         L     RIACB,ISEACB@      ESTABLISH ACB ADDRESSABILITY
+
+         NI    ISEF1,255-ISEF1ACT SHOW NO SESSION
+
+         CLI   IWEXNTYP,X'02'     IS THIS AN UNBIND HOLD?
+         BNE   SUBAREL            BRANCH IF NOT HOLD, PROCESS RELEASE
+         C     RISESS,IACISEXC    ARE WE EXCLUSIVE ACB USER?
+         BE    SUBAHDOK           BRANCH IF YES
+         C     RISESS,IACISMPS    ARE WE A MULTI-PASS ACB USER?
+         BE    SUBAHDOK           BRANCH IF YES
+         C     RISESS,IACISPSS    ARE WE A SINGLE-PASS ACB USER?
+         BE    SUBAPASS           BRANCH IF YES
+
+*        $MSG  974,               "UNBIND HOLD NOT EXPECTED ..."  RMMSG
+*              FIELDS=((RITASK),                                  RMMSG
+*              (TSKPCBC,4),                                       RMMSG
+*              (TSKNAME,8),                                       RMMSG
+*              (ISETKUSR,4),                                      RMMSG
+*              (ISETKSES,4))
+
+         B     ENDS               GO END THE SESSION
+
+SUBAPASS DS    0H
+
+         ICM   R1,15,ISEBQPAS     IS THERE A PASS BIND WAITING?
+         BZ    WAIT               BRANCH IF NOT
+         XC    IACISPSS,IACISPSS  SHOW NO SINGLE PASS ACB USER
+         XC    ISEBQPAS,ISEBQPAS  SHOW NO BIND QUEUED
+         B     SUBABACC           GO ACCEPT THE PENDING BIND
+
+SUBAHDOK DS    0H
+
+         ICM   R1,15,ISEBQPAS     IS THERE A PASS BIND WAITING?
+         BZ    SUBACSIM           BRANCH IF NOT, CHECK FOR SIMLOGON
+         XC    ISEBQPAS,ISEBQPAS  SHOW NO BIND QUEUED
+         B     SUBABACC           GO ACCEPT THE PENDING BIND
+
+SUBACSIM DS    0H
+
+         ICM   R1,15,ISEBQSIM     IS THERE A SIMLOGON BIND PENDING?
+         BZ    WAIT               BRANCH IF NOT, WAIT FOR A BIND
+
+         $SESSTMR SET,                                                 +
+               SESSION=(RISESS),  EXPLICIT ISESS ADDRESS               +
+               BINTVL=IVTIMBND,   BIND WAIT TIME PERIOD EQUATE         +
+               CLASS=$SESSTMR_CLASS_BIND,                              +
+               MF=(E,MFE_LIST)
+
+         LTR   R15,R15            WAS A TIMER SET?
+         BZ    WAIT               BRANCH IF YES
+         L     R1,ISEBQSIM        ACCEPT THE SIMLOGON BIND
+         XC    ISEBQSIM,ISEBQSIM  SHOW NO BIND, ASSUME IT WAS A PASS
+         B     SUBABACC           GO ACCEPT THE PENDING BIND
+
+SUBAREL  DS    0H
+
+         ICM   R1,15,ISEBQSIM     IS THERE A SIMLOGON BIND PENDING?
+         BZ    SUBARPSS           BRANCH IF NOT
+         XC    ISEBQSIM,ISEBQSIM  SHOW NO BIND QUEUED
+         XC    ISEPRTLS(40),ISEPRTLS CLEAR THE PARTNER LIST
+         B     SUBABACC           GO ACCEPT THE PENDING BIND
+
+SUBARPSS DS    0H
+
+         ICM   R1,15,ISEBQPAS     IS THERE A PASS BIND PENDING?
+         BZ    ENDS               BRANCH IF NOT
+         XC    ISEBQPAS,ISEBQPAS  SHOW NO BIND QUEUED
+         XC    ISEPRTLS(40),ISEPRTLS CLEAR THE PARTNER LIST
+         B     SUBABACC           ACCEPT PASS, IT MUST BE THE ONE
+
+SUBABACC DS    0H
+
+         L     R15,IVT@SBND       BIND ACCEPTANCE ROUTINE
+         BASR  R14,R15            CALL BIND ACCEPTANCE
+         B     WAIT               AND WAIT FOR MORE WORK
+
+*----------------------------------------------------------------------
+* PROCESS A SESSION INITIATION REQUEST COMPLETION
+*----------------------------------------------------------------------
+
+SICM     DS    0H
+
+         ICM   R1,15,ISERQSIR                       ACT SESS INIT REQ?
+         BZ    WAIT                                 BRANCH IF NOT ?
+         MVC   SPLRETCD-SPLIST(4,R1),IWEXMRET
+         MVC   SPLRSNCD-SPLIST(4,R1),IWEXMRSN
+         MVC   SPLSENSE-SPLIST(4,R1),IWEXMSNS
+         MVC   SPLSTATE-SPLIST(L'SPLSTATE,R1),ISESTATE  SET STATE WORD
+         ICM   R15,15,IWEXMRET                      DID SESSION START?
+         BNZ   SICMPOST                             BRANCH IF NOT
+         MVC   SPLTOKEN-SPLIST(L'ISETK,R1),IWEXMSTK NEW SESSION TOKEN
+
+SICMPOST DS    0H
+
+         BAS   R14,POSTSREQ                         POST THE REQUEST
+         XC    ISERQSIR,ISERQSIR                    SHOW NO ACT REQ
+         B     WAIT                                 AND WAIT FOR WORK
+
+*----------------------------------------------------------------------
+* PROCESS AN END SESSION WORK ELEMENT
+*----------------------------------------------------------------------
+
+ENDS     DS    0H
+
+         TM    ISEF1,ISEF1TRM     TERMINATION STARTED?
+         BO    WAIT               BRANCH IF YES
+
+         BAS   R14,VTAMLOCK       OBTAIN LOCK
+         OI    ISEF1,ISEF1TRM     SHOW TERMINATION STARTED
+         BAS   R14,VTAMUNLK       RELEASE LOCK
+
+         TM    ISEF1,ISEF1ACT     IS SESSION ACTIVE?
+         BNO   WAIT               BRANCH IF NOT
+
+*
+* OBTAIN RPL FOR SESSION TERMINATION
+*----------------------------------------------------------------------
+
+         $VTAM GETRPL,                                                 +
+               AREA=ISERPACT,                                          +
+               ERRET=ERR$VTAM,                                         +
+               MF=(E,MFE_LIST)    ACQUIRE AN IRPL
+
+         LR    RIRPL,R1           ESTABLISH ADDRESSIBILITY
+         ST    RISESS,IRPISESS    SET ISESS PTR
+         LA    R1,TERMDONE        COMPLETION ROUTINE
+         ST    R1,IRPWTGOK        SET COMPLETION ADDRESS
+         LA    R1,ISEWEQ          ISESS WORK QUEUE
+         ST    R1,IRP@WEQ         WILL RECEIVE THE RPL COMPLETION
+         L     R3,ISECID          SESSION CID
+         ST    R3,IRPARG          SET CID COPY
+         MVC   IRPTOKEN,ISETK     SET TOKEN COPY
+         L     RIACB,ISEACB@      ACB ADDRESS
+
+*
+* DETERMINE FORM OF TERMINATION TO USE
+*----------------------------------------------------------------------
+
+         TM    ISEF2,ISEF2SLU     ARE WE THE SLU END?
+         BO    ENDSTERM           BRANCH IF YES
+
+*
+* ISSUE CLSDST
+*----------------------------------------------------------------------
+
+         CLSDST RPL=(RIRPL),                                           +
+               ACB=(RIACB),                                            +
+               ARG=(R3),                                               +
+               OPTCD=(RELEASE,ASY) TERM PLU SESSION
+
+         B     ENDSCHEK
+
+*
+* ISSUE TERMSESS
+*----------------------------------------------------------------------
+
+ENDSTERM DS    0H
+
+         TERMSESS RPL=(RIRPL),                                         +
+               ACB=(RIACB),                                            +
+               ARG=(R3),                                               +
+               OPTCD=(UNCOND,ASY)   TERM SLU SESSION (UNCOND)
+
+         B     ENDSCHEK
+
+*
+* COMMON PHASE1 CHECK
+*----------------------------------------------------------------------
+
+ENDSCHEK DS    0H
+
+         STM   R15,R0,IRPR15      SAVE VTAM RETURN REGISTERS
+
+         $VTAM CHECKPH1,          CHECK REQUEST ACCEPTANCE             +
+               AREA=(RIRPL),                                           +
+               MF=(E,MFE_LIST)
+
+         B     WAIT               WAIT FOR CLSDST TO COMPLETE
+
+*----------------------------------------------------------------------
+* PROCESS DRIVER TERMINATION
+*----------------------------------------------------------------------
+
+DTRM     DS    0H
+
+*
+* CALCULATE ISESS ADDRESS FROM TERMINATION EPB ADDRESS
+*----------------------------------------------------------------------
+
+         LR    RISESS,R1               EPB ADDRESS FROM $TASK WAIT
+         LA    RISESS,0(,RISESS)       CLEAR HI
+         S     RISESS,=A(ISEDTEPB-ISE) POINT TO START OF ISESS
+         CLC   ISEID,=CL8'ISESS'       VALID ISESS BLOCK?
+         BNE   ERRDTERM                BRANCH IF NOT
+
+         NI    ISEF1,255-ISEF1DRV      SHOW THAT DRIVER IS NOT ACTIVE
+
+*
+* TRACE THE DRIVER TERMINATION
+*----------------------------------------------------------------------
+
+         $TRACE *=A(TRC_DRIVER_END),32 TRACE ENTRY W/32 USER BYTES
+
+         BNZ   NODTRACE           BRANCH IF TRACING NOT AVAILABLE
+
+         ST    RITASK,0(,R1)      TRACE ITASK
+         MVC   4(4,R1),ISECID     TRACE THE SESSION CID
+         MVC   8(8,R1),ISETK      TRACE THE SESSION TOKEN
+         MVC   16(4,R1),ISEDIPCB  TRACE IPCB ADDRESS OF DRIVER PROC
+
+NODTRACE DS    0H
+
+*
+* START SESSION TERMINATION IF DRIVER ENDED UNEXPECTEDLY
+*----------------------------------------------------------------------
+
+         B     ENDS               START TERMINATION IF STARTED YET
+
+*----------------------------------------------------------------------
+* PROCESS A PROC STOP REQUEST
+*----------------------------------------------------------------------
+
+PSTP     DS    0H
+
+         TM    ISEF1,ISEF1STP     IS STOP ALREADY SET?
+         BO    WAIT               BRANCH IF YES
+
+         $TRACE *=A(TRC_ISESS_STOP),16 TRACE ENTRY W/16 USER BYTES
+
+         BNZ   NOPTRACE           BRANCH IF TRACING NOT AVAILABLE
+
+         ST    RISESS,0(,R1)      TRACE ISESS
+         MVC   4(4,R1),ISECID     TRACE SESSION CID
+         MVC   8(8,R1),ISETK      TRACE SESSION TOKEN
+
+NOPTRACE DS    0H
+
+         $MSG  985,               "ISESS PROC STOP"                    +
+               FIELDS=((RISESS),  ISESS ADDRESS                        +
+               (ISETKUSR,4),      IVUSER TOKEN                         +
+               (ISETKSES,4),      ISESS  TOKEN                         +
+               (RITASK),          ITASK ADDRESS                        +
+               (TSKPCBC,4),       IPROC ADDRESS                        +
+               (TSKNAME,8))       ITASK NAME
+
+         OI    ISEF1,ISEF1STP     SET STOP REQUESTED
+
+*
+* START SESSION TERMINATION
+*----------------------------------------------------------------------
+
+         B     ENDS               CALL THE END_SESSION PROCESSOR
+
+*----------------------------------------------------------------------
+* PROCESS A PROC CANCEL REQUEST
+*----------------------------------------------------------------------
+
+PCAN     DS    0H
+
+         $TRACE *=A(TRC_ISESS_CANCEL),16 TRACE ENTRY W/16 USER BYTES
+
+         BNZ   NOCTRACE           BRANCH IF TRACING NOT AVAILABLE
+
+         ST    RISESS,0(,R1)      TRACE ISESS
+         MVC   4(4,R1),ISECID     TRACE SESSION CID
+         MVC   8(8,R1),ISETK      TRACE SESSION TOKEN
+
+NOCTRACE DS    0H
+
+         $MSG  984,               "ISESS PROC CANCEL"                  +
+               FIELDS=((RISESS),  ISESS ADDRESS                        +
+               (ISETKUSR,4),      IVUSER TOKEN                         +
+               (ISETKSES,4),      ISESS  TOKEN                         +
+               (RITASK),          ITASK ADDRESS                        +
+               (TSKPCBC,4),       IPROC ADDRESS                        +
+               (TSKNAME,8))       ITASK NAME
+
+         OI    ISEF1,ISEF1CAN     SET CANCEL REQUESTED
+
+*
+* START SESSION TERMINATION
+*----------------------------------------------------------------------
+
+         B     ENDS               CALL THE END_SESSION PROCESSOR
+
+*----------------------------------------------------------------------
+* EXIT
+*----------------------------------------------------------------------
+
+EXIT     DS    0H
+
+         LM    R15,R1,RETREGS     LOAD RETURN REGISTERS
+
+         #EXIT R1=YES             RETURN W/R15,R0,R1
+
+*----------------------------------------------------------------------
+* ERROR ROUTINES
+*----------------------------------------------------------------------
+
+ERR$TASK DS    0H
+
+*        $ABEND ABE_VTDIAG,                                            +
+               SCOPE=PCB,                                              +
+               TITLE='$TASK FAILURE'
+         EX    0,*
+
+ERR$VTAM DS    0H
+
+*        $ABEND ABE_VTDIAG,                                            +
+               SCOPE=PCB,                                              +
+               TITLE='$VTAM FAILURE'
+         EX    0,*
+
+ERRDTERM DS    0H
+
+*        $ABEND ABE_VTDIAG,                                            +
+               SCOPE=PCB,                                              +
+               TITLE='INVALID ISESS AT DRIVER TERMINATION'
+         EX    0,*
+
+*----------------------------------------------------------------------
+* SUBROUTINE STOPDRVR - POST THE SESSION DRIVER TO STOP
+*
+*                       R14 = RETURN ADDRESS
+*----------------------------------------------------------------------
+
+STOPDRVR DS    0H
+
+         STM   R14,R1,SUB0SAVE    SAVE REGISTERS
+
+         TM    ISEF1,ISEF1DRV     IS DRIVER ACTIVE?
+         BNO   STOPDX             BRANCH IF NOT
+         TM    ISEF1,ISEF1DRS     HAS DRIVER STOP BEEN ISSUED?
+         BO    STOPDX             BRANCH IF YES
+         OI    ISEF1,ISEF1DRS     SHOW STOP WAS REQUESTED
+
+         ICM   R1,15,ISERQSND     ACTIVE SEND REQUEST?
+         BZ    STOPDRCV           BRANCH IF NOT
+         MVC   SPLRETCD-SPLIST(4,R1),=A($SESS_RC_CANCELED)
+         BAS   R14,POSTSREQ       CANCEL THE REQUEST
+         XC    ISERQSND,ISERQSND  SHOW NO REQUEST OUTSTANDING
+
+STOPDRCV DS    0H
+
+         ICM   R1,15,ISERQRCV     ACTIVE RECEIVE REQUEST?
+         BZ    STOPDSIR           BRANCH IF NOT
+         MVC   SPLRETCD-SPLIST(4,R1),=A($SESS_RC_CANCELED)
+         BAS   R14,POSTSREQ       CANCEL THE REQUEST
+         XC    ISERQRCV,ISERQRCV  SHOW NO REQUEST OUTSTANDING
+
+STOPDSIR DS    0H
+
+         ICM   R1,15,ISERQSIR     ACTIVE SESSION INITIATION REQUEST?
+         BZ    STOPDRSP           BRANCH IF NOT
+         MVC   SPLRETCD-SPLIST(4,R1),=A($SESS_RC_CANCELED)
+         BAS   R14,POSTSREQ       CANCEL THE REQUEST
+         XC    ISERQSIR,ISERQSIR  SHOW NO REQUEST OUTSTANDING
+
+STOPDRSP DS    0H
+
+         ICM   R1,15,ISERQRSP     ACTIVE SEND RESPONSE REQUEST?
+         BZ    STOPSTOP           BRANCH IF NOT
+         MVC   SPLRETCD-SPLIST(4,R1),=A($SESS_RC_CANCELED)
+         BAS   R14,POSTSREQ       CANCEL THE REQUEST
+         XC    ISERQRSP,ISERQRSP  SHOW NO REQUEST OUTSTANDING
+
+STOPSTOP DS    0H
+
+         $PROC STOP,              ASK IT TO STOP                       +
+               TASK=(RITASK),                                          +
+               PCB=*ISEDIPCB,                                          +
+               MF=(E,$PROCMFL)
+
+         LTR   R15,R15            TEST RC
+         BZ    STOPDX             BRANCH IF STOP OK
+         ST    R15,PROCR15        SAVE $PROC RC
+         ST    R0,PROCR0          SAVE $PROC RSN
+
+         $MSG  972,               "VTAM DRIVER TOKEN...PROC STOP..."   +
+               FIELDS=((ISETK,4),    SESSION TOKEN                     +
+               (ISETK+4,4),          SESSION TOKEN PART2               +
+               (RITASK),             ITASK ADDRESS                     +
+               (TSKPCBC,4),          IPROC ADDRESS                     +
+               (TSKNAME,8),          ITASK NAME                        +
+               (PROCR15,4),          $PROC RC                          +
+               (PROCR0,4))           $PROC RSN
+
+STOPDX   DS    0H
+
+         LM    R14,R1,SUB0SAVE    RESTORE REGISTERS
+         BR    R14                RETURN
+
+*----------------------------------------------------------------------
+* SUBROUTINE POSTSREQ - POST A $SESS REQUEST
+*
+*                       R14 = RETURN ADDRESS
+*                       R1  = SPLIST
+*----------------------------------------------------------------------
+
+POSTSREQ DS    0H
+
+         STM   R14,R1,SUB1SAVE    SAVE REGISTERS
+         L     R15,IVT@SPST       SPLIST TRACE/POST ROUTINE
+         BASR  R14,R15            LINK TO TRACE/POST ROUTINE
+         LM    R14,R1,SUB1SAVE    RESTORE REGISTERS
+         BR    R14                RETURN
+
+*----------------------------------------------------------------------
+* SUBROUTINE VTAMLOCK - OBTAIN VTAM GLOBAL LOCK
+*----------------------------------------------------------------------
+
+VTAMLOCK DS    0H
+
+         TM    FLAG,FLAGLOCK        HAVE WE ALREADY OBTAINED THE LOCK?
+         BOR   R14                  RETURN IF YES
+         STM   R14,R2,SUB0SAVE      SAVE CALLER'S REGISTERS
+
+         $SER  OBTAIN,                                                 +
+               VTAM
+
+         C     R15,=F'4'            WAS LOCK ALREADY HELD?
+         BNE   VTAMLOEX             BRANCH IF NOT
+         OI    FLAG,FLAGLCKD        REMEMBER LOCK HELD ON ENTRY
+
+VTAMLOEX DS    0H
+
+         OI    FLAG,FLAGLOCK        REMEMBER LOCK IS HELD
+         LM    R14,R2,SUB0SAVE      RESTORE CALLER'S REGISTERS
+         BR    R14                  RETURN
+
+*----------------------------------------------------------------------
+* SUBROUTINE VTAMUNLK - RELEASE VTAM GLOBAL LOCK
+*----------------------------------------------------------------------
+
+VTAMUNLK DS    0H
+
+         TM    FLAG,FLAGLOCK        IS LOCK HELD?
+         BNOR  R14                  BRANCH IF NOT
+         TM    FLAG,FLAGLCKD        WAS LOCK HELD ON ENTRY?
+         BOR   R14                  DON'T RELEASE IF IT WAS
+         STM   R14,R2,SUB0SAVE      SAVE CALLER'S REGISTERS
+
+         $SER  RELEASE,                                                +
+               VTAM
+
+         NI    FLAG,255-FLAGLOCK    SHOW LOCK NOT HELD
+         LM    R14,R2,SUB0SAVE      RESTORE CALLER'S REGISTERS
+         BR    R14                  RETURN
+
+*----------------------------------------------------------------------
+*
+* THIS IS THE RPL COMPLETION ROUTINE FOR THE CLSDST/TERMSESS
+*
+* ON ENTRY:
+*
+*    R15 = ENTRY POINT ADDRESS
+*    R14 = RETURN ADDRESS
+*    R13 = AVAILABLE SAVE AREA
+*    R11 = ICVT ADDRESS
+*    R10 = ITASK ADDRESS
+*    R09 = IVTAMCVT ADDRESS
+*    R01 = ADDRESS OF COMPLETED IRPL
+*    R00 = RECOVERY ACTION RETURN CODE
+*----------------------------------------------------------------------
+
+         DROP  R12
+
+TERMDONE #ENTER BASE=R12,         ENTRY LINKAGE                        +
+               PREG=(RIRPL,R2),   R1-->RIRPL, R0-->R2                  +
+               EP=YES             THIS IS AN ENTRY POINT
+
+         L     RIACB,RPLDACB      ACB ADDRESS
+         L     RISESS,IRPISESS    ISESS ADDRESS
+         ICM   R3,1,RPLREQ        SAVE THE REQUEST CODE
+         SR    R4,R4              CLEAR
+         ICM   R4,2,RPLRTNCD      SAVE RETURN CODE
+         ICM   R4,1,RPLFDB2       SAVE FEEDBACK 2
+
+         $VTAM RETRPL,                                                 +
+               AREA=(RIRPL),                                           +
+               ERRET=ERR$VTAM,                                         +
+               MF=(E,MFE_LIST)    RELEASE THE IRPL
+
+         LTR   R4,R4              DID TERMINATION REQUEST FAIL?
+         BNZ   TERMED             BRANCH IF YES
+         CLM   R3,1,=AL1(RPLCLOSE) WAS THE TERMINATION A CLSDST?
+         BNE   EXIT               BRANCH NO TO WAIT FOR UNBIND/CLEANUP
+
+*
+* SESSION IS GONE.  CLEAR SESSION ACTIVE FLAG.
+*----------------------------------------------------------------------
+
+TERMED   DS    0H                                                      +
+
+         NI    ISEF1,255-ISEF1ACT SESSION NOT ACTIVE/PENDING
+         XC    ISECID,ISECID      CLEAR THE SESSION CID
+         B     EXIT               RETURN FROM RPL EXIT
+
+*----------------------------------------------------------------------
+*  CONSTANTS AND LITERALS
+*----------------------------------------------------------------------
+
+         LTORG ,
+         PRINT NOGEN
+         IHAPSA ,                 MVS PREFIXED SAVE AREA
+         CVT DSECT=YES            MVS COMMUNICATIONS VECTOR TABLE       10010000
+         IEFJESCT ,               MVS JES CVT                           10020000
+         IEFJSCVT ,               MVS SUBSYSTEM COMMUNICATIONS TABLE    10030000
+         ISTDBIND ,               VTAM BIND IMAGE
+         TRACODES ,               INTEGRATOR TRACE CODE EQUATES
+         ICVT  ,                  INTEGRATOR CVT
+         IVTAMCVT ,               INTEGRATOR VTAM CVT
+         IRPL ,                   INTEGRATOR VTAM RPL+
+         IRQE ,                   INTEGRATOR RECEIVE QUEUE ELEMENT
+         IACB ,                   INTEGRATOR VTAM ACB+
+         INIB ,                   INTEGRATOR VTAM NIB+
+         ISESS ,                  INTEGRATOR SESSION BLOCK
+         IVUSER ,                 INTEGRATOR VTAM USER BLOCK
+         ITASK ,                  INTEGRATOR TASK BLOCK
+         IWEVTAM ,                INTEGRATOR VTAM WORK ELEMENT
+         TMSG  ,                  INTEGRATOR INTERTASK MSG FORMAT
+         EVCODES ,                INTEGRATOR EVENT CODES
+         ABCODES ,                INTEGRATOR $ABEND CODES
+         MSGCODES ,               INTEGRATOR INTERTASK MSGING CODES
+         @EPB ,                   INTEGRATOR EVENT PROCESS BLOCK
+         $TASK DSECT=YES          INTEGRATOR $TASK SERVICES
+         $PROC DSECT=YES          INTEGRATOR $PROC SERVICES
+         $VTAM DSECT=YES          INTEGRATOR $VTAM SERVICES
+         $SESS DSECT=YES          INTEGRATOR $SESS SERVICES
+         $SESSTMR DSECT=YES       INTEGRATOR $SESSTMR SERVICES
+         IFGEXLST ,               VTAM EXIT LIST
+         END   ,
