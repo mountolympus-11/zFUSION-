@@ -1,0 +1,380 @@
+IRUNRSCR TITLE '- SQL RESULT SET TABLE CREATE'                          00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE: IRUNRSCR - SQL result set table create                       00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This routine, a SQL Executor routine, can be called from           00080000
+*    either a SQL or SLU process to create a result set, anchoring      00090000
+*    its global data areas in the QCS to facilitate recovery in         00100000
+*    either execution environment.                                      00110000
+*                                                                       00120000
+*    Even though the QCS is the primary recovery (storage release)      00130000
+*    vehicle, several of the data areas acquired in this routine        00140000
+*    are also anchored in $NAVPARM to maintain compatibility with       00150000
+*    older logic.                                                       00160000
+*                                                                       00170000
+*    If the candidate statement is a SELECT, the use of DISTINCT        00180000
+*    and/or the presence of an ORDER BY clause may require the          00190000
+*    creation of table indexes.  ISQKYNDX creates the appropriate       00200000
+*    key definitions.                                                   00210000
+*                                                                       00220000
+*    A row buffer is allocated (in task owned storage) using the        00230000
+*    row length provided by the QCS builder.  If that length is         00240000
+*    zero, a row buffer is not allocated.                               00250000
+*                                                                       00260000
+*                                                                       00270000
+* ON ENTRY:                                                             00280000
+*                                                                       00290000
+*    R1 - address of $NAVPARM                                           00300000
+*                                                                       00310000
+*                                                                       00320000
+* ON EXIT:                                                              00330000
+*                                                                       00340000
+*    R15 contains one of the following return codes                     00350000
+*                                                                       00360000
+*       -RC04 - no column definitions provided                          00370000
+*                                                                       00380000
+*        RC00 - table created without error                             00390000
+*                                                                       00400000
+*        RCnn - an error was encountered that precluded the             00410000
+*               successful creation of the result set table.            00420000
+*                                                                       00430000
+*               R15-R1 contain the QCSERC, QCSERSN, and                 00440000
+*               QCSEINFO codes posted in the QCS via the                00450000
+*               SQLSTAT and SQLIDCMP facilities.                        00460000
+*                                                                       00470000
+**<DOC-OFF>****************************************************         00480000
+                                                                        00490000
+         EJECT                                                          00500000
+***************************************************************         00510000
+*                                                                       00520000
+* MAINTENANCE:                                                          00530000
+*                                                                       00540000
+*    07/12/95 R. Turgeon     Rel 2.0                                    00550000
+*             Initial version created from split out of ISQLVDB         00560000
+*             allowing result set construction to be deferred           00570000
+*             until actual use.                                         00580000
+*                                                                       00590000
+*    10/31/95 R. Turgeon     Rel 2.1                                    00600000
+*             Exploit table services NOLOCATOR table property           00610000
+*             to ensure that resource commitment for transient          00620000
+*             VDB tables is minimal.                                    00630000
+*                                                                       00640000
+***************************************************************         00650000
+                                                                        00660000
+         EJECT                                                          00670000
+         QCS   ,             QUERY CONTENT SUMMARY                      00680000
+                                                                        00690000
+         EJECT                                                          00700000
+         $NAVPARM ,          EXEC ROW                                   00710000
+                                                                        00720000
+         EJECT                                                          00730000
+         KYNDXRET  ,         RESULT SET INDEX DEFINITION RETURN AREA    00740000
+                                                                        00750000
+         EJECT                                                          00760000
+         TBSERVIS CREATE,PSARG                                          00770000
+                                                                        00780000
+         EJECT                                                          00790000
+         EQUS ,                                                         00800000
+                                                                        00810000
+         EJECT                                                          00820000
+         #WORK PLIST=(MFE_LIST,80)                                      00830000
+                                                                        00840000
+NEWTNAME DS    CL18          NAME OF DYNAMICALLY CONSTRUCTED TABLE      00850000
+                                                                        00860000
+TTOKEN   DS    F             TABLE TOKEN                                00870000
+NDXDEF@  DS    A             RESULT SET NDX DEFINITION BLOCK (KYNDXRET) 00880000
+RETCODES DS    3F            R15-R1                                     00890000
+                                                                        00900000
+COLCOUNT DS    F             NUMBER OF COLPTRS REQUIRED                 00910000
+COLPTRS  DS    XL(4*256)     SPACE FOR 256 ENTRY COLUMN PTR ARRAY       00920000
+WORKAREA EQU   COLPTRS       GENERAL PURPOSE WORKAREA AS WELL           00930000
+                                                                        00940000
+         #ENDWORK ,                                                     00950000
+                                                                        00960000
+         EJECT                                                          00970000
+IRUNRSCR #ENTER PREG=(R8)                                               00980000
+                                                                        00990000
+         USING ITASK,R10          STDENV                                01000000
+                                                                        01010000
+***************************************************************         01020000
+*                                                                       01030000
+*   General init, generate a table name and acquire a workarea          01040000
+*                                                                       01050000
+***************************************************************         01060000
+                                                                        01070000
+         USING $NAVPARM,R8        SQL / NAVIGATION LINKAGE BLOCK        01080000
+                                                                        01090000
+         L     R7,IXRRCVPL        LOCATE THE QUERY CONTENT SUMMARY      01100000
+         USING QCS,R7                                                   01110000
+                                                                        01120000
+         GENTBLNM NEWTNAME        CONSTRUCT UNIQUE TABLE NAME           01130000
+                                                                        01140000
+*--------------------------------------------------------------         01150000
+*   Validate use of preallocated TBCREATE workarea                      01160000
+*--------------------------------------------------------------         01170000
+                                                                        01180000
+         LH    R2,IXRTBCDC        NUMBER OF COLUMNS IN VDB TABLE        01190000
+         ST    R2,COLCOUNT        FULLWORD VERSION IS USEFUL            01200000
+         SLA   R2,2               PTR REQUIRED FOR EACH                 01210000
+         BNP   WRN_NCOL           NO COLUMN DEFINITIONS                 01220000
+                                                                        01230000
+         C     R2,=A(L'COLPTRS)   EXCEEDS CAPACITY OF WORKAREA?         01240000
+         BNH   *+8                CONTINUE IF NOT                       01250000
+         EX    R0,*               ASSERT PRIOR VALIDATIONS              01260000
+                                                                        01270000
+*--------------------------------------------------------------         01280000
+*   Construct TBCOLDEF ptr array                                        01290000
+*--------------------------------------------------------------         01300000
+                                                                        01310000
+         L     R1,IXRTBCDA        FIRST TBCOLDEF ENTRY                  01320000
+         LH    R3,IXRTBCDC        NUMBER OF TBCOLDEF ENTRIES            01330000
+                                                                        01340000
+         LA    R15,COLPTRS        COLUMN PTR ARRAY CONSTRUCTION AREA    01350000
+                                                                        01360000
+SETCOLPS DS    0H                                                       01370000
+         ST    R1,0(,R15)         TBCOLDEF PTR                          01380000
+         LA    R15,4(,R15)        PREPARE FOR NEXT PASS                 01390000
+         LA    R1,TBCOLDFL(,R1)   ADVANCE TO NEXT ENTRY                 01400000
+         BCT   R3,SETCOLPS        SUMMARIZE ALL ENTRIES                 01410000
+                                                                        01420000
+*--------------------------------------------------------------         01430000
+*   Build result set index definitions (SELECT only)                    01440000
+*--------------------------------------------------------------         01450000
+                                                                        01460000
+         XC    DWORD,DWORD        INIT TBKEYDEF LIST AND ENTRY COUNT    01470000
+         CLI   QCSQUERY,QCSQ_SEL  SELECT STATEMENT?                     01480000
+         BNE   NOINDEX            NO INDEXES IF NOT                     01490000
+                                                                        01500000
+         @CALL ISQKYNDX,(QCS,COLPTRS,*COLCOUNT),MF=(E,MFE_LIST)         01510000
+                                                                        01520000
+         B     *+4(R15)           ANALYZE COMPLETION CODE               01530000
+         B     BLDNDX                RC00 - INDEX DEFINITION RETURNED   01540000
+         B     NOINDEX               RC04 - NO INDECIES REQUIRED        01550000
+         B     ERR_ORD               RC08 - ORDER-BY CLAUSE IN ERROR    01560000
+         B     ERR_DIST              RC12 - ERROR RELATED TO DISTINCT   01570000
+         EX    R0,*                  RC16 - DEFINED / NOT ANTICIPATED   01580000
+                                                                        01590000
+BLDNDX   DS    0H                 PREPARE KEY COUNT AND KEYDEF PTRS     01600000
+         ST    R1,NDXDEF@         INDEX DEFINITION BLOCK OR ZERO        01610000
+         USING KYNDXRET,R1        INDEX DEFINITION RETURN AREA          01620000
+         LA    R0,KYNDXLST        TBKEYDEF LIST ORIGIN                  01630000
+         ST    R0,DWORD+0         SAVE IN PARAMETER WORKAREA            01640000
+         L     R0,KYNDXCNT        TBKEYDEF LIST ENTRY COUNT             01650000
+         ST    R0,DWORD+4         SAVE IN PARAMETER WORKAREA            01660000
+         DROP  R1                                                       01670000
+                                                                        01680000
+NOINDEX  DS    0H                                                       01690000
+                                                                        01700000
+***************************************************************         01710000
+*                                                                       01720000
+*   Create the table used to house the result set                       01730000
+*                                                                       01740000
+***************************************************************         01750000
+                                                                        01760000
+         MVI   FWORD,TBT$REP+TBT$NLOC    REPLACE LIKE-NAMED TABLE, AND  01770000
+*                                        NO ROW LOCATOR OBJECTS         01780000
+                                                                        01790000
+         TBCREATE NEWTNAME,       UNIQUE TABLE NAME                    X01800000
+               COLLST=COLPTRS,    COLUMN INFORMATION FROM $NAVPARM     X01810000
+               COLCNT=*COLCOUNT,                                       X01820000
+               KEYLST=*DWORD+0,   KEY INFORMATION FOR ISQLKYNDX        X01830000
+               KEYCNT=*DWORD+4,                                        X01840000
+               OPTBYTE=FWORD,     OPTION FLAGS IN HIGH ORDER           X01850000
+               STOKEN=*ICTXSPT@,  EXECUTION SPACE                      X01860000
+               TTOKEN=TTOKEN,     RETURN A TABLE TOKEN                 X01870000
+               MF=(E,MFE_LIST)    LARGER THAN USUAL WORKAREA            01880000
+                                                                        01890000
+*--------------------------------------------------------------         01900000
+*   Release index definitions, if any                                   01910000
+*--------------------------------------------------------------         01920000
+                                                                        01930000
+         STM   R15,R1,RETCODES    PRESERVE TBCREATE COMPLETION STATUS   01940000
+         ICM   R2,15,NDXDEF@      INDEX DEFINITION WORKAREA PENDING?    01950000
+         BZ    TBLNONDX           SKIP IF NOT                           01960000
+                                                                        01970000
+         $RETSTOR (R2)            RELEASE INDEX DEFINITIONS             01980000
+                                                                        01990000
+TBLNONDX DS    0H                                                       02000000
+                                                                        02010000
+*--------------------------------------------------------------         02020000
+*   Anaylze TBCREATE completion, exit with diagnostics if error         02030000
+*--------------------------------------------------------------         02040000
+                                                                        02050000
+         LM    R15,R1,RETCODES    RESTORE TBCREATE COMPLETION STATUS    02060000
+         LTR   R15,R15                                                  02070000
+         BNZ   ERR_TBSV                                                 02080000
+                                                                        02090000
+         MVC   QCSTTOKN,TTOKEN    RETURN TABLE TOKEN                    02100000
+         MVC   IXRTOKEN,TTOKEN    A CONVENIENT COPY IN $NAVPARM         02110000
+         MVC   QCSTSPAC,ICTXSPT@  ADDR OF TABLE SPACE TOKEN             02120000
+         MVC   QCSTABLE,NEWTNAME  NAME OF TABLE                         02130000
+         MVI   QCSTDROP,TRUE      AUTODROP                              02140000
+                                                                        02150000
+         EJECT                                                          02160000
+**<DOC-ON>*****************************************************         02170000
+*                                                                       02180000
+*   Complete the predicate tree                                         02190000
+*                                                                       02200000
+*   TBPSARG is now invoked to complete the predicate tree               02210000
+*   anchored in the QCS, if any, with references to the result          02220000
+*   set table created above.  The near-ready tree is anchored           02230000
+*   in QCSSITRE and a TBPSARGed tree may be returned via                02240000
+*   QCSSATRE.  However, because we will use the search argument         02250000
+*   completed here as a TBADD FILTER= rather than a TBGET               02260000
+*   search argument, we will leave QCSSATRE null - all of the           02270000
+*   result set trimming will be accomplished up front by TBADD.         02280000
+*                                                                       02290000
+**<DOC-OFF>****************************************************         02300000
+                                                                        02310000
+         ICM   R2,15,QCSSITRE     SEARCH ARGUMENT TREE PROVIDED?        02320000
+         BZ    NOSARG             NO FURTHER PROCESSING IF NOT          02330000
+                                                                        02340000
+         TBPSARG TTOKEN=QCSTTOKN, CONVERT TO TABLE SERVICES EXEC FORM  X02350000
+               SARGS=(R2),                                             X02360000
+               XSTGMGR=(IGENCSTG,QCSGPSTG,WORKAREA),                   X02370000
+               MF=(E,MFE_LIST)                                          02380000
+                                                                        02390000
+         ST    R15,QCSPSARC       POST TBPSARG RETCODE                  02400000
+         ST    R0,QCSPSARS        POST TBPSARG RSNCODE                  02410000
+         LTR   R15,R15            NORMAL COMPLETION?                    02420000
+         BNZ   ERR_ANAL           QCS ANALYSIS REQUIRED IF NOT          02430000
+                                                                        02440000
+         ST    R2,IXRFSARG        CONVENIENT SARG COPY IN $NAVPARM      02450000
+                                                                        02460000
+         CLM   R0,1,=AL1(TRUE)    SEARCH ARG IS CATEGORICALLY TRUE?     02470000
+         BNE   NOSARG             SKIP IF NOT                           02480000
+         XC    QCSSITRE,QCSSITRE  SEARCH ARGUMENT / FILTER WITHDRAWN    02490000
+         XC    IXRFSARG,IXRFSARG  REMOVE FROM $NAVPARM SUMMARY          02500000
+                                                                        02510000
+NOSARG   DS    0H                                                       02520000
+                                                                        02530000
+***************************************************************         02540000
+*                                                                       02550000
+*   Acquire result set row buffer                                       02560000
+*                                                                       02570000
+***************************************************************         02580000
+                                                                        02590000
+         ICM   R2,15,QCSROBFL     ROW BUFFER DECLARED LENGTH            02600000
+         BZ    NOBUFFER           NO ROW BUFFER ALLOCATION IF N/A       02610000
+                                                                        02620000
+         $GETSTOR (R2),OWNER=ITASK,COND=YES                             02630000
+         BNZ   ERR_STG            STORAGE NOT AVAILABLE                 02640000
+                                                                        02650000
+         ST    R1,QCSROBFR        ROW BUFFER                            02660000
+         ST    R1,IXROW@BF        CONVENIENT COPY IN $NAVPARM           02670000
+         ST    R2,IXRBUFRL        BUFFER LENGTH USEFUL AS WELL          02680000
+                                                                        02690000
+NOBUFFER DS    0H                                                       02700000
+                                                                        02710000
+         EJECT                                                          02720000
+***************************************************************         02730000
+*                                                                       02740000
+*   Return normal / abnormal completion status to caller                02750000
+*                                                                       02760000
+***************************************************************         02770000
+                                                                        02780000
+         LA    R15,RC00           REQUEST COMPLETE                      02790000
+         SR    R0,R0              REASON CODE NOT DEFINED               02800000
+         B     EXIT               DONE                                  02810000
+                                                                        02820000
+*--------------------------------------------------------------         02830000
+*   No column definitions provided                                      02840000
+*--------------------------------------------------------------         02850000
+                                                                        02860000
+WRN_NCOL DS    0H                                                       02870000
+         LA    R15,RC04           TABLE NOT CREATED                     02880000
+         LNR   R15,R15            DIFFERENTIATE FROM SERVICE FAILURE    02890000
+         SR    R0,R0              REASON CODE NOT DEFINED               02900000
+         B     EXIT               WARN                                  02910000
+                                                                        02920000
+*--------------------------------------------------------------         02930000
+*   ORDER BY clause error                                               02940000
+*--------------------------------------------------------------         02950000
+                                                                        02960000
+ERR_ORD  DS    0H                 ERROR IN 'ORDER BY' CLAUSE            02970000
+         LR    R2,R1              SUPPLEMENTAL MESSAGE                  02980000
+                                                                        02990000
+         SQLSTAT ERC_ORD,INFO=(R15)                                     03000000
+                                                                        03010000
+         SQLMSG 170,(R2)                                                03020000
+                                                                        03030000
+         B     RETSTAT                                                  03040000
+                                                                        03050000
+*--------------------------------------------------------------         03060000
+*   DISTINCT rows - KEYDEF construction error                           03070000
+*--------------------------------------------------------------         03080000
+                                                                        03090000
+ERR_DIST DS    0H                 ERROR BUILDING INDEX SERVING DISTINCT 03100000
+         SQLSTAT ERC_DIST,INFO=(R15)                                    03110000
+                                                                        03120000
+         B     RETSTAT                                                  03130000
+                                                                        03140000
+*--------------------------------------------------------------         03150000
+*   Table services component failure                                    03160000
+*--------------------------------------------------------------         03170000
+                                                                        03180000
+ERR_TBSV DS    0H                 TABLE SERVICES FAILURE                03190000
+         LR    R2,R0              REASON CODE FROM SOME TB* REQUEST     03200000
+         SLL   R2,16              CONSOLIDATION                         03210000
+         OR    R2,R15             COMBINE WITH RETURN CODE              03220000
+                                                                        03230000
+         SQLIDCMP COMPONENT='TABLE SERVICES',INFOCODE=(R2)              03240000
+                                                                        03250000
+         SQLSTAT ERC_TBSV                                               03260000
+                                                                        03270000
+         B     RETSTAT                                                  03280000
+                                                                        03290000
+*--------------------------------------------------------------         03300000
+*   Misc service rtn failure, QCS analysis required for detail          03310000
+*--------------------------------------------------------------         03320000
+                                                                        03330000
+ERR_ANAL DS    0H                 QCS ANALYSIS REQUIRED                 03340000
+         SQLSTAT ERC_ANALYZE                                            03350000
+                                                                        03360000
+         B     RETSTAT                                                  03370000
+                                                                        03380000
+*--------------------------------------------------------------         03390000
+*   Storage / management failure                                        03400000
+*--------------------------------------------------------------         03410000
+                                                                        03420000
+ERR_STG  DS    0H                 INSUFFICIENT STORAGE?                 03430000
+         LR    R2,R15                                                   03440000
+                                                                        03450000
+         SQLIDCMP COMPONENT='STORAGE MGMT',INFOCODE=(R2)                03460000
+                                                                        03470000
+         SQLSTAT ERC_STG                                                03480000
+                                                                        03490000
+         B     RETSTAT                                                  03500000
+                                                                        03510000
+*--------------------------------------------------------------         03520000
+*   Return completion status to caller                                  03530000
+*--------------------------------------------------------------         03540000
+                                                                        03550000
+RETSTAT  DS    0H                                                       03560000
+         L     R15,QCSERC         RETURN CODE                           03570000
+         L     R0,QCSERSN         REASON CODE                           03580000
+         L     R1,QCSEINFO        INFO CODE                             03590000
+                                                                        03600000
+EXIT     DS    0H                                                       03610000
+         #EXIT ,                                                        03620000
+                                                                        03630000
+         EJECT                                                          03640000
+***************************************************************         03650000
+*                                                                       03660000
+*   Local read-only working storage                                     03670000
+*                                                                       03680000
+***************************************************************         03690000
+                                                                        03700000
+         LTORG ,                                                        03710000
+                                                                        03720000
+         EJECT                                                          03730000
+         SQLCODES ,                                                     03740000
+                                                                        03750000
+         EJECT                                                          03760000
+         PRINT NOGEN                                                    03770000
+         ICVT ,                                                         03780000
+         ITASK ,                                                        03790000
+         END  ,                                                         03800000

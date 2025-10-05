@@ -1,0 +1,2043 @@
+IRUNSCUP TITLE '- IMAGE SCRAPE / TABLE UPDATE INTERFACE'                00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE:  IRUNSCUP - Image scrape / table update interface            00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This routine directs the processing of variables residing          00080000
+*    on the screen image, and is also responsible for maintaining       00090000
+*    images other than the standard, 3270 buffer image.                 00100000
+*                                                                       00110000
+*    The ITVBR* routines are used to coordinate the processing          00120000
+*    of variables residing in regions.  When variables do not           00130000
+*    reside in regions in a particular screen(set), TVBR vector         00140000
+*    assistance is not needed.  Variables are processed against         00150000
+*    the 3270 buffer (region) directly.                                 00160000
+*                                                                       00170000
+*    When 'wrap' regions are defined, the IRGNWR* service rtns          00180000
+*    are used to maintain a separate image referred to as the           00190000
+*    'wrap image'.  The strategies used for wrap imaging are            00200000
+*    described inline and in the IRGNWR* routine prologs.               00210000
+*                                                                       00220000
+*                                                                       00230000
+* NOTES:                                                                00240000
+*                                                                       00250000
+*    TBADDs are done only when RUNSCOOP.RUNSDATA is true.               00260000
+*    This is intended to prevent result set updates while               00270000
+*    repositioning and other non-data-generating plans are              00280000
+*    active.                                                            00290000
+*                                                                       00300000
+*                                                                       00310000
+* ON ENTRY:                                                             00320000
+*                                                                       00330000
+*    R1  contains the address of a parameter list described             00340000
+*        by the RUNSCOOP mapping macro                                  00350000
+*                                                                       00360000
+*                                                                       00370000
+* ON EXIT:                                                              00380000
+*                                                                       00390000
+*    R15 contains one of the following return codes; the                00400000
+*        condition code is set accordingly                              00410000
+*                                                                       00420000
+*        RC00 - continue as follows                                     00430000
+*                                                                       00440000
+*              -RSN04 - table select nomatch, terminate the plan        00450000
+*               RSN00 - advance to next planned image                   00460000
+*               RSN04 - scroll down and present image                   00470000
+*                                                                       00480000
+*        RC04 - navigation decision error                               00490000
+*                                                                       00500000
+*               RSN04 - unable to formulate table-select strategy       00510000
+*               RSN08 - table-select argument not matched               00520000
+*                                                                       00530000
+*        RC08 - image scraping error as described below                 00540000
+*                                                                       00550000
+*               RSN04 - unresolved non-null variable                    00560000
+*                                                                       00570000
+*        RC12 - service routine failure, return codes presented         00580000
+*               as reason code, reason code as info code                00590000
+*                                                                       00600000
+*        RC16 - result set creation error, QCS error info posted        00610000
+*                                                                       00620000
+*               R0 - IRUNRSCR return code                               00630000
+*               R1 - IRUNRSCR reason code                               00640000
+*                                                                       00650000
+*        RC20 - wrap region processing / management error               00660000
+*                                                                       00670000
+*               reason code is IRGNWR* rtn retcode                      00680000
+*                                                                       00690000
+*        RC24 - storage availability / management failure               00700000
+*                                                                       00710000
+**<DOC-OFF>****************************************************         00720000
+                                                                        00730000
+         EJECT                                                          00740000
+***************************************************************         00750000
+*                                                                       00760000
+*  Maintenance:                                                         00770000
+*                                                                       00780000
+*    10/01/93 R. Turgeon                                                00790000
+*             Initial version                                           00800000
+*                                                                       00810000
+*    05/09/95 Su-fen Wu          Par# 185963                            00820000
+*             Variable with an un-resolved parent region         185963 00830000
+*             is not reflected and the local copy of region      185963 00840000
+*             name is set. Therefore, image pointer for the      185963 00850000
+*             parent region is 0 and used for locating variable  185963 00860000
+*             and in turn provide a bad variable value pointer   185963 00870000
+*             for VPUT.                                          185963 00880000
+*                                                                       00890000
+*    06/26/95 R. Turgeon         Rel 2.0                                00900000
+*             Changed $NAVPARM column/variable entry locator            00910000
+*             to use offset from origin of $NAVPARM base,               00920000
+*             allowing simpler extensions of the base section.          00930000
+*                                                                       00940000
+*    07/25/95 R. Turgeon         Rel 2.0                                00950000
+*             Suppress all TVBR processing if data collection           00960000
+*             is inactive                                               00970000
+*                                                                       00980000
+*    12/05/95 R. Turgeon         Rel 2.1  Par# 232478            232478 00990000
+*             Corrected IRUNRECT RC04 return logic               232478 01000000
+*                                                                       01010000
+*    01/04/96 R. Turgeon         Rel 2.1  R210104               R210104 01020000
+*             Suppress column/variable variable promotion if    R210104 01030000
+*             data collection is not active (repositioning)     R210104 01040000
+*                                                                       01050000
+*    01/27/96 R. Turgeon / R. Colmone                                   01060000
+*             Converted high use $CLINKs to @CALLs                      01070000
+*                                                                       01080000
+***************************************************************         01090000
+                                                                        01100000
+         EJECT                                                          01110000
+         RUNSCOOP ,               ENTRANCE LIST                         01120000
+                                                                        01130000
+         EJECT                                                          01140000
+         GEOMETRY ,               LINE, FIGURE STRUCTURES               01150000
+                                                                        01160000
+         EJECT                                                          01170000
+         NAV   ,                  NAVIGATION NETWORK STRUCTURES         01180000
+                                                                        01190000
+         EJECT                                                          01200000
+         $NAVPARM ,               QUERY / IMAGING INTERFACE REQUEST     01210000
+                                                                        01220000
+         EJECT                                                          01230000
+         $VARMGR DSECT=YES        INTEGRATOR VARIABLE SERVICES          01240000
+                                                                        01250000
+         EJECT                                                          01260000
+         $ATTRIB ,                                                      01270000
+                                                                        01280000
+         ICATALOG VARIABLES,REGIONS                                     01290000
+                                                                        01300000
+         EJECT                                                          01310000
+         TVBRVEC ,                TRAVERSE VARS BY REGION               01320000
+                                                                        01330000
+         EJECT                                                          01340000
+         REGION ,                 REGION DEFINITION                     01350000
+                                                                        01360000
+         EJECT                                                          01370000
+         DRAW   ,                 REGION INSTANCE INFO                  01380000
+                                                                        01390000
+         TBSERVIS ADD,DELETE      TABLE SERVICE REQUEST                 01400000
+                                                                        01410000
+         EJECT                                                          01420000
+         TRACODES PRINT=NOGEN     TRACE TABLE ENTRY CODES               01430000
+                                                                        01440000
+         ABCODES PRINT=NOGEN      $ABEND CODES                          01450000
+                                                                        01460000
+         EQUS  ,                                                        01470000
+                                                                        01480000
+         $MSGDFT PREFIX=ICTPID,COMPID='NAV',TABLE=*#MSGS,              X01490000
+               CONID=*ICTCONID,CONNAME=ICTCONNM,                       X01500000
+               DEST=$IMSGQ,                                            X01510000
+               MSGQA=*PL.RUNSMSGQ,STGQH=*PL.RUNSQH,                    X01520000
+               PRINT=NOGEN,MF=(E,MSGLIST)                               01530000
+                                                                        01540000
+         EJECT                                                          01550000
+         #WORK ,                  WRITEABLE WORKING STORAGE             01560000
+                                                                        01570000
+FLAGS    DS    X                  FLAG BYTE                             01580000
+FTVBR    EQU   X'80'                 TVBR-ASSISTED SCRAPE               01590000
+FROWADD  EQU   X'40'                 TBADD PERFORMED                    01600000
+                                                                        01610000
+*--------------------------------------------------------------         01620000
+*   GLOBAL VARIABLES DIRECTLY ACCESSIBLE TO ALL SUBROUTINES             01630000
+*--------------------------------------------------------------         01640000
+                                                                        01650000
+@TVBR    DS    A                  TVBR PTR RETURNED                     01660000
+@PAGE    DS    A                  PAGE ALIGNED WORKAREA                 01670000
+@TVBRVAR DS    F                  NUMBER OF MANAGED VARIABLES           01680000
+@RGNOFF  DS    F                  OFFSET TO PARENT IMAGE                01690000
+@USRSTG  DS    A                  USER ORIENTED STORAGE POOL QH         01700000
+@IMAGE   DS    A                  ADDR OF CURRENT REGION WINDOW         01710000
+                                                                        01720000
+*--------------------------------------------------------------         01730000
+*   MISC WORKAREAS                                                      01740000
+*--------------------------------------------------------------         01750000
+                                                                        01760000
+STATREGS DS    0F                 R15-R1 COMPLETION STATUS              01770000
+RETC     DS    F                     RETURN CODE                        01780000
+RSNC     DS    F                     REASON CODE                        01790000
+INFOC    DS    F                     INFO   CODE                        01800000
+SCROLREQ DS    F                  SCROLLING RECOMMENDATION              01810000
+                                                                        01820000
+@NAVE    DS    A                  ADDR OF $NAVPARM ENTRY     (IXRCOLDF) 01830000
+@SYSVAR  DS    A                  ADDR OF SYSVARS ENTRY      (SVARSECT) 01840000
+                                                                        01850000
+FAILFUNC DS    CL20               SERVICE FUNCTION                      01860000
+STATNAME DS    CL16               SCREEN OR SCREEN SET NAME             01870000
+REGNNAME DS    CL16               REGION NAME                           01880000
+WRAPNAME DS    CL16               WRAP REGION OWNER NAME                01890000
+COMNNAME DS    CL16               COMMON ERROR HANDLER OBJECT NAME      01900000
+                                                                        01910000
+WRAPNVI  DS    A                  WRAP RGN IMAGE HANDLE (*NVIMAGE)      01920000
+RS_LIMIT DS    F                  WRAP RGN SCRAPE THRESHOLD LINE #      01930000
+RS_SEG   DS    F                  WRAP RGN SCRAPE/PURGE SEGMENT COUNT   01940000
+                                                                        01950000
+SERVSTAT DS    0F                 SERVICE RTN STATUS R15-R0             01960000
+SERVRETC DS    F                     RETURN CODE                        01970000
+SERVRSNC DS    F                     REASON CODE                        01980000
+SERVINFO DS    F                     INFO   CODE                        01990000
+                                                                        02000000
+*--------------------------------------------------------------         02010000
+*   IMAGE PROCESSING ROUTINE WORKAREAS                                  02020000
+*--------------------------------------------------------------         02030000
+                                                                        02040000
+IPFLAGS  DS    X                  FLAG BYTE                             02050000
+IPFRPTRS EQU   X'80'                 REPEATING REGIONS DEFINED ON SSET  02060000
+IPFSCRAP EQU   X'40'                 SCRAPING OCCURRED                  02070000
+                                                                        02080000
+IPITYPE  DS    F                  IMAGE TYPE CODE                       02090000
+IPTVBRC  DS    F                  ITVBRRUN RETUNR CODE                  02100000
+IPTVBRSN DS    F                  ITVBRRUN REASON CODE / SCROLL CODE    02110000
+IPNVIMG  DS    A                  ADDR OF INPUT IMAGE HANDLE  (NVIMAGE) 02120000
+                                                                        02130000
+*--------------------------------------------------------------         02140000
+*   PLIST CONSTRUCTION AREAS, ETC.                                      02150000
+*--------------------------------------------------------------         02160000
+                                                                        02170000
+$PLIST   DS    XL(RUNSLN)         LOCAL COPY OF RUNSCOOP PLIST          02180000
+                                                                        02190000
+REGSAVEX DS    16F                REGISTER SAVEAREA                     02200000
+REGSAVE  DS    16F                LOCAL REGISTER SAVEAREA               02210000
+                                                                        02220000
+$VMLIST  $VARMGR MF=(L,*)         VARMGR PLIST AREA                     02230000
+                                                                        02240000
+MSGLIST  $MSG  FIELDS=(,,,,),MF=(L,*)   $MSG PLIST CONSTRUCTION AREA    02250000
+                                                                        02260000
+         #ENDWORK ,               PROJECT CONTROL BLOCK                 02270000
+                                                                        02280000
+         EJECT                                                          02290000
+IRUNSCUP #ENTER BASE=(R12,R8),PREG=(R2)                                 02300000
+                                                                        02310000
+         USING ITASK,R10          STDENV                                02320000
+         L     R9,TSKPCBC         PROCESS MODE                          02330000
+         USING IPCB,R9            TEMP ADDRESSABILITY                   02340000
+                                                                        02350000
+         L     R6,PCBUSER         USER ENVIRONMENT                      02360000
+         USING IUSER,R6                                                 02370000
+         LA    R0,USRSTG          USER ORIENTED STORAGE POOL            02380000
+         ST    R0,@USRSTG                                               02390000
+                                                                        02400000
+         DROP  R9,R6              IPCB, IUSER                           02410000
+                                                                        02420000
+         EJECT                                                          02430000
+**<DOC-ON>*****************************************************         02440000
+*                                                                       02450000
+*   General initialization, determine whether the image                 02460000
+*   requires region processing by invoking ITVBRBLD to build            02470000
+*   region-variable linkages.  RC04 indicates that the image            02480000
+*   can be processed without imaging region windows.                    02490000
+*                                                                       02500000
+*   Regions are defined against the screen set name if the              02510000
+*   state is a member of a screen set, and against the screen           02520000
+*   name otherwise.                                                     02530000
+*                                                                       02540000
+**<DOC-OFF>****************************************************         02550000
+                                                                        02560000
+PL       USING RUNSCOOP,$PLIST    LOF PLIST ADDRESSABILITY              02570000
+         MVC   $PLIST,0(R2)       BUT FREE UP A REG                     02580000
+                                                                        02590000
+         L     R9,PL.RUNSNAVP     $NAVPARM                              02600000
+         USING $NAVPARM,R9                                              02610000
+                                                                        02620000
+         L     R7,PL.RUNSSTN      ADDR OF STN DESCRIBING IMAGE/VARS     02630000
+         USING NVSTN,R7           STN IMAGE ENTRY FORMAT                02640000
+         LA    R2,NVSTSSN         SCREEN SET NAME                       02650000
+         TM    0(R2),BF           PROVIDED?                             02660000
+         BNZ   *+8                USE IF SO                             02670000
+         LA    R2,NVSTNAME        ELSE USE UNADORNED SCREEN NAME        02680000
+         MVC   STATNAME,0(R2)     PRESERVE OUR FOCUS                    02690000
+                                                                        02700000
+         TM    NVSFLG,NVSFUSS     VTAM STATE?                           02710000
+         BO    FIN_CPT            NO IMAGE PROCESSING IF SO             02720000
+                                                                        02730000
+         ICM   R0,15,PL.RUNSDATA  DATA COLLECTION ACTIVE?               02740000
+         BZ    SCRAPE             NO TVBR PROCESSING OTHERWISE          02750000
+                                                                        02760000
+*--------------------------------------------------------------         02770000
+*   Trial construct a new TVBR vector if one not already present        02780000
+*--------------------------------------------------------------         02790000
+                                                                        02800000
+         ICM   R1,15,IXR@TVBR     TVBR PREVIOUSLY CONSTRUCTED?          02810000
+         BZ    BLDTVBR            MUST CONSTRUCT IF NOT                 02820000
+         L     R0,TVBNVARS-TVBRVEC(,R1)   # OF VARIABLES SERVICED       02830000
+         B     BTVRC00            TVBR DESCRIPTION READY FOR LOCAL POST 02840000
+                                                                        02850000
+BLDTVBR  DS    0H                                                       02860000
+         LA    R1,$NAVPARM        $NAVPARM AS PARAMETER                 02870000
+         LA    R0,NVSTN           SCREEN/SET STN ENTRY                  02880000
+         @CALL ITVBRBLD,CTYPE=CVT ANALYZE REQUIREMENTS                  02890000
+                                                                        02900000
+         B     *+4(R15)           COMPLETION STATUS                     02910000
+         B     BTVRC00            RC00 - TVBR CONSTRUCTION COMPLETE     02920000
+         B     SCRAPE             RC04 - NO VAR / REGION RELATIONSHIPS  02930000
+         B     ERR_TBLD           RC08 - INVALID NAVPARM                02940000
+         B     ERR_TBLD           RC12 - UNABLE TO MATERIALIZE REGIONS  02950000
+         B     ERR_TBLD           RC16 - TVBR ENTRY CREATION FAILURE    02960000
+         B     ABN_STG            RC20 - STORAGE MGMT FAILURE           02970000
+         EX    R0,*               RC24 - RESERVED                       02980000
+         EX    R0,*               RC28 - RESERVED                       02990000
+                                                                        03000000
+*--------------------------------------------------------------         03010000
+*   VARIABLE / REGION RELATIONSHIPS MAPPED IN TVBR                      03020000
+*--------------------------------------------------------------         03030000
+                                                                        03040000
+BTVRC00  DS    0H                                                       03050000
+         ST    R1,@TVBR           TVBR ADDR RETURNED                    03060000
+         ST    R0,@TVBRVAR        NUMBER OF AFFECTED VARIABLES          03070000
+         OI    FLAGS,FTVBR        SCRAPE ASSISTED BY TVBR               03080000
+                                                                        03090000
+         EJECT                                                          03100000
+**<DOC-ON>*****************************************************         03110000
+*                                                                       03120000
+*   Simple variable scraping                                            03130000
+*                                                                       03140000
+*   This segment is responsible for scraping variables that are         03150000
+*   not managed by TVBR logic and those that have no $NAVPARM           03160000
+*   association.  If a TVBR vector is present, all target table         03170000
+*   columns (as defined in $NAVPARM) are defined in it.                 03180000
+*                                                                       03190000
+*   Other variables, error variables in particular, which are           03200000
+*   not $NAVPARM defined are also processed here.  The variable         03210000
+*   list associated with the current screen/set drives the              03220000
+*   scan.                                                               03230000
+*                                                                       03240000
+**<DOC-OFF>****************************************************         03250000
+                                                                        03260000
+SCRAPE   DS    0H                                                       03270000
+         ICM   R5,15,NVSTVAR      ASSOCIATED VARIABLE LIST              03280000
+         BZ    FIN_CPT            NORMAL COMPLETION IF N/A              03290000
+         USING NVVAR,R5           SYSVAR LIST                           03300000
+         ICM   R3,15,NVVCOUNT     NUMBER OF ASSOCIATED VARIABLES        03310000
+         BZ    FIN_CPT            NORMAL COMPLETION IF N/A              03320000
+         LA    R4,NVVENTRY        SYSVARS ARRAY ORIGIN                  03330000
+         USING NVVENTRY,R4        MAPPED                                03340000
+                                                                        03350000
+*--------------------------------------------------------------         03360000
+*   IDENTIFY ALL VARS NOT MANAGED BY TVBR VECTOR                        03370000
+*--------------------------------------------------------------         03380000
+                                                                        03390000
+SCRAPVAR DS    0H                                                       03400000
+         L     R2,NVVEPTR         LOCATE VARIABLE DEFINITION            03410000
+         USING SVARSECT,R2        MAPPED                                03420000
+         ST    R2,@SYSVAR         CURRENT VARIABLE                      03430000
+         XC    @RGNOFF,@RGNOFF                                          03440000
+                                                                        03450000
+         LR    R1,R2              R1 <== SYSVARIABLE ENTRY              03460000
+         BAS   R14,LOCCOLDF       LOCATE $NAVPARM COLUMN DEF            03470000
+         ST    R15,@NAVE          RETAIN ENTRY PTR OR ZERO              03480000
+         LTR   R15,R15            VARIABLE CONTRIBUTES TO TARGET TABLE? 03490000
+         BZ    SCRAPNCD           NO, SCRAPE IT DIRECTLY                03500000
+         TM    FLAGS,FTVBR        TVBR-ASSISTED SCRAPE?                 03510000
+         BO    SCRAPADV           BYPASS THIS VARIABLE IF SO            03520000
+                                                                        03530000
+SCRAPNCD DS    0H                 VARIABLE NOT IN TARGET TABLE          03540000
+         TM    SVAREGN,BF         ASSOCIATED WITH A REGION?             03550000
+         BNZ   SCRAPIMG           WINDOWED IMAGE GENERATION REQ         03560000
+         L     R1,PL.RUNSIMAG     PRESENTATION SPACE IMAGE              03570000
+         SR    R15,R15            INDICATE NO CONTAINER IMAGE           03580000
+         B     SCRAPGO            PERFORM SCRAPE                        03590000
+                                                                        03600000
+*--------------------------------------------------------------         03610000
+*   CONSTRUCT IMAGE HANDLE FOR WINDOWED VARIABLES                       03620000
+*--------------------------------------------------------------         03630000
+                                                                        03640000
+SCRAPIMG DS    0H                                                       03650000
+         CLC   REGNNAME,SVAREGN   REGION PREVIOUSLY MATERIALIZED?       03660000
+         BE    SCRAPNEW           NO NEED TO REDERIVE IF SO             03670000
+                                                                        03680000
+         LA    R0,SVAREGN         R0 <== REGION NAME AS PARM     185963 03690000
+         L     R1,PL.RUNSIMAG     R1 <== PRESENTATION SPACE IMAGE       03700000
+         BAS   R14,LOCRGNIN       LOCATE FIRST REGION INSTANCE          03710000
+         LTR   R15,R15            SUCCESS, RECENTRY RETURNED IN R1      03720000
+         BNZ   SCRAPADV           DONE WITH THIS VAR IF NOT             03730000
+                                                                        03740000
+         MVC   REGNNAME,SVAREGN   LOCAL COPY OF REGION NAME      185963 03750000
+                                                                        03760000
+         DROP  R2                 SYSVARIABLE                    185963 03770000
+                                                                        03780000
+         LR    R2,R1              REGION INSTANCE                       03790000
+         USING RECENTRY,R2        MAPPED                                03800000
+RS       USING RSMRY,RECRSMRY     RECTANGLE DESCRIPTOR IMBEDDED         03810000
+                                                                        03820000
+         L     R14,RS.RSMORG                                            03830000
+         L     R6,PL.RUNSIMAG                                           03840000
+         S     R14,NVIBUF@-NVIMAGE(,R6)                                 03850000
+         ST    R14,@RGNOFF                                              03860000
+                                                                        03870000
+         @CALL IRUNRECT,(*PL.RUNSIMAG,RS.RSMABSR,@IMAGE,REGNNAME),     X03880000
+               MF=(E,MFE_LIST)                                          03890000
+                                                                        03900000
+         B     *+4(R15)           ANALYZE COMPLETION                    03910000
+         B     SCRAPNEW           IMAGE RETURNED                        03920000
+         B     SCRAPAR            PARENT REGION REFERENCE               03930000
+         B     ERR_RECT           SERVICE ROUTINE FAILURE               03940000
+                                                                        03950000
+SCRAPAR  DS    0H                 VARIABLE RESIDES IN PRES SPACE RGN    03960000
+         L     R1,PL.RUNSIMAG     SHOULD NOT OCCUR, PRESENCE OF RGN     03970000
+         ST    R1,@IMAGE          POST PARENT AS CURRENT IMAGE   232478 03980000
+         OI    @IMAGE,X'80'       NOT FREEABLE                   232478 03990000
+         SR    R15,R15            INDICATE NO CONTAINER IMAGE           04000000
+         B     SCRAPGO            TESTED EXPLICITLY ABOVE               04010000
+                                                                        04020000
+SCRAPNEW DS    0H                 VARIABLE RESIDES IN RETURNED IMAGE    04030000
+         L     R1,@IMAGE          HANDLE TO WINDOW IMAGE                04040000
+         L     R15,PL.RUNSIMAG    CONTAINER IMAGE                       04050000
+         DROP  RS,R2              RSMRY, RECENTRY                       04060000
+                                                                        04070000
+*--------------------------------------------------------------         04080000
+*   SCRAPE VARIABLE ASSOCIATED WITH CURRENT IMAGE (R1)                  04090000
+*--------------------------------------------------------------         04100000
+                                                                        04110000
+SCRAPGO  DS    0H                 R15 <== CONTAINER IMAGE HANDLE        04120000
+         LR    R0,R1              IMAGE HANDLE                          04130000
+         L     R1,@SYSVAR         SYSVARIABLE ENTRY ADDR                04140000
+         L     R2,@NAVE           $NAVPARM ENTRY ADDR OR ZERO           04150000
+         STM   R15,R2,MFE_LIST    CONSTRUCT VPROC PLIST                 04160000
+                                                                        04170000
+         LA    R1,MFE_LIST                                              04180000
+         BAS   R14,VPROC          PROCESS THE VARIABLE                  04190000
+         CH    R15,=AL2(RC08)     TERMINATING ERROR?                    04200000
+         BL    SCRAPADV           ONWARD IF NOT                         04210000
+                                                                        04220000
+         L     R1,@SYSVAR         REFRESH SYSVAR AS ERROR ANALYSIS PARM 04230000
+         L     R0,@NAVE           $NAVPARM ENTRY ADDR IF IDENTIFIED     04240000
+         B     ERR_VAR            DOCUMENT VARIABLE RESOLUTION ERROR    04250000
+                                                                        04260000
+*--------------------------------------------------------------         04270000
+*   ADVANCE TO NEXT VARIABLE DEFINITION                                 04280000
+*--------------------------------------------------------------         04290000
+                                                                        04300000
+SCRAPADV DS    0H                                                       04310000
+         LA    R4,NVVENTLN(,R4)   ADVANCE TO NEXT VARIABLE              04320000
+         BCT   R3,SCRAPVAR        NEXT VARIABLE                         04330000
+                                                                        04340000
+         LA    R1,@IMAGE          CURRENT REGION IMAGE ANCHOR ADDR      04350000
+         BAS   R14,FSHRIMG        FREE RESIDUAL IMAGE                   04360000
+         DROP  R4,R5              NVVENTRY, NVVAR                       04370000
+                                                                        04380000
+         EJECT                                                          04390000
+**<DOC-ON>*****************************************************         04400000
+*                                                                       04410000
+*   Table selection against a (scrolling) repeating group               04420000
+*                                                                       04430000
+**<DOC-OFF>****************************************************         04440000
+                                                                        04450000
+         TM    FLAGS,FTVBR        TVBR-ASSISTED SCRAPE?                 04460000
+         BNO   FIN_CPT            DONE IF NOT                           04470000
+                                                                        04480000
+         ICM   R0,15,PL.RUNSTSEL  TABLE-SELECT?                         04490000
+         BZ    TSL_NA             ONWARD IF NOT                         04500000
+                                                                        04510000
+*--------------------------------------------------------------         04520000
+*   ENSURE RESULT SET AVAILABLE FOR TRIAL INSERTS                       04530000
+*--------------------------------------------------------------         04540000
+                                                                        04550000
+         ICM   R0,15,IXRTOKEN     RESULT SET CREATED                    04560000
+         BNZ   TSRESSET           DONE HERE IF SO                       04570000
+                                                                        04580000
+         LA    R1,$NAVPARM        R1 <== SQL / NAVIGATION LINKAGE BLOCK 04590000
+         @CALL IRUNRSCR,CTYPE=CVT INVOKE RESULT SET CREATE              04600000
+                                                                        04610000
+         LTR   R15,R15            RESULT SET CONSTRUCTED?               04620000
+         BNZ   ERR_RSCR           TERMINATING ERROR OTHERWISE           04630000
+                                                                        04640000
+TSRESSET DS    0H                                                       04650000
+                                                                        04660000
+*--------------------------------------------------------------         04670000
+*   DERIVE A SUBSET FILTER SARG (requires table and TBPSARG)            04680000
+*--------------------------------------------------------------         04690000
+                                                                        04700000
+         ICM   R0,15,IXRTSSA      TABLE-SELECT SARG PREVIOUSLY BUILT?   04710000
+         BNZ   TSLSARG            READY IF SO                           04720000
+                                                                        04730000
+         LA    R1,$NAVPARM        R1 <== NAVIGATION PARMS               04740000
+         @CALL IRUNTSSA,CTYPE=CVT CONSTRUCT AN APPROPRIATE SARG         04750000
+                                                                        04760000
+         LTR   R15,R15            SUCCESSFUL COMPLETION                 04770000
+         BNZ   ERR_TSSA           TERMINATING ERROR OTHERWISE           04780000
+         LTR   R0,R0              PREDETERMINED TRUTH VALUE?            04790000
+         BNZ   ERR_TSSA           INAFFECTIVE OPERATION IF SO           04800000
+                                                                        04810000
+TSLSARG  DS    0H                                                       04820000
+                                                                        04830000
+*--------------------------------------------------------------         04840000
+*   IDENTIFY REGION INSTANCES SATISFYING THE TABLE-SELECT SARG          04850000
+*--------------------------------------------------------------         04860000
+                                                                        04870000
+         L     R0,PL.RUNSIMAG     SCREEN IMAGE ON FIRST CALL            04880000
+         B     TSLSTDGO           FIRST TIME                            04890000
+                                                                        04900000
+TSLSTDNX DS    0H                 IDENTIFY NEXT VAR / RGN SET           04910000
+         L     R0,PL.RUNSIMAG     REPEAT CALLS INDICATED                04920000
+         O     R0,=X'80000000'    BY THIS FLAG                          04930000
+                                                                        04940000
+TSLSTDGO DS    0H                 SCAPE STANDARD IMAGE                  04950000
+         LR    R1,R0              NVIMAGE WITH SIGN FLAG                04960000
+         LA    R0,TVBIFSTD        STANDARD (3270 BUFFER) IMAGE          04970000
+         BAS   R14,IPROC          TILED VARIABLE INTERFACE              04980000
+         CH    R15,=AL2(RC04)     END OF DATA REACHED?                  04990000
+         BE    TSLSTDE            DONE HERE IF SO                       05000000
+                                                                        05010000
+         LTR   R1,R1              VARS PRESENT IN RGN INSTANCE SET?     05020000
+         BZ    TSLSTDNX           ADVANCE TO NEXT SET IF NOT            05030000
+                                                                        05040000
+**<DOC-ON>*****************************************************         05050000
+*                                                                       05060000
+*   Determine whether the variables associated with the current         05070000
+*   region instance set satisfy the table-select criteria               05080000
+*   expressed in the subset SARG built previously.  If so, the          05090000
+*   row added is deleted and the search terminates.  Otherwise,         05100000
+*   the scan continues till one matches or end of data is               05110000
+*   encountered, scrolling where defined.                               05120000
+*                                                                       05130000
+**<DOC-OFF>****************************************************         05140000
+                                                                        05150000
+         LA    R0,NVSTN           R0 <== BUILD ROW STN VARS ONLY        05160000
+         L     R1,IXRTSSA         R1 <== TABSET SUBSET FILTER SARG      05170000
+         BAS   R14,ROWADD         PERFORM SELECTION TEST                05180000
+                                                                        05190000
+         B     *+4(R15)           ANALYZE COMPLETION                    05200000
+         B     TSLMATCH              RC00 - PROVISIONAL ROW ACCEPTED    05210000
+         B     TSLSTDNX              RC04 - ROW SUPPRESSED, CONTINUE    05220000
+         B     ERR_ROWA              RC08 - TERMINATING BLDROW ERROR    05230000
+         B     ERR_ROWA              RC12 - FUTURE                      05240000
+                                                                        05250000
+*--------------------------------------------------------------         05260000
+*   END OF DATA ENCOUNTERED ON THIS SCREEN(SET)                         05270000
+*--------------------------------------------------------------         05280000
+                                                                        05290000
+TSLSTDE  DS    0H                 END OF DATA REACHED ON THIS IMAGE     05300000
+         O     R0,SCROLREQ        RETAIN AGGREGATE CONTINUATION ...     05310000
+         ST    R0,SCROLREQ        IN THE FORM OF A SCROLL REC           05320000
+         BZ    ERR_TSEL_MATCH     IF NO SCROLLING OPS REMAIN, ERROR     05330000
+         B     FIN_CPT            OPERATION COMPLETE                    05340000
+                                                                        05350000
+*--------------------------------------------------------------         05360000
+*   TABLE-SELECTED ENTRY IDENTIFIED IN CURRENT RGN INSTANCE SET         05370000
+*--------------------------------------------------------------         05380000
+                                                                        05390000
+TSLMATCH DS    0H                 R0 <== ROWID OF PROVISIONAL ROW       05400000
+         TBDELETE POS=CURRENT,                                         X05410000
+               TTOKEN=IXRTOKEN,                                        X05420000
+               MF=(E,MFE_LIST)                                          05430000
+                                                                        05440000
+         LTR   R15,R15            ROW BACKED OUT?                       05450000
+         BNZ   ABN_TBSV           SERIOUS ERROR IF NOT                  05460000
+         B     FIN_CPT                                                  05470000
+                                                                        05480000
+*--------------------------------------------------------------         05490000
+*   END OF DATA ENCOUNTERED ON THIS SCREEN(SET)                         05500000
+*--------------------------------------------------------------         05510000
+                                                                        05520000
+TSL_NA   DS    0H                                                       05530000
+                                                                        05540000
+         EJECT                                                          05550000
+**<DOC-ON>*****************************************************         05560000
+*                                                                       05570000
+*   Repeating region, windowed variable scraping                        05580000
+*                                                                       05590000
+*   If some subset of screen/set variables reside in region             05600000
+*   windows, ITVBRRUN will be invoked repeatedly to acquire             05610000
+*   the next group of windows/variables to process.                     05620000
+*                                                                       05630000
+*   Each region instance resides in either one of two mutually          05640000
+*   exclusive and separately maintained images: the 'standard'          05650000
+*   image and the 'wrap' image.  The standard image is the              05660000
+*   display image itself, less the wrap image.  The wrap image          05670000
+*   is an area consisting of a level0 or level1 non-repeating           05680000
+*   region, and all of its subregions that may spill (wrap)             05690000
+*   onto additional displays.  Separate requests to ITVBRRUN            05700000
+*   are made, via IPROC, for each image type that carries               05710000
+*   variables.                                                          05720000
+*                                                                       05730000
+*   The standard image is delivered to this routine in tiled,           05740000
+*   NVIMAGE format.  The wrap image is coerced into NVIMAGE             05750000
+*   format, tiled, etc. by the IRGNWR* family of routines.              05760000
+*                                                                       05770000
+*   ??? RESOLVE SIDE-BY-SIDE STD/WRAP RGN REPETITION ISSUES ???         05780000
+*                                                                       05790000
+**<DOC-OFF>****************************************************         05800000
+                                                                        05810000
+                                                                        05820000
+*--------------------------------------------------------------         05830000
+*   PROCESS IMAGE CONTAINING REPEATING VARIABLES                        05840000
+*--------------------------------------------------------------         05850000
+                                                                        05860000
+         L     R0,PL.RUNSIMAG     SCREEN IMAGE ON FIRST CALL            05870000
+         B     VBRSTDGO           FIRST TIME                            05880000
+                                                                        05890000
+VBRSTDNX DS    0H                 IDENTIFY NEXT VAR / RGN SET           05900000
+         L     R0,PL.RUNSIMAG     REPEAT CALLS INDICATED                05910000
+         O     R0,=X'80000000'    BY THIS FLAG                          05920000
+                                                                        05930000
+VBRSTDGO DS    0H                 SCAPE STANDARD IMAGE                  05940000
+         LR    R1,R0              NVIMAGE WITH SIGN FLAG                05950000
+         LA    R0,TVBIFSTD        STANDARD (3270 BUFFER) IMAGE          05960000
+         BAS   R14,IPROC          TILED VARIABLE INTERFACE              05970000
+         CH    R15,=AL2(RC04)     END OF DATA REACHED?                  05980000
+         BE    VBRSTDE            DONE HERE IF SO                       05990000
+                                                                        06000000
+         LTR   R1,R1              REPEATING VARS PRESENT IN IMAGE?      06010000
+         BZ    VBRSTDNX           NO INTERMEDIATE ROW ADD OTHERWISE     06020000
+                                                                        06030000
+***************************************************************         06040000
+*                                                                       06050000
+*   Compose and post a row if SELECT statement and RUN plan.            06060000
+*   Note that these tests (extracted from 1.0 ROWADD rtn) can           06070000
+*   probably be moved outside and above the loop, preventing            06080000
+*   unproductive navigation to the end of the screen(set).              06090000
+*   However, in the interest of minimizing change, it is left           06100000
+*   here to mimic the same behavior as in prior releases.               06110000
+*                                                                       06120000
+***************************************************************         06130000
+                                                                        06140000
+         ICM   R0,15,PL.RUNSDATA  DATA COLLECTION ACTIVE?               06150000
+         BZ    VBRADV             DONE IF NOT                           06160000
+         TM    IXRRSF,IXRR_REQ    RESULT SET RETURN REQUESTED?          06170000
+         BNO   VBRADV             NO, NOTHING TO DO                     06180000
+                                                                        06190000
+*--------------------------------------------------------------         06200000
+*   CREATE RESULT SET IF NOT PREVIOUSLY DONE                            06210000
+*--------------------------------------------------------------         06220000
+                                                                        06230000
+         ICM   R0,15,IXRTOKEN     RESULT SET CREATED                    06240000
+         BNZ   VBRRS              DONE HERE IF SO                       06250000
+                                                                        06260000
+         LA    R1,$NAVPARM        R1 <== SQL / NAVIGATION LINKAGE BLOCK 06270000
+         @CALL IRUNRSCR,CTYPE=CVT INVOKE RESULT SET CREATE              06280000
+                                                                        06290000
+         LTR   R15,R15            RESULT SET CONSTRUCTED?               06300000
+         BNZ   ERR_RSCR           TERMINATING ERROR OTHERWISE           06310000
+                                                                        06320000
+VBRRS    DS    0H                                                       06330000
+                                                                        06340000
+***************************************************************         06350000
+*                                                                       06360000
+*   Attempt to construct and post a result set row.  In any             06370000
+*   call not returning an error, indicate that a row post was           06380000
+*   attempted to prevent additional TBADDs during plan-end              06390000
+*   cleanup.                                                            06400000
+*                                                                       06410000
+***************************************************************         06420000
+                                                                        06430000
+         SR    R0,R0              R0 <== BUILD ROW USING ALL VARS       06440000
+         L     R1,IXRFSARG        R1 <== STD RESULT SET FILTER SARG     06450000
+         BAS   R14,ROWADD         CREATE A TABLE ROW                    06460000
+                                                                        06470000
+         B     *+4(R15)           ANALYZE COMPLETION                    06480000
+         B     VBRADDED              RC00 - ROW ADDED                   06490000
+         B     VBRADDED              RC04 - ROW SUPPRESSED              06500000
+         B     ERR_ROWA              RC08 - TERMINATING BLDROW ERROR    06510000
+         B     ERR_ROWA              RC12 - FUTURE                      06520000
+                                                                        06530000
+VBRADDED DS    0H                 CANDIDATE ROW CONSTRUCTED             06540000
+         OI    FLAGS,FROWADD      INDICATE TBADD PERFORMED / ATTEMPTED  06550000
+                                                                        06560000
+VBRADV   DS    0H                                                       06570000
+         B     VBRSTDNX           NEXT REGION INSTANCE SET              06580000
+                                                                        06590000
+*--------------------------------------------------------------         06600000
+*   END OF DATA ENCOUNTERED ON THIS SCREEN(SET)                         06610000
+*--------------------------------------------------------------         06620000
+                                                                        06630000
+VBRSTDE  DS    0H                 END OF DATA REACHED ON THIS IMAGE     06640000
+         O     R0,SCROLREQ        RETAIN AGGREGATE CONTINUATION ...     06650000
+         ST    R0,SCROLREQ        IN THE FORM OF A SCROLL REC           06660000
+                                                                        06670000
+         EJECT                                                          06680000
+**<DOC-ON>*****************************************************         06690000
+*                                                                       06700000
+*   Wrap region imaging interfaces                                      06710000
+*                                                                       06720000
+*   Test for wrap imaging.  Scan the region instances in the            06730000
+*   standard image for the first (and only) entry that points           06740000
+*   the region definition entry (rgntry) marked in the region           06750000
+*   tree root as the 'wrap region owner'.                               06760000
+*                                                                       06770000
+**<DOC-OFF>****************************************************         06780000
+                                                                        06790000
+         L     R6,@TVBR           TVBR ORIGIN                           06800000
+         USING TVBRVEC,R6         PREFIX MAPPED                         06810000
+         TM    TVBITYPS,TVBIFWRP  WRAP IMAGING REQUESTED?               06820000
+         BNO   WRPFIN             DONE IF NOT                           06830000
+                                                                        06840000
+         L     R3,PL.RUNSIMAG     HANDLE TO STANDARD IMAGE              06850000
+         USING NVIMAGE,R3         IMAGE HANDLE FORMAT                   06860000
+         L     R4,NVIRGNTR        STANDARD IMAGE REGION TREE            06870000
+         USING RGNTREE,R4         MAPPED                                06880000
+         ICM   R0,15,RGTWMAIN     WRAP REGION OWNER                     06890000
+         BZ    WRPFIN             UNDEFINED, SOMEHOW                    06900000
+                                                                        06910000
+         L     R2,NVIRECRT        REGION INSTANCE TREE OF STD IMAGE     06920000
+         USING RECENTRY,R2        ENTRY ADDRESSABILITY                  06930000
+                                                                        06940000
+WRPLOCAT DS    0H                                                       06950000
+         C     R0,RECRN           WRAP REGION OWNER INSTANCE?           06960000
+         BE    WRPFOUND           SEARCH ENDS IF SO                     06970000
+         ICM   R2,15,RECNEXT      LEVEL BY LEVEL SEARCH                 06980000
+         BNZ   WRPLOCAT           TRY AGAIN                             06990000
+                                                                        07000000
+WRPFOUND DS    0H                                                       07010000
+         LTR   R2,R2              WRAP REGION OWNER LOCATED?            07020000
+         BZ    WRPFIN             DONE IF NOT                           07030000
+                                                                        07040000
+         MVC   WRAPNAME,STATNAME  SCREEN NAME FOR DIAGNOSTICS           07050000
+         L     R15,RGTWMAIN       WRAP REGION OWNER DEFINITION          07060000
+         ICM   R14,15,RGNSRGN-RGNTRY(R15)   SYSRGN                      07070000
+         BZ    *+10                         NO ASSOCIATION              07080000
+         MVC   WRAPNAME,SRNAME-SYSRGN(R14)  IDENTIFY WRAP REGION OWNER  07090000
+         DROP  R3,R4              NVIMAGE, RGNTREE                      07100000
+                                                                        07110000
+*--------------------------------------------------------------         07120000
+*   CREATE COMPOSITE IMAGE FROM ACCUMULATED WRAP REGIONS                07130000
+*--------------------------------------------------------------         07140000
+                                                                        07150000
+         LA    R5,TVBIWRAP        WRAP REGION IMAGING CONTROLS          07160000
+         USING TVIMAGE,R5         QUICK PEEK INSIDE                     07170000
+         ICM   R4,15,TVIRGNTR     WRAP IMAGING REGION TREE              07180000
+         BZ    WRPFIN             EXPECTED                              07190000
+                                                                        07200000
+         @CALL IRGNWRAP,(TVBWRI,(R4),RECENTRY,#MAXSIZE,#SEGMAX),       X07210000
+               CTYPE=CVT,                                              X07220000
+               MF=(E,MFE_LIST)                                          07230000
+                                                                        07240000
+         LTR   R15,R15            SUCCESSFUL ASSIMILATION OF NEW RGN?   07250000
+         BNZ   ERR_WRAP           WRAP IMAGING ERROR ANALYSIS           07260000
+         ST    R0,WRAPNVI         RETAIN WRAP COMPOSITE NVIMAGE         07270000
+         LR    R2,R1              RGN INSTANCE TREE (TILING) OF WRAPIMG 07280000
+         DROP  R5                 TVIMAGE                               07290000
+                                                                        07300000
+**<DOC-ON>*****************************************************         07310000
+*                                                                       07320000
+*   If EOS has been recognized on the standard image, all               07330000
+*   regions materialized in the wrap image will be scraped.             07340000
+*   Otherwise, we can scape only those images that are stable           07350000
+*   as identified by IRGNWRRS.                                          07360000
+*                                                                       07370000
+**<DOC-OFF>****************************************************         07380000
+                                                                        07390000
+         ICM   R0,15,SCROLREQ     SCROLLING OPERATION SCHEDULED?        07400000
+         BZ    WRPSCRAP           IF NOT, SCRAPE ALL RGN INSTANCES      07410000
+                                                                        07420000
+         L     R1,TVBWRI          R1 <== WRAP IMAGING VECTOR            07430000
+         LA    R0,RECENTRY        R0 <== WRAP REGION TILING ORIGIN      07440000
+         @CALL IRGNWRRS,CTYPE=CVT PERFORM RGN INSTANCE SELECTION        07450000
+                                                                        07460000
+         ST    R0,RS_LIMIT        RGN INSTANCE TERM LINE # LIMIT        07470000
+         ST    R1,RS_SEG          PROCABLE/DISCARDABLE SEGMENTS         07480000
+         LTR   R1,R1              ANY ELIGIBLE SEGMENTS                 07490000
+         BNP   WRPFIN             DONE HERE IF NOT                      07500000
+         DROP  R2                 RECENTRY                              07510000
+                                                                        07520000
+***************************************************************         07530000
+*                                                                       07540000
+*   Scrape all eligible regions residing in the wrap image              07550000
+*                                                                       07560000
+***************************************************************         07570000
+                                                                        07580000
+WRPSCRAP DS    0H                                                       07590000
+         L     R0,WRAPNVI         COMPOSITE WRAP IMAGE ON FIRST CALL    07600000
+         B     WRPIMGGO           FIRST TIME                            07610000
+                                                                        07620000
+WRPIMGNX DS    0H                 IDENTIFY NEXT VAR / RGN SET           07630000
+         L     R0,WRAPNVI         REPEAT CALLS INDICATED                07640000
+         O     R0,=X'80000000'    BY FLAG                               07650000
+                                                                        07660000
+WRPIMGGO DS    0H                 SCAPE STANDARD IMAGE                  07670000
+         LR    R1,R0              NVIMAGE OR ZERO                       07680000
+         LA    R0,TVBIFWRP        COMPOSITE WRAP IMAGE BUFFER           07690000
+         BAS   R14,IPROC          TILED VARIABLE INTERFACE              07700000
+         CH    R15,=AL2(RC04)     END OF DATA REACHED?                  07710000
+         BE    WRPIMGE            DONE HERE IF SO                       07720000
+                                                                        07730000
+         LTR   R1,R1              REPEATING VARS PRESENT IN IMAGE?      07740000
+         BZ    WRPIMGNX           NO INTERMEDIATE ROW ADD OTHERWISE     07750000
+                                                                        07760000
+***************************************************************         07770000
+*                                                                       07780000
+*   Compose and post a row if SELECT statement and RUN plan.            07790000
+*   Note that these tests (extracted from 1.0 ROWADD rtn) can           07800000
+*   probably be moved outside and above the loop, preventing            07810000
+*   unproductive navigation to the end of the screen(set).              07820000
+*   However, in the interest of minimizing change, it is left           07830000
+*   here to mimic the same behavior as in prior releases.               07840000
+*                                                                       07850000
+***************************************************************         07860000
+                                                                        07870000
+         ICM   R0,15,PL.RUNSDATA  DATA COLLECTION ACTIVE?               07880000
+         BZ    WRPADV             DONE IF NOT                           07890000
+         TM    IXRRSF,IXRR_REQ    RESULT SET RETURN REQUESTED?          07900000
+         BNO   WRPADV             NO, NOTHING TO DO                     07910000
+                                                                        07920000
+*--------------------------------------------------------------         07930000
+*   CREATE RESULT SET IF NOT PREVIOUSLY DONE                            07940000
+*--------------------------------------------------------------         07950000
+                                                                        07960000
+         ICM   R0,15,IXRTOKEN     RESULT SET CREATED                    07970000
+         BNZ   WRPRS              DONE HERE IF SO                       07980000
+                                                                        07990000
+         LA    R1,$NAVPARM        R1 <== SQL / NAVIGATION LINKAGE BLOCK 08000000
+         @CALL IRUNRSCR,CTYPE=CVT INVOKE RESULT SET CREATE              08010000
+                                                                        08020000
+         LTR   R15,R15            RESULT SET CONSTRUCTED?               08030000
+         BNZ   ERR_RSCR           TERMINATING ERROR OTHERWISE           08040000
+                                                                        08050000
+WRPRS    DS    0H                                                       08060000
+                                                                        08070000
+***************************************************************         08080000
+*                                                                       08090000
+*   Attempt to construct and post a result set row.  In any             08100000
+*   call not returning an error, indicate that a row post was           08110000
+*   attempted to prevent additional TBADDs during plan-end              08120000
+*   cleanup.                                                            08130000
+*                                                                       08140000
+***************************************************************         08150000
+                                                                        08160000
+         SR    R0,R0              R0 <== BUILD ROW USING ALL VARS       08170000
+         L     R1,IXRFSARG        R1 <== STD RESULT SET FILTER SARG     08180000
+         BAS   R14,ROWADD         CREATE A TABLE ROW                    08190000
+                                                                        08200000
+         B     *+4(R15)           ANALYZE COMPLETION                    08210000
+         B     WRPADDED              RC00 - ROW ADDED                   08220000
+         B     WRPADDED              RC04 - ROW SUPPRESSED              08230000
+         B     ERR_ROWA              RC08 - TERMINATING BLDROW ERROR    08240000
+         B     ERR_ROWA              RC12 - FUTURE                      08250000
+                                                                        08260000
+WRPADDED DS    0H                 CANDIDATE ROW CONSTRUCTED             08270000
+         OI    FLAGS,FROWADD      INDICATE TBADD PERFORMED / ATTEMPTED  08280000
+                                                                        08290000
+WRPADV   DS    0H                                                       08300000
+         B     WRPIMGNX           TRY AGAIN IF SO                       08310000
+                                                                        08320000
+*--------------------------------------------------------------         08330000
+*   END OF DATA ENCOUNTERED ON THIS SCREEN(SET)                         08340000
+*--------------------------------------------------------------         08350000
+                                                                        08360000
+WRPIMGE  DS    0H                 END OF DATA REACHED ON THIS IMAGE     08370000
+         O     R0,SCROLREQ        RETAIN AGGREGATE CONTINUATION ...     08380000
+         ST    R0,SCROLREQ        IN THE FORM OF A SCROLL REC           08390000
+                                                                        08400000
+***************************************************************         08410000
+*                                                                       08420000
+*   Remove scraped segments from wrap image                             08430000
+*                                                                       08440000
+***************************************************************         08450000
+                                                                        08460000
+         @CALL IRGNWRDE,(TVBWRI,*RS_SEG),                              X08470000
+               CTYPE=CVT,                                              X08480000
+               MF=(E,MFE_LIST)                                          08490000
+                                                                        08500000
+         LTR   R15,R15            SUCCESSFUL COMPLETION?                08510000
+         BNZ   ERR_WRAP           STORAGE MANAGEMENT FAILURE OTHERWISE  08520000
+                                                                        08530000
+WRPFIN   DS    0H                                                       08540000
+                                                                        08550000
+         EJECT                                                          08560000
+***************************************************************         08570000
+*                                                                       08580000
+*   Processing of the image has completed without error.                08590000
+*   First, perform the final row add if we have reached a               08600000
+*   terminating state in the plan and no row adds have been             08610000
+*   performed so far.                                                   08620000
+*                                                                       08630000
+*   Then, update the variable pool by promoting replacement             08640000
+*   column/variable values pending against the current STN              08650000
+*   entry.                                                              08660000
+*                                                                       08670000
+***************************************************************         08680000
+                                                                        08690000
+FIN_CPT  DS    0H                 PROCESSING COMPLETED WITHOUT ERROR    08700000
+         TM    FLAGS,FROWADD      ROW ADDED IN NORMAL COURSE?           08710000
+         BO    FIN_CONT           DONT REPEAT IF SO                     08720000
+         ICM   R0,15,PL.RUNSTERM  TERMINAL STATE?                       08730000
+         BZ    FIN_CONT           DONE IF NOT                           08740000
+                                                                        08750000
+         TM    IXRRSF,IXRR_REQ    RESULT SET RETURN REQUESTED?          08760000
+         BNO   FIN_CONT           NO, NOTHING TO DO                     08770000
+                                                                        08780000
+         ICM   R0,15,IXRVPUTS     VARIABLE MODIFICATION SINCE LAST ADD  08790000
+         BZ    FIN_CONT           DONE IF NOT                           08800000
+                                                                        08810000
+*--------------------------------------------------------------         08820000
+*   CREATE RESULT SET IF NOT PREVIOUSLY DONE                            08830000
+*--------------------------------------------------------------         08840000
+                                                                        08850000
+         ICM   R0,15,IXRTOKEN     RESULT SET CREATED                    08860000
+         BNZ   FINRS              DONE HERE IF SO                       08870000
+                                                                        08880000
+         LA    R1,$NAVPARM        R1 <== SQL / NAVIGATION LINKAGE BLOCK 08890000
+         @CALL IRUNRSCR,CTYPE=CVT INVOKE RESULT SET CREATE              08900000
+                                                                        08910000
+         LTR   R15,R15            RESULT SET CONSTRUCTED?               08920000
+         BNZ   ERR_RSCR           TERMINATING ERROR OTHERWISE           08930000
+                                                                        08940000
+FINRS    DS    0H                                                       08950000
+                                                                        08960000
+*--------------------------------------------------------------         08970000
+*   POST FINAL/ONLY ROW TO RESULT SET                                   08980000
+*--------------------------------------------------------------         08990000
+                                                                        09000000
+         SR    R0,R0              R0 <== BUILD COMPLETE RESULT SET ROW  09010000
+         L     R1,IXRFSARG        R1 <== STD RESULT SET FILTER SARG     09020000
+         BAS   R14,ROWADD         POST ROW                              09030000
+                                                                        09040000
+*--------------------------------------------------------------         09050000
+*   Promote replacement col/var values pending against this STN         09060000
+*--------------------------------------------------------------         09070000
+                                                                        09080000
+FIN_CONT DS    0H                                                       09090000
+         ICM   R0,15,PL.RUNSDATA  DATA COLLECTION ACTIVE?       R210104 09100000
+         BZ    RETNORM            DONE IF NOT                   R210104 09110000
+                                                                        09120000
+         ICM   R0,15,SCROLREQ     LEAVING CURRENT STATE?                09130000
+         BNZ   RETNORM            DEFER VARIABLE PROMOTION IF NOT       09140000
+                                                                        09150000
+         @CALL IRUNRVAR,($NAVPARM,NVSTN),                              X09160000
+               CTYPE=CVT,                                              X09170000
+               MF=(E,MFE_LIST)                                          09180000
+                                                                        09190000
+         EJECT                                                          09200000
+***************************************************************         09210000
+*                                                                       09220000
+*   Normal and abnormal completions                                     09230000
+*                                                                       09240000
+***************************************************************         09250000
+                                                                        09260000
+RETNORM  DS    0H                                                       09270000
+         LA    R15,RC00           INDICATE SUCCESS                      09280000
+         L     R0,SCROLREQ        RSN CODE IS SCROLL RECOMMENDATION     09290000
+         SR    R1,R1              INFO CODE NOT DEFINED                 09300000
+         STM   R15,R1,STATREGS    COMPLETION REGS                       09310000
+         B     CLEANUP                                                  09320000
+                                                                        09330000
+*--------------------------------------------------------------         09340000
+*   UNABLE TO CONSTRUCT TABLE ROW                                       09350000
+*--------------------------------------------------------------         09360000
+                                                                        09370000
+ERR_ROWA DS    0H                 TABLE ROW CONSTRUCTION ERROR          09380000
+         STM   R15,R0,SERVSTAT    SERVICE ROUTINE STATUS                09390000
+         CH    R15,=H'2'          APPLICATION-LEVEL ERROR (ERR_NULL)?   09400000
+         BE    SQL_NULL           APPL LEVEL ERROR IF SO                09410000
+         MVC   FAILFUNC,=CL20'RESULT SET ADD'                           09420000
+         B     ERR_SERV           SERVICE ROUTINE FAILURE               09430000
+                                                                        09440000
+SQL_NULL DS    0H                 NO VAR FOUND FOR NON-NULL COLUMN      09450000
+         LR    R1,R15             BLDROW CODE AS INFO CODE              09460000
+         LA    R15,RC08           APPLICATION / SQL ERROR               09470000
+         LA    R0,RSN04           NON-NULL VARIABLE NOT RESOLVED        09480000
+         LA    R2,151             DIAGNOSTIC MESSAGE                    09490000
+         B     ERRCOMN            FAIL                                  09500000
+                                                                        09510000
+*--------------------------------------------------------------         09520000
+*   VARIABLE RESOLUTION FAILURE - R1=SYSVAR, R0=IXRCOLDF OR 0           09530000
+*--------------------------------------------------------------         09540000
+                                                                        09550000
+ERR_VAR  DS    0H                 VARIABLE MANAGEMENT ERROR             09560000
+         STM   R15,R0,SERVSTAT    SERVICE ROUTINE STATUS                09570000
+         LTR   R5,R0              NAVPARM ENTRY PROVIDED?               09580000
+         BNZ   ERR_VAR2           USE IF SO                             09590000
+                                                                        09600000
+         L     R5,IXREPOFF        OFFSET TO COLUMN/VARIABLE ENTRIES     09610000
+         LA    R5,$NAVPARM(R5)    CONVERT OFFSET TO ADDRESS             09620000
+         USING IXRCOLDF,R5        PREPARE FOR SCAN                      09630000
+         LH    R4,IXRNVARS        NUMBER OF ENTRIES                     09640000
+                                                                        09650000
+ERR_VAR1 DS    0H                                                       09660000
+         C     R1,IXR@RVAR        MATCHING SYSVAR?                      09670000
+         BE    ERR_VAR2           DONE IF SO                            09680000
+         LA    R5,IXRCDLEN(,R5)   ELSE ADVANCE TO NEXT ENTRY            09690000
+         BCT   R4,ERR_VAR1        TRY ALL ENTRIES                       09700000
+         B     ERR_VAR3           NOT AVAILABLE                         09710000
+                                                                        09720000
+ERR_VAR2 DS    0H                                                       09730000
+         ST    R5,IXR@FALV        IDENTIFY FAILING VARIABLE             09740000
+         MVC   IXRCDRET,SERVRETC+2                                      09750000
+         MVC   IXRCDRSN,SERVRSNC+2                                      09760000
+                                                                        09770000
+ERR_VAR3 DS    0H                                                       09780000
+         B     ERR_SERV           FAILFUNC SET BY SERVICE REQUESTOR     09790000
+         DROP  R5                 $NAVPARM ENTRY                        09800000
+                                                                        09810000
+*--------------------------------------------------------------         09820000
+*   WRAP IMAGE MANAGEMENT / PROCESSING FAILURE                          09830000
+*--------------------------------------------------------------         09840000
+                                                                        09850000
+ERR_WRAP DS    0H                 WRAP (SPANNING) REGION MGMT ERROR     09860000
+         STM   R15,R0,SERVSTAT    SERVICE ROUTINE STATUS                09870000
+         MVC   FAILFUNC,=CL20'SPANNING REGION MGMT'                     09880000
+                                                                        09890000
+         LA    R14,WRAPERRS(R15)  RETCODE/MSGID CONVERSION ARRAY        09900000
+         ICM   R2,15,0(R14)       CONVERT RETCODE TO MSG ID             09910000
+         BNP   ERRWRAPX           INVALID/UNKNOWN RETCODE               09920000
+                                                                        09930000
+         B     *+4(R15)           SOME RETCODES REQUIRE RSNCODE ANAL    09940000
+         B     ERRWRAPX              RC00 - DOES NOT APPLY              09950000
+         B     ERRWRAPX              RC04 - RESERVED                    09960000
+         B     ERRWRAPX              RC08 - UNAMBIG RGN REJECT          09970000
+         B     ERRWRAPX              RC12 - UNAMBIG TILING ERROR        09980000
+         B     ERRWRC16              RC16 - TEST REASON CODE            09990000
+         B     ERRWRAPX              RC20 - RESERVED                    10000000
+         B     ABN_STG               RC24 - STORAGE NOT AVAIL           10010000
+                                                                        10020000
+ERRWRC16 DS    0H                                                       10030000
+         CH    R0,=AL2(RC04)      WRAP BUFFER MAX EXCEEDED?             10040000
+         BNE   ERRW1608           SKIP IF NOT                           10050000
+         L     R1,#MAXSIZE        WRAP IMAGE BUFFER SIZE LIMIT          10060000
+         SRL   R1,10              EXPRESS IN KBYTES                     10070000
+         ST    R1,FWORD           SAVE MSG TOKEN                        10080000
+         LA    R3,172             SELECT ERROR MSG                      10090000
+         B     ERRWMX                                                   10100000
+                                                                        10110000
+ERRW1608 DS    0H                                                       10120000
+         CH    R0,=AL2(RC08)      WRAP BUFFER SEGMENT COUNT EXCEEDED?   10130000
+         BNE   ERRWRAPX           SKIP IF NOT                           10140000
+         MVC   FWORD,#SEGMAX                                            10150000
+         LA    R3,173             SELECT ERROR MSG                      10160000
+                                                                        10170000
+ERRWMX   DS    0H                 PROVIDE ERROR DESCRIPTION             10180000
+         $MSG  (R3),FIELDS=(FWORD)                                      10190000
+                                                                        10200000
+ERRWRAPX DS    0H                                                       10210000
+         $MSG  150,FIELDS=(FAILFUNC,SERVRETC,SERVRSNC,SERVINFO)         10220000
+                                                                        10230000
+         MVC   COMNNAME,WRAPNAME  IDENTIFY WRAP OWNER REGION            10240000
+         LA    R15,RC20           INDICATE WRAP IMAGING FAILURE         10250000
+         L     R0,SERVRETC        SERVICE RTN RETCODE AS REASON         10260000
+         L     R1,SERVRSNC        SERVICE RTN RSNCODE AS INFO CODE      10270000
+         B     ERRCOMN            COMMON ERROR MSGING, ETC.             10280000
+                                                                        10290000
+*--------------------------------------------------------------         10300000
+*   Result set creation error, if RC < 0 similar to TSSA error          10310000
+*--------------------------------------------------------------         10320000
+                                                                        10330000
+ERR_RSCR DS    0H                                                       10340000
+         STM   R15,R1,SERVSTAT    IRUNRSCR ROUTINE COMPLTION INFO       10350000
+         LTR   R15,R15            IDENTIFY TYPE OF ERROR                10360000
+         BM    ERR_TSSA_NSARG     IF NO COLUMN DEFINITIONS POSTED, ITS  10370000
+*                                 BECAUSE THE SARG PROVIDED NO TABLE    10380000
+*                                 SELECTION LOGIC. THIS SHOULD NOT      10390000
+*                                 OCCUR.                                10400000
+                                                                        10410000
+         LR    R1,R0              SERVICE RTN RSNCODE AS INFOCODE       10420000
+         LR    R0,R15             SERVICE RTN RETCODE AS RSNCODE        10430000
+         LA    R15,RC16           RESULT SET CREATION ERROR             10440000
+         STM   R15,R1,STATREGS    PRESERVE COMPLETION STATUS            10450000
+         B     CLEANUP            TERMINATE                             10460000
+                                                                        10470000
+*--------------------------------------------------------------         10480000
+*   Error building or interpreting table-select SARG (IRUNTSSA)         10490000
+*--------------------------------------------------------------         10500000
+                                                                        10510000
+ERR_TSSA DS    0H                 R15 RETCODE, R0 RSNCODE               10520000
+         STM   R15,R1,SERVSTAT    IRUNTSSA ROUTINE COMPLETION INFO      10530000
+                                                                        10540000
+         B     *+4(R15)           ANALYZE RETURN CODE                   10550000
+         B     ERR_TSSA_TV           RC00 - PREDETERMINED TRUTH VALUE   10560000
+         B     ERR_TSSA_SERV         RC04 - PROGRAMMING ERROR           10570000
+         B     ERR_TSSA_NSARG        RC08 - NO PARTITIONABLE SARG       10580000
+         B     ERR_TSSA_SERV         RC12 - PROGRAMMING ERROR           10590000
+         B     ERR_TSSA_SERV         RC16 - TBSAOPT FAILURE             10600000
+         B     ERR_TSSA_SERV         RC20 - RESERVED                    10610000
+         B     ABN_STG               RC24 - STORAGE MGMT FAILURE        10620000
+                                                                        10630000
+ERR_TSSA_NSARG DS   0H            NO PARTITIONABLE SARG                 10640000
+         LA    R2,202             SUPPORTING DOC                        10650000
+         B     ERR_TSSA_COMN      YING FORM OF ERROR                    10660000
+                                                                        10670000
+ERR_TSSA_TV    DS   0H            PREDETERMINED TRUTH VALUE             10680000
+         LA    R2,201             MAKES TABLE SELECT MEANINGLESS        10690000
+         MVC   COMNNAME,BLANKS    PREPARE FOR TEXT INSERTION            10700000
+         MVC   COMNNAME(L'LTRUE),LTRUE                                  10710000
+         CL    R0,=A(1)           SUBSET SARG IS CATAGORICALLY TRUE?    10720000
+         BE    ERR_TSSA_COMN      YANG FORM OF ERROR                    10730000
+         MVC   COMNNAME(L'LFALSE),LFALSE                                10740000
+                                                                        10750000
+ERR_TSSA_COMN  DS   0H            COMMON ERROR MSG PROLOG               10760000
+         $MSG  200                TABLE SELECT STRATEGY FAILURE         10770000
+                                                                        10780000
+         LA    R15,RC04           NAVIGATION DECISION ERROR             10790000
+         LA    R0,RSN04           CANNOT FORM TABLE SELECT STRATEGY     10800000
+         L     R1,SERVRETC        IRUNTSSA RETURN CODE AS INFO CODE     10810000
+         B     ERRCOMN            COMMON DIAGNOSTICS                    10820000
+                                                                        10830000
+*--------------------------------------------------------------         10840000
+*   generic service routine failure                                     10850000
+*--------------------------------------------------------------         10860000
+                                                                        10870000
+ERR_TSSA_SERV  DS   0H            IRUNTSSA SERVICE ROUTINE FAILURE      10880000
+         MVC   FAILFUNC,=CL20'TAB SELECT SEARCHARG'                     10890000
+         B     ERR_SERV                                                 10900000
+                                                                        10910000
+ERR_TBLD DS    0H                 VARIABLE / REGION ANALYSIS INIT       10920000
+         STM   R15,R0,SERVSTAT    SERVICE ROUTINE STATUS                10930000
+         MVC   FAILFUNC,=CL20'REGION ANALYSIS'                          10940000
+         B     ERR_SERV                                                 10950000
+                                                                        10960000
+ERR_RECT DS    0H                 REGION RECTANGLE EXTRACT FAILURE      10970000
+         STM   R15,R0,SERVSTAT    SERVICE ROUTINE STATUS                10980000
+         MVC   FAILFUNC,=CL20'REGION EXTRACT'                           10990000
+         B     ERR_SERV                                                 11000000
+                                                                        11010000
+ERR_TVBR DS    0H                 VARIABLE / REGION PROCESSING          11020000
+         STM   R15,R0,SERVSTAT    SERVICE ROUTINE STATUS                11030000
+         CH    R15,=AL2(RC24)     STORAGE MANAGEMENT FAILURE            11040000
+         BE    ABN_STG            TERMINATE IF SO                       11050000
+         MVC   FAILFUNC,=CL20'REGION PROCESSING'                        11060000
+         B     ERR_SERV                                                 11070000
+                                                                        11080000
+***************************************************************         11090000
+*                                                                       11100000
+*   General diagnistic for service routine failure                      11110000
+*                                                                       11120000
+***************************************************************         11130000
+                                                                        11140000
+ERR_SERV DS    0H                 SERVICE ROUTINE FAILURES              11150000
+         $MSG  150,FIELDS=(FAILFUNC,SERVRETC,SERVRSNC,SERVINFO)         11160000
+                                                                        11170000
+         LA    R15,RC12           INDICATE SERVICE FAILURE              11180000
+         L     R0,SERVRETC        SERVICE RTN RETCODE AS REASON         11190000
+         L     R1,SERVRSNC        SERVICE RTN RSNCODE AS INFO CODE      11200000
+         SR    R2,R2              NO ADDITIONAL DOCUMENTATION           11210000
+         B     ERRCOMN                                                  11220000
+                                                                        11230000
+***************************************************************         11240000
+*                                                                       11250000
+*   Table select SARG does not match any screen(set) entry.             11260000
+*   It cannot be determined at this (deep) level whether this           11270000
+*   is a normal (expected or tolerated) event or whether a              11280000
+*   failure will be reported by the caller.  For this reason,           11290000
+*   the standard failure diagnostic messages are suppressed.            11300000
+*                                                                       11310000
+***************************************************************         11320000
+                                                                        11330000
+ERR_TSEL_MATCH DS   0H                                                  11340000
+         LA    R15,RC00           NORMAL COMPLETION                     11350000
+         LA    R0,RSN04           INDICATE PLAN TO TERMINATE            11360000
+         LNR   R0,R0              VIA NEGATIVE REASON                   11370000
+         SR    R1,R1              INFO CODE NOT DEFINED                 11380000
+         STM   R15,R1,STATREGS    PRESERVE COMPLETION STATUS            11390000
+         B     CLEANUP            DONE                                  11400000
+                                                                        11410000
+***************************************************************         11420000
+*                                                                       11430000
+*   Common error handling - supplemental doc via msg in R2              11440000
+*                                                                       11450000
+***************************************************************         11460000
+                                                                        11470000
+ERRCOMN  DS    0H                                                       11480000
+         STM   R15,R1,STATREGS    PRESERVE COMPLETION STATUS            11490000
+         LTR   R2,R2              ADDITIONAL MSG RQMTS?                 11500000
+         BZ    ERRCOMN2           SKIP IF NOT                           11510000
+                                                                        11520000
+         $MSG  (R2),FIELDS=(COMNNAME,FWORD)                             11530000
+                                                                        11540000
+ERRCOMN2 DS    0H                                                       11550000
+         $MSG  160,FIELDS=(STATNAME,RETC,RSNC,INFOC)                    11560000
+                                                                        11570000
+         EJECT                                                          11580000
+**<DOC-ON>*****************************************************         11590000
+*                                                                       11600000
+*   Prepare for termination, cleanup residual storage, etc.             11610000
+*                                                                       11620000
+*   The TVBR vector and associated wrap imaging vector (WRIVEC)         11630000
+*   are released if any terminating errors are encountered, or          11640000
+*   if a plan continuation will leave the current screen set (a         11650000
+*   transition other than a scroll request).                            11660000
+*                                                                       11670000
+**<DOC-OFF>****************************************************         11680000
+                                                                        11690000
+CLEANUP  DS    0H                                                       11700000
+         ICM   R1,15,IXR@TVBR     TVBR ALLOCATED?                       11710000
+         BZ    CTVBR              SKIP IF NOT                           11720000
+         OC    RETC,RETC          NORMAL COMPLETION?                    11730000
+         BNZ   CTVBRGO            RELEASE TVBR IF NOT                   11740000
+         OC    RSNC,RSNC          SCROLL REQUESTED?                     11750000
+         BNZ   CTVBR              RETAIN TVBRVEC IF SO                  11760000
+                                                                        11770000
+CTVBRGO  DS    0H                 R1 <== TVBR VECTOR                    11780000
+         @CALL ITVBRDEL,CTYPE=CVT DELETE TVBR VECTOR                    11790000
+                                                                        11800000
+         XC    IXR@TVBR,IXR@TVBR  CLEAR ANCHOR                          11810000
+                                                                        11820000
+CTVBR    DS    0H                                                       11830000
+         LA    R1,@IMAGE          CURRENT REGION IMAGE ANCHOR ADDR      11840000
+         BAS   R14,FSHRIMG        FINAL RELEASE OF REGION IMAGE         11850000
+                                                                        11860000
+*--------------------------------------------------------------         11870000
+*   DISCHARGE TABLE-SELECT SEARCH ARG IF NO LONGER NEEDED               11880000
+*--------------------------------------------------------------         11890000
+                                                                        11900000
+         ICM   R1,15,IXRTSSA      TABLE-SELECT SARG ALLOCATED?          11910000
+         BZ    CTSSAFIN           DONE HERE IF NOT                      11920000
+                                                                        11930000
+         ICM   R15,15,RETC        SUCCESSFUL COMPLETION?                11940000
+         BNZ   CTSSARG            TERMINATION CLEANUP IF NOT            11950000
+         ICM   R0,15,RSNC         SCROLLING TABLE-SELECT CONTINUES?     11960000
+         BNZ   CTSSAFIN           SKIP IF SO                            11970000
+                                                                        11980000
+CTSSARG  DS    0H                 R1 <== TABLE SELECT SARG              11990000
+         @CALL IRUNTSSD,CTYPE=CVT                                       12000000
+                                                                        12010000
+         SR    R0,R0              PREPARE FOR CLEAR                     12020000
+         ST    R0,IXRTSSA         TABLE-SELECT SARG RELEASED            12030000
+                                                                        12040000
+CTSSAFIN DS    0H                                                       12050000
+                                                                        12060000
+*--------------------------------------------------------------         12070000
+*   RETURN TO REQUESTOR                                                 12080000
+*--------------------------------------------------------------         12090000
+                                                                        12100000
+         L     R15,RETC           RETURN CODE                           12110000
+         L     R0,RSNC            REASON CODE                           12120000
+         L     R1,INFOC           INFO CODE                             12130000
+                                                                        12140000
+         #EXIT ,                  RETURN                                12150000
+         DROP  R7                 NVSTN                                 12160000
+                                                                        12170000
+         EJECT                                                          12180000
+**<DOC-ON>*****************************************************         12190000
+*                                                                       12200000
+* ROUTINE: IPROC - Windowed image processing                            12210000
+*                                                                       12220000
+* DESCRIPTION:                                                          12230000
+*                                                                       12240000
+*    This routine is used to initially scrape or rescrape the           12250000
+*    image provided.  Rescrape dialogs are used only when               12260000
+*    repeating regions are defined, allowing the caller to              12270000
+*    populate the result set after each productive call.                12280000
+*                                                                       12290000
+*    An image type code is given, allowing this routine and             12300000
+*    its service routines to determine which areas of the               12310000
+*    given image are scheduled for processing.                          12320000
+*                                                                       12330000
+*    Region windows are created and anchored in @IMAGE. This            12340000
+*    image is refreshed only as needed. The requestor must              12350000
+*    free any residual data areas anchored in @IMAGE upon               12360000
+*    exit.                                                              12370000
+*                                                                       12380000
+*    VPROC is called for each eligible variable to extract              12390000
+*    it from the current image and post it in the variable              12400000
+*    pool.                                                              12410000
+*                                                                       12420000
+*                                                                       12430000
+* NOTES:                                                                12440000
+*                                                                       12450000
+*    Exit is made directly to error handlers without return             12460000
+*    to the caller if serious errors are encountered in                 12470000
+*    service routines.                                                  12480000
+*                                                                       12490000
+*                                                                       12500000
+* ON ENTRY:                                                             12510000
+*                                                                       12520000
+*    R1 - addr of NVIMAGE, negative on repeat/rescrape calls            12530000
+*    R0 - image type code (ref: TVBITYPS)                               12540000
+*                                                                       12550000
+*                                                                       12560000
+* ON EXIT:                                                              12570000
+*                                                                       12580000
+*    R15 contains one of the following return codes.                    12590000
+*                                                                       12600000
+*        RC00 - image processing completed                              12610000
+*                                                                       12620000
+*        RC04 - all variables extracted from image instance             12630000
+*                                                                       12640000
+*               R0 contains one of the following reason codes           12650000
+*                                                                       12660000
+*               RSN00: end of image / scroll set                        12670000
+*               RSN04: scroll down                                      12680000
+*                                                                       12690000
+*    R1  contains a non-zero value if some variable lies in             12700000
+*        a repeating region.  This information can be used by           12710000
+*        the requestor to determine the appropriate time to             12720000
+*        create a result set row.                                       12730000
+*                                                                       12740000
+**<DOC-OFF>****************************************************         12750000
+                                                                        12760000
+IPROC    DS    0H                                                       12770000
+         STM   R0,R15,REGSAVEX    SAVE REQUESTORS REGS                  12780000
+         ST    R1,IPNVIMG         RETAIN IMAGE HANDLE FOR LATER USE     12790000
+         ST    R0,IPITYPE         RETAIN IMAGE TYPE CODE                12800000
+                                                                        12810000
+         MVI   IPFLAGS,0          RESET CONTROL FLAGS                   12820000
+                                                                        12830000
+*--------------------------------------------------------------         12840000
+*   IDENTIFY FIRST/NEXT SCRAPABLE REGION SET                            12850000
+*--------------------------------------------------------------         12860000
+                                                                        12870000
+         ICM   R2,15,IPNVIMG      REPEAT-SCRAPE REQUEST?                12880000
+         BNM   *+6                SKIP IF NEW IMAGE PROVIDED            12890000
+         SR    R2,R2              INDICATE RESCRAPE                     12900000
+                                                                        12910000
+         @CALL ITVBRRUN,((R2),$NAVPARM,*IPITYPE),                      X12920000
+               CTYPE=CVT,         ANALYZE REQUIREMENTS                 X12930000
+               MF=(E,MFE_LIST)                                          12940000
+                                                                        12950000
+         ST    R15,IPTVBRC        COMPLETION CODE                       12960000
+         ST    R0,IPTVBRSN        CONTINUATION / SCROLL CODE            12970000
+         CH    R15,=AL2(RC04)     TEST COMPLTION STATUS                 12980000
+         BE    IPRFIN             END OF DATA                           12990000
+         BH    ERR_TVBR           SEVERE ERROR ENCOUNTERED              13000000
+                                                                        13010000
+*--------------------------------------------------------------         13020000
+*   CLEAR RESIDUAL VALUES FROM VARIABLE POOL                            13030000
+*--------------------------------------------------------------         13040000
+                                                                        13050000
+         L     R6,@TVBR           TVBR ORIGIN                           13060000
+         USING TVBRVEC,R6         PREFIX                                13070000
+                                                                        13080000
+         @CALL INAVCLRV,(TVBRVEC,*PL.RUNSVPOL,*@USRSTG),               X13090000
+               CTYPE=CVT,                                              X13100000
+               MF=(E,MFE_LIST)                                          13110000
+                                                                        13120000
+***************************************************************         13130000
+*                                                                       13140000
+*   Identify eligible tvbr/navparm region and variable                  13150000
+*                                                                       13160000
+***************************************************************         13170000
+                                                                        13180000
+         LA    R5,TVVAR           VAR/RGN ENTRY ORIGIN                  13190000
+         USING TVVAR,R5           VAR/RGN ENTRY FORMAT                  13200000
+         L     R4,@TVBRVAR        NUMBER OF MANAGED VARIABLES           13210000
+                                                                        13220000
+IPRGNTOP DS    0H                                                       13230000
+         XC    @RGNOFF,@RGNOFF                                          13240000
+         CLC   TVVITYPE,IPITYPE+3 ENTRY MEMBER OF CURRENT IMAGE?        13250000
+         BNE   IPRADV             SKIP IF NOT                           13260000
+                                                                        13270000
+         CLI   TVVORPT,TRUE       REPEATING RGN (DEFINITION, NOT INST)  13280000
+         BNE   *+8                SKIP IF NOT                           13290000
+         OI    IPFLAGS,IPFRPTRS   ELSE INDICATE REPETITION IN PATH      13300000
+                                                                        13310000
+         ICM   R0,15,TVVCOLDF     ASSOCIATED WITH $NAVPARM ENTRY?       13320000
+         BZ    IPRADV             SKIP IF NON-VAR ENTRY                 13330000
+         TM    TVVFLAGS,TVVF$CHG  NEW REGION PRESENTED?                 13340000
+         BNO   IPRADV             SKIP IF PREVIOUSLY SCRAPED            13350000
+                                                                        13360000
+*--------------------------------------------------------------         13370000
+*   REPLACE CURRENT REGION IMAGE WITH NEW REGION                        13380000
+*--------------------------------------------------------------         13390000
+                                                                        13400000
+         XC    REGNNAME,REGNNAME  ASSUME UNNAMED REGION                 13410000
+         L     R15,TVVRGNTY       REGION DEFINITION ENTRY               13420000
+         USING RGNTRY,R15         TEMP ADDRESSABILITY                   13430000
+         ICM   R1,15,RGNSRGN      ADDR OF SYSRGN                        13440000
+         BZ    *+10               UNNAMED, PRES SPACE REGION            13450000
+         MVC   REGNNAME,SRNAME-SYSRGN(R1)   EXTRACT REGION NAME         13460000
+                                                                        13470000
+         ICM   R2,15,TVVRECNT     REGION INSTANCE AVAILABLE?            13480000
+         BZ    IPRADV             DONE HERE IF NOT                      13490000
+         USING RECENTRY,R2        REGION INSTANCE FORMAT                13500000
+RS       USING RSMRY,RECRSMRY     RECTANGLE IDENTIFIER                  13510000
+                                                                        13520000
+         L     R14,RS.RSMORG                                            13530000
+         L     R3,IPNVIMG                                               13540000
+         S     R14,NVIBUF@-NVIMAGE(,R3)                                 13550000
+         ST    R14,@RGNOFF                                              13560000
+                                                                        13570000
+         @CALL IRUNRECT,(*IPNVIMG,RS.RSMABSR,@IMAGE,REGNNAME),         X13580000
+               CTYPE=STD,                                              X13590000
+               MF=(E,MFE_LIST)                                          13600000
+                                                                        13610000
+         B     *+4(R15)           ANALYZE COMPLETION                    13620000
+         B     IPNEWIMG           IMAGE RETURNED                        13630000
+         B     IPPARENT           PARENT REGION REFERENCE               13640000
+         B     ERR_RECT           SERVICE ROUTINE FAILURE               13650000
+                                                                        13660000
+IPPARENT DS    0H                 VARIABLE RESIDES IN PRES SPACE RGN    13670000
+         MVC   @IMAGE,IPNVIMG     POST PARENT AS CURRENT IMAGE          13680000
+         OI    @IMAGE,X'80'       NOT FREEABLE                          13690000
+         SR    R15,R15            INDICATE NO CONTAINER IMAGE           13700000
+         B     IPRXTRCT                                                 13710000
+                                                                        13720000
+IPNEWIMG DS    0H                 VARIABLE RESIDES IN RETURNED RGN      13730000
+         L     R15,IPNVIMG        CONTAINER IMAGE OR ZERO               13740000
+         DROP  RS,R2              RSMRY, RECENTRY                       13750000
+                                                                        13760000
+*--------------------------------------------------------------         13770000
+*   PROCESS (NEXT) VARIABLE RESIDING IN THE REGION WINDOW               13780000
+*--------------------------------------------------------------         13790000
+                                                                        13800000
+IPRXTRCT DS    0H                 R15 <== CONTAINER IMAGE OR ZERO       13810000
+         L     R0,@IMAGE          IMAGE HANDLE                          13820000
+         L     R2,TVVCOLDF        CORRESPONDING $NAVPARM ENTRY          13830000
+         L     R1,IXR@RVAR-IXRCOLDF(,R2)  SYSVARIABLE ENTRY ADDR        13840000
+         STM   R15,R2,MFE_LIST    CONSTRUCT VPROC PLIST                 13850000
+                                                                        13860000
+         LA    R1,MFE_LIST                                              13870000
+         BAS   R14,VPROC          PROCESS THE VARIABLE                  13880000
+         CH    R15,=AL2(RC08)     TERMINATING ERROR?                    13890000
+         BNL   IPRVFAIL           ABANDON IF SO                         13900000
+                                                                        13910000
+         OI    TVVFLAGS,TVVF$PRC  INDICATE SCRAPE COMPLETED             13920000
+         OI    IPFLAGS,IPFSCRAP   INDICATE SCRAPING OCCURRED            13930000
+         B     IPRADV             CONTINUE                              13940000
+                                                                        13950000
+IPRVFAIL DS    0H                 DOCUMENT VARIABLE SCRAPE FAILURE      13960000
+         L     R1,IXR@RVAR-IXRCOLDF(,R2)                                13970000
+         LR    R0,R2              $NAVPARM ENTRY ADDRESS                13980000
+         B     ERR_VAR            DOCUMENT VARIABLE RESOLUTION ERROR    13990000
+                                                                        14000000
+*--------------------------------------------------------------         14010000
+*   ADVANCE TO NEXT VAR/RGN, RETURN TO CALLER AT END                    14020000
+*--------------------------------------------------------------         14030000
+                                                                        14040000
+IPRADV   DS    0H                                                       14050000
+         TM    TVVSTAT,TVVS$END   END OF VAR/RGN ENTRIES?               14060000
+         BO    IPRFIN             READY FOR ROW ADD IF SO               14070000
+         LA    R5,TVVAR+TVVLN     ADVANCE TO NEXT ENTRY                 14080000
+         B     IPRGNTOP           AGAIN                                 14090000
+         DROP  R5,R6              TVVAR, TVBRVEC                        14100000
+                                                                        14110000
+*--------------------------------------------------------------         14120000
+*   IMAGE PROCESSING PASS COMPLETE, RETURN TO REQUESTOR                 14130000
+*--------------------------------------------------------------         14140000
+                                                                        14150000
+IPRFIN   DS    0H                                                       14160000
+         L     R15,IPTVBRC        RETURN CODE                           14170000
+         L     R0,IPTVBRSN        REASON CODE                           14180000
+                                                                        14190000
+         SR    R1,R1              REPETITION INDICATOR RESET            14200000
+         TM    IPFLAGS,IPFRPTRS   REPEATING RGNS/VARS?                  14210000
+         BNO   IPRRET             SKIP IF NOT                           14220000
+         TM    IPFLAGS,IPFSCRAP   INDICATE SCRAPING OCCURRED            14230000
+         BNO   IPRRET                                                   14240000
+         LA    R1,TRUE            DOCUMENT REPETITION                   14250000
+                                                                        14260000
+IPRRET   DS    0H                                                       14270000
+         LM    R2,R14,REGSAVEX+8  RESTORE CALLERS REGS                  14280000
+         BR    R14                RETURN                                14290000
+                                                                        14300000
+         EJECT                                                          14310000
+**<DOC-ON>*****************************************************         14320000
+*                                                                       14330000
+* ROUTINE: VPROC - Scrape output variable                               14340000
+*                                                                       14350000
+* DESCRIPTION:                                                          14360000
+*                                                                       14370000
+*    This routine is used to scrape the value of an output              14380000
+*    variable associated with a given $NAVPARM entry, or if no          14390000
+*    entry is provided, associated with the given SYSVARIABLE           14400000
+*    definition.  Once acquired, the value is entered in the            14410000
+*    variable pool where it is classified as either a standard          14420000
+*    variable or an 'error' variable.                                   14430000
+*                                                                       14440000
+*                                                                       14450000
+* ON ENTRY:                                                             14460000
+*                                                                       14470000
+*    R1  contains the address of a parameter list constructed           14480000
+*        as follows:                                                    14490000
+*                                                                       14500000
+*        +00 - addr of container image or zero   (NVIMAGE)              14510000
+*        +04 - addr of current image descriptor  (NVIMAGE)              14520000
+*        +08 - addr of SYSVARIABLE               (SVARSECT)             14530000
+*        +12 - addr of $NAVPARM entry or zero    (IXRCOLDF)             14540000
+*                                                                       14550000
+**<DOC-OFF>****************************************************         14560000
+                                                                        14570000
+VPROC    DS    0H                                                       14580000
+         STM   R0,R15,REGSAVE     PRESERVE MAINLINE REGS                14590000
+         LA    R15,RC00           ASSUME SUCCESS                        14600000
+                                                                        14610000
+         L     R6,8(,R1)          ACCEPT SYSVARIABLE                    14620000
+         USING SVARSECT,R6        MAPPED                                14630000
+                                                                        14640000
+         L     R5,4(,R1)          ACCEPT IMAGE DESCRIPTOR               14650000
+         USING NVIMAGE,R5         MAPPED                                14660000
+                                                                        14670000
+         L     R7,0(,R1)          ACCEPT CONTAINER IMAGE OR ZERO        14680000
+                                                                        14690000
+         ICM   R2,15,12(R1)       $NAVPARM COLUMN DEF AVAILABLE         14700000
+         BZ    NO_COLDF           NO, USE DEFAULT FROM SYSVAR           14710000
+         USING IXRCOLDF,R2        ADDRESSABILITY                        14720000
+                                                                        14730000
+         TM    IXRSTAT1,IXRS1INP  INPUT VARIABLE USAGE?                 14740000
+         BO    VPROCRET           YES, INELIGIBLE                       14750000
+         B     LOCVAR             NO, CONTINUE WITH SCRAPE FOR OUTPUT   14760000
+         DROP  R2                 IXRCOLDF                              14770000
+                                                                        14780000
+NO_COLDF DS    0H                                                       14790000
+         CLI   SVARUTYP,SVAR$OUT  OUTPUT VARIABLE?                      14800000
+         BNE   VPROCRET           INELIGIBLE OTHERWISE                  14810000
+                                                                        14820000
+*--------------------------------------------------------------         14830000
+*   LOCATE THE VARIABLE                                                 14840000
+*--------------------------------------------------------------         14850000
+                                                                        14860000
+LOCVAR   DS    0H                                                       14870000
+         MVC   FAILFUNC,=CL20'VAR RESOLUTION'                           14880000
+                                                                        14890000
+         @CALL IVARRES,(NVIMAGE,SVARSECT,DWORD),                       X14900000
+               CTYPE=CVT,MF=(E,MFE_LIST)                                14910000
+                                                                        14920000
+         LTR   R15,R15            VARIABLE AVAILABLE                    14930000
+         BZ    VPROCRET           DONE IF NOT                           14940000
+                                                                        14950000
+*--------------------------------------------------------------         14960000
+*   ACCOUNT FOR WRAP, TRUNCATE WRAPPING VARIABLES                       14970000
+*--------------------------------------------------------------         14980000
+                                                                        14990000
+         LM    R3,R4,DWORD        FETCH STRING ORIGIN AND LENGTH        15000000
+                                                                        15010000
+         CLI   SVARUTYP,SVAR$ATT  ATTRIBUTE VARIABLE                    15020000
+         BNE   IMGBGO                                                   15030000
+                                                                        15040000
+         LTR   R7,R7              ANY CONTAINTER IMAGE ?                15050000
+         BNZ   *+6                                                      15060000
+         LR    R7,R5              NO CONTAINER, SAME AS CURRENT         15070000
+                                                                        15080000
+         LA    R1,MFE_LIST        ADDR OF PARMLIST                      15090000
+         ST    R5,0(R1)           CURRENT IMAGE                         15100000
+         ST    R7,4(R1)           THE CONTAINER IMAGE                   15110000
+         ST    R3,8(R1)           ABS. LOCATION IN CHILD IMAGE          15120000
+         BAS   R14,LOCATTR        LOCATE POSITION IN CONTAINER IMAGE    15130000
+         LR    R3,R1              R1-> POSITION RETURNED                15140000
+         LA    R4,1               LENGTH = 1 FOR ATTRIBUTE VAR.         15150000
+         B     VPROVPUT           READY FOR VPUT                        15160000
+                                                                        15170000
+IMGBGO   DS    0H                                                       15180000
+         L     R15,NVIBUF@        IMAGE BUFFER ORIGIN                   15190000
+         A     R15,NVIBUFL        PLUS IMAGE BUFFER LENGTH              15200000
+         CR    R3,R15             REMAP VARIABLE TO BUFFER ORIGIN?      15210000
+         BL    *+8                SKIP IF NOT                           15220000
+                                                                        15230000
+         L     R3,NVIBUF@         RESET VAR ORIGIN TO BUFFER ORIGIN     15240000
+         LA    R0,0(R3,R4)        END OF SEGMENT ADDRESS                15250000
+         SR    R0,R15             LENGTH OF WRAP SEGMENT IF R0 > 0      15260000
+         BNP   *+6                SKIP IF NO WRAP                       15270000
+         SR    R4,R0              ELSE DISCARD THE WRAP SEGMENT         15280000
+                                                                        15290000
+*--------------------------------------------------------------         15300000
+*   ADD VARIABLE TO VARIABLE POOL                                       15310000
+*--------------------------------------------------------------         15320000
+                                                                        15330000
+VPROVPUT DS    0H                                                       15340000
+         MVC   FAILFUNC,=CL20'VARPOOL MGMT'                             15350000
+                                                                        15360000
+         LA    R2,0               ASSUME STANDARD VARIABLE              15370000
+         TM    SVARFLG1,SVARF1ER  SQL ERROR DATA?                       15380000
+         BZ    *+8                NO, CONTINUE                          15390000
+         LA    R2,C'E'            CLASS=ERROR DATA                      15400000
+                                                                        15410000
+         $VARMGR VPUT,                                                 X15420000
+               SCOPE=$VARMGR_SCOPE_USER,                               X15430000
+               CLASS=(R2),                                             X15440000
+               VARNAME=SVARNAME,                                       X15450000
+               VARIABLE=((R3),(R4)),                                   X15460000
+               POOL=*PL.RUNSVPOL,                                      X15470000
+               MF=(E,$VMLIST)                                           15480000
+                                                                        15490000
+         L     R1,IXRVPUTS        NUMBER OF VPUTS                       15500000
+         LA    R1,1(,R1)          BUMPED                                15510000
+         ST    R1,IXRVPUTS                                              15520000
+                                                                        15530000
+         LA    R4,$VMLIST         ADDRESS OF VARMGR PLIST               15540000
+         USING VMLIST,R4          TEMP ADDRESSABILITY                   15550000
+                                                                        15560000
+         CLI   SVARUTYP,SVAR$ATT  ATTRIBUTE VARIABLE                    15570000
+         BE    VPROCRET                                                 15580000
+                                                                        15590000
+         $TRL  *VMLVAR,*TRTABADD,                                      X15600000
+               LENGTH=*VMLVARLN                                         15610000
+                                                                        15620000
+*--------------------------------------------------------------         15630000
+*   RETURN TO MAINLINE                                                  15640000
+*--------------------------------------------------------------         15650000
+                                                                        15660000
+VPROCRET DS    0H                                                       15670000
+         LM    R1,R14,REGSAVE+4   RESTORE MAINLINE REGS                 15680000
+         LTR   R15,R15            REFLECT COMPLETION STATUS VIA CC      15690000
+         BR    R14                RETURN                                15700000
+         DROP  R4,R5,R6           VMLIST, NVIMAGE, SVARSECT             15710000
+                                                                        15720000
+         EJECT                                                          15730000
+***************************************************************         15740000
+*                                                                       15750000
+* ROUTINE: ROWADD - Build a table row and TBADD to result set           15760000
+*                                                                       15770000
+* DESCRIPTION:                                                          15780000
+*                                                                       15790000
+*    This routine will construct a VDB table row and add it to          15800000
+*    the SQL result set via TBADD.  It is possible for the              15810000
+*    TBADD to fail because the row does not conform to the              15820000
+*    requirements imposed by the filter SARG provided on entry          15830000
+*    or a UNIQUE table index.  Either condition is normal and           15840000
+*    not a cause of error.                                              15850000
+*                                                                       15860000
+*    If any other table services error is encountered, control          15870000
+*    passes directly to the table services error exit to                15880000
+*    maintain the diagnostic info returned in R15-R1.                   15890000
+*                                                                       15900000
+*                                                                       15910000
+* ON ENTRY:                                                             15920000
+*                                                                       15930000
+*    R0 - addr of row select STN entry or zero         (NVSTN)          15940000
+*    R1 - addr of table filter SARG or zero if N/A     (FILTER=)        15950000
+*                                                                       15960000
+*    $NAVPARM is addressable                                            15970000
+*                                                                       15980000
+*                                                                       15990000
+* ON EXIT:                                                              16000000
+*                                                                       16010000
+*    R15 contains one of the following return codes                     16020000
+*                                                                       16030000
+*        RC00 - row constructed and TBADDed                             16040000
+*                                                                       16050000
+*               R0 contains the result set ROWID of the new row         16060000
+*                                                                       16070000
+*        RC04 - row suppressed, R0 contains a reason code               16080000
+*                                                                       16090000
+*               RSN04 - NULL values have been encountered for           16100000
+*                       one or more variables on the designated         16110000
+*                       variable STN(s)                                 16120000
+*                                                                       16130000
+*               RSN08 - TBADD rejected the row because it does          16140000
+*                       not conform to the given filter SARG            16150000
+*                       or conflicts with a table index                 16160000
+*                                                                       16170000
+*        RC08 - BLDROW failure                                          16180000
+*                                                                       16190000
+*               R0 contains the failing BLDROW return code              16200000
+*                                                                       16210000
+***************************************************************         16220000
+                                                                        16230000
+ROWADD   DS    0H                                                       16240000
+         STM   R0,R15,REGSAVE     PRESERVE MAINLINE REGS                16250000
+                                                                        16260000
+         LR    R4,R0              R2 <== GIVEN STN ADDR OR ZERO         16270000
+         LR    R5,R1              R1 <== FILTER SARG OR ZERO            16280000
+                                                                        16290000
+         ICM   R0,15,IXRVPUTS     VARIABLE UPDATES SINCE LAST TBADD     16300000
+                                                                        16310000
+         XC    IXRVPUTS,IXRVPUTS  RESET VPUTS SINCE TBADD               16320000
+                                                                        16330000
+*--------------------------------------------------------------         16340000
+*   CONSTRUCT TABLE ROW                                                 16350000
+*--------------------------------------------------------------         16360000
+                                                                        16370000
+         L     R2,PL.RUNSVPOL     ADDRESS OF VARIABLE POOL              16380000
+                                                                        16390000
+         @CALL IBLDROW,($NAVPARM,(R2),(R4)),                           x16400000
+               CTYPE=CVT,                                              x16410000
+               MF=(E,MFE_LIST)                                          16420000
+                                                                        16430000
+         CH    R15,=AL2(CRC00)    ACCEPTABLE COMPLETION?                16440000
+         BE    ROWCONT            ROW BUILT WITHOUT ERROR               16450000
+                                                                        16460000
+         CH    R15,=AL2(CRC02)    NULL VARIABLES ENCOUNTERED?           16470000
+         BE    ROW_BLDW           ROW IS INCOMPLETE, SUPPRESS TBADD     16480000
+         B     ROW_BLDE           PROPOGATE BLDROW ERROR                16490000
+                                                                        16500000
+*--------------------------------------------------------------         16510000
+*   ADD ROW TO RESULT SET TABLE                                         16520000
+*--------------------------------------------------------------         16530000
+                                                                        16540000
+ROWCONT  DS    0H                                                       16550000
+         TBADD *IXROW@BF,         ADD TABLE ROW                        X16560000
+               FILTER=(R5),       ROW FILTER OR ZERO                   X16570000
+               TTOKEN=IXRTOKEN,                                        X16580000
+               MF=(E,MFE_LIST)                                          16590000
+                                                                        16600000
+         LTR   R15,R15            ROW ACCEPTED?                         16610000
+         BZ    ROW_CPT            DONE IF SO, ROWID IN R0               16620000
+                                                                        16630000
+         CH    R15,=AL2(RC08)     ADD SUCCESSFUL OR SUPPRESSED PER REQ  16640000
+         BNH   ROW_REJ            ROW REJECTED BY FILTER OR INDEX       16650000
+         B     ABN_TBSV           TERMINATING ERROR OTHERWISE           16660000
+                                                                        16670000
+*--------------------------------------------------------------         16680000
+*   RETURN COMPLETION STATUS TO CALLER                                  16690000
+*--------------------------------------------------------------         16700000
+                                                                        16710000
+ROW_CPT  DS    0H                 R0 <== ROWID OR ZERO                  16720000
+         LA    R15,RC00           INDICATE SUCCESS                      16730000
+         B     ROW_ARET           DONE                                  16740000
+                                                                        16750000
+ROW_BLDW DS    0H                 INCOMPLETE ROW                        16760000
+         LA    R15,RC04           WARNING SEVERITY                      16770000
+         LA    R0,RSN04           BLDROW IS RESPONSIBLE                 16780000
+         B     ROW_ARET                                                 16790000
+                                                                        16800000
+ROW_REJ  DS    0H                 ROW REJECTED BY TBADD                 16810000
+         LA    R15,RC04           WARNING SEVERITY                      16820000
+         LA    R0,RSN08           TABLE SERVICES IS RESPONSIBLE         16830000
+         B     ROW_ARET                                                 16840000
+                                                                        16850000
+ROW_BLDE DS    0H                 BLDROW FAILURE                        16860000
+         LR    R0,R15             FAILING RETCODE                       16870000
+         LA    R15,RC08           ERROR SEVERITY                        16880000
+                                                                        16890000
+ROW_ARET DS    0H                                                       16900000
+         LM    R2,R14,REGSAVE+8   RESTORE MAINLINE REGS                 16910000
+         LTR   R15,R15            REFLECT COMPLETION STATUS VIA CC      16920000
+         BR    R14                RETURN                                16930000
+                                                                        16940000
+         EJECT                                                          16950000
+***************************************************************         16960000
+*                                                                       16970000
+* ROUTINE: LOCCOLDF - Locate $NAVPARM column definition for var         16980000
+*                                                                       16990000
+* ON ENTRY:                                                             17000000
+*                                                                       17010000
+*    R1 - address of SYSVARIABLE                                        17020000
+*                                                                       17030000
+* ON EXIT:                                                              17040000
+*                                                                       17050000
+*    R15  address of IXRCOLDF entry or zero                             17060000
+*                                                                       17070000
+***************************************************************         17080000
+                                                                        17090000
+LOCCOLDF DS    0H                                                       17100000
+         STM   R0,R15,REGSAVE     SAVE CALLER'S REGISTERS               17110000
+                                                                        17120000
+         LR    R6,R1              ADDRESS OF SYSVAR                     17130000
+VAR      USING SVARSECT,R6        ESTABLISH ADDRESSABILITY              17140000
+                                                                        17150000
+         LH    R3,IXRNVARS        GET COUNT OF COLS IN TABLE            17160000
+         L     R15,IXREPOFF       OFFSET TO VARIABLE SECTION            17170000
+         LA    R15,$NAVPARM(R15)  ADDRESS OF FIRST COL ENTRY            17180000
+         USING IXRCOLDF,R15                                             17190000
+                                                                        17200000
+COLCHECK DS    0H                                                       17210000
+         L     R2,IXR@RVAR        COLUMN VARIABLE                       17220000
+COL      USING SVARSECT,R2        ESTABLISH ADDRESSABILITY              17230000
+                                                                        17240000
+         CLC   VAR.SVARNAME,COL.SVARNAME  VARIABLE NAME MATCH           17250000
+         BNE   COLNEXT            NO, CONTINUE                          17260000
+         CLC   VAR.SVARSNAM,COL.SVARSNAM  SCREEN NAME MATCH             17270000
+         BE    LOCOLRET           YES, RETURN                           17280000
+                                                                        17290000
+COLNEXT  DS    0H                                                       17300000
+         LA    R15,IXRCDLEN(,R15) ADDRESS OF NEXT COLUMN                17310000
+         BCT   R3,COLCHECK        PROCESS NEXT COLUMN                   17320000
+         SR    R15,R15            NO COLUMN AVAILABLE                   17330000
+                                                                        17340000
+LOCOLRET DS    0H                                                       17350000
+         LM    R0,R14,REGSAVE     RESTORE CALLER'S REGISTERS            17360000
+         BR    R14                RETURN                                17370000
+         DROP  VAR,COL,R15        SVARSECT, IXRCOLDF                    17380000
+                                                                        17390000
+         EJECT                                                          17400000
+***************************************************************         17410000
+*                                                                       17420000
+* ROUTINE: LOCRGNIN - Locate region instance                            17430000
+*                                                                       17440000
+* DESCRIPTION:                                                          17450000
+*                                                                       17460000
+*    LOCRGNIN is used to locate the first region instance               17470000
+*    (RECENTRY) of a named region.  The tiling tree of the              17480000
+*    image provided is searched for an instance associated              17490000
+*    with a region definition (RGNTRY) of the same name.                17500000
+*                                                                       17510000
+*                                                                       17520000
+* ON ENTRY:                                                             17530000
+*                                                                       17540000
+*    R0 - region name                                                   17550000
+*    R1 - image handle (NVIMAGE)                                        17560000
+*                                                                       17570000
+*                                                                       17580000
+* ON EXIT:                                                              17590000
+*                                                                       17600000
+*    R15 contains one of the following return codes; the                17610000
+*        condition code is set accordingly.                             17620000
+*                                                                       17630000
+*        RC00 - instance (RECENTRY) found and returned in R1            17640000
+*        RC04 - no such region instance                                 17650000
+*        RC08 - no such region definition                               17660000
+*                                                                       17670000
+***************************************************************         17680000
+                                                                        17690000
+LOCRGNIN DS    0H                                                       17700000
+         STM   R0,R15,REGSAVEX    SAVE MAINLINE REGS                    17710000
+         LR    R5,R1              IMAGE HANDLE                          17720000
+         USING NVIMAGE,R5                                               17730000
+         LR    R2,R0              REGION NAME PTR                       17740000
+                                                                        17750000
+         ICM   R3,15,NVIRGNTR     LOCATE REGION TREE                    17760000
+         BZ    LOCRNDEF                                                 17770000
+         LA    R3,RGTROOT-RGNTREE(,R3)                                  17780000
+         USING RGNTRY,R3                                                17790000
+                                                                        17800000
+*--------------------------------------------------------------         17810000
+*   LOCATE RGNTRY BY MATCHING REGION NAME                               17820000
+*--------------------------------------------------------------         17830000
+                                                                        17840000
+LOCRGNTY DS    0H                                                       17850000
+         ICM   R1,15,RGNSRGN      ASSOCIATED SYSREGION ENTRY?           17860000
+         BZ    LOCRGADV           SKIP IF NOT AVAIL                     17870000
+         USING SYSRGN,R1          TEMP SYSREGION ADDRESSABILITY         17880000
+         CLC   SRNAME,0(R2)       MATCHING REGION NAME?                 17890000
+         BE    LOCRGP2            FOUND IF SO                           17900000
+                                                                        17910000
+LOCRGADV DS    0H                                                       17920000
+         ICM   R3,15,RGNNEXT      TRY NEXT REGION                       17930000
+         BNZ   LOCRGNTY           AGAIN                                 17940000
+         B     LOCRNDEF           FAIL                                  17950000
+         DROP  R1                 SYSRGN                                17960000
+                                                                        17970000
+*--------------------------------------------------------------         17980000
+*   LOCATE FIRST INSTANCE (RECENTRY) OF THAT REGION                     17990000
+*--------------------------------------------------------------         18000000
+                                                                        18010000
+LOCRGP2  DS    0H                                                       18020000
+         ICM   R1,15,NVIRECRT     R1 <== RECENTRY TREE ORIGIN           18030000
+         BZ    LOCRNDEF                                                 18040000
+         LA    R0,RGNTRY          R0 <== REGION DEFINITION              18050000
+         BAS   R14,RISCAN         SEARCH FOR MATCHING INSTANCE          18060000
+         LTR   R15,R15            MATCH INDICATED BY RC00?              18070000
+         BNZ   LOCRNFND           WARN IF NOT                           18080000
+         B     LOCREXIT           DONE                                  18090000
+                                                                        18100000
+*--------------------------------------------------------------         18110000
+*   RETURN RECENTRY AND/OR COMPLETION STATUS TO CALLER                  18120000
+*--------------------------------------------------------------         18130000
+                                                                        18140000
+LOCRNFND DS    0H                 WARNING - NO INSTANCES FOUND          18150000
+         LA    R15,RC04                                                 18160000
+         B     LOCREXIT                                                 18170000
+                                                                        18180000
+LOCRNDEF DS    0H                 ERROR - NAMED REGION NOT DEFINED      18190000
+         LA    R15,RC08                                                 18200000
+                                                                        18210000
+LOCREXIT DS    0H                                                       18220000
+         LM    R2,R14,REGSAVEX+8  RESTORE MAINLINE REGS                 18230000
+         LTR   R15,R15            CONVEY COMPLETION STATUS VIA CC       18240000
+         BR    R14                RETURN                                18250000
+         DROP  R3,R5              RECENTRY, NVIMAGE                     18260000
+                                                                        18270000
+         EJECT                                                          18280000
+***************************************************************         18290000
+*                                                                       18300000
+* ROUTINE: RISCAN - Search for first occurrance of rgn instance         18310000
+*                                                                       18320000
+* ATTRIBUTES:  BAKR linkage, recursive                                  18330000
+*                                                                       18340000
+*                                                                       18350000
+* ON ENTRY:                                                             18360000
+*                                                                       18370000
+*    R0 - region definition               (RGNTRY)                      18380000
+*    R1 - region instance subtree origin  (RECENTRY)                    18390000
+*                                                                       18400000
+*                                                                       18410000
+* ON EXIT:                                                              18420000
+*                                                                       18430000
+*    R15 contains one of the following return codes                     18440000
+*                                                                       18450000
+*        RC00 - instance (recentry) found and returned in R1            18460000
+*        RC04 - instance not found                                      18470000
+*                                                                       18480000
+***************************************************************         18490000
+                                                                        18500000
+RISCAN   DS    0H                                                       18510000
+         BAKR  R14,0              SAVE MAINLINE REGS                    18520000
+         LR    R2,R1              ACCEPT INSTANCE SUBTREE               18530000
+         USING RECENTRY,R2        REGION INSTANCE FORMAT                18540000
+                                                                        18550000
+RINEXT   DS    0H                                                       18560000
+         LR    R1,R2              IDENTIFY CURRENT RECTANGLE FOR RET    18570000
+         C     R0,RECRN           INSTANCE AGREES WITH DEFINITION?      18580000
+         BE    RIMATCH            SUCCESS IF SO                         18590000
+                                                                        18600000
+         ICM   R1,15,RECSUB       SUBREGIONS?                           18610000
+         BZ    RIPEER             SKIP IF NOT                           18620000
+         BAS   R14,RISCAN         ELSE SEARCH SUBTREE (R1)              18630000
+         LTR   R15,R15            MATCH RETURNED?                       18640000
+         BZ    RIEXIT             RETURNED IN R1 IF SO                  18650000
+                                                                        18660000
+RIPEER   DS    0H                                                       18670000
+         ICM   R2,15,RECPEER      PEER INSTANCES PRESENT?               18680000
+         BNZ   RINEXT             TRY THEM IF SO                        18690000
+         LA    R15,RC04           FAILURE                               18700000
+         B     RIEXIT             DONE                                  18710000
+                                                                        18720000
+RIMATCH  DS    0H                                                       18730000
+         LA    R15,RC00           INDICATE SUCCESS                      18740000
+                                                                        18750000
+RIEXIT   DS    0H                 RETURN INSTANCE / STATUS TO CALLER    18760000
+         PR    ,                                                        18770000
+         DROP  R2                 RECENTRY                              18780000
+                                                                        18790000
+         EJECT                                                          18800000
+***************************************************************         18810000
+*                                                                       18820000
+* ROUTINE: FSHRIMG - Release region window image                        18830000
+*                                                                       18840000
+* ON ENTRY:                                                             18850000
+*                                                                       18860000
+*    R1 - addr of NVIMAGE anchor address                                18870000
+*                                                                       18880000
+***************************************************************         18890000
+                                                                        18900000
+FSHRIMG  DS    0H                                                       18910000
+         STM   R0,R15,REGSAVE     SAVE MAINLINE REGS                    18920000
+         LR    R3,R1              RETAIN ANCHOR ADDRESS                 18930000
+                                                                        18940000
+         ICM   R0,15,0(R3)        NVIMAGE PRESENT?                      18950000
+         BNP   FSHRIRET           SKIP IF NOT                           18960000
+                                                                        18970000
+         L     R2,TSKPCBC         PROCESS STORAGE                       18980000
+         LA    R2,PCBSTG-IPCB(,R2)                                      18990000
+                                                                        19000000
+         @CALL IIMGFREE,((R2),(R3)),                                   x19010000
+               CTYPE=CVT,                                              x19020000
+               MF=(E,MFE_LIST)                                          19030000
+                                                                        19040000
+FSHRIRET DS    0H                                                       19050000
+         LM    R0,R15,REGSAVE     RESTORE MAINLINE REGISTERS            19060000
+         BR    R14                RETURN                                19070000
+                                                                        19080000
+         EJECT                                                          19090000
+***************************************************************         19100000
+*                                                                       19110000
+* ROUTINE: LOCATTR - Locate the attribute in container image            19120000
+*                                                                       19130000
+* ON ENTRY:                                                             19140000
+*                                                                       19150000
+*    R1 - parmlist constructed as follows                               19160000
+*                                                                       19170000
+*         +00  -  current image                                         19180000
+*         +04  -  container image                                       19190000
+*         +08  -  position of the variable                              19200000
+*                                                                       19210000
+***************************************************************         19220000
+                                                                        19230000
+LOCATTR  DS    0H                                                       19240000
+         STM   R14,R12,12(R13)    SAVE MAINLINE REGS                    19250000
+                                                                        19260000
+         LM    R5,R6,0(R1)        LOAD CURRENT, CONTAINER IMAGE         19270000
+X        USING NVIMAGE,R5                                               19280000
+Y        USING NVIMAGE,R6                                               19290000
+                                                                        19300000
+         L     R3,8(R1)           ABSOLUTE POSITION IN CURRENT IMAGE    19310000
+         S     R3,X.NVIBUF@       OFFSET FROM THE CURREMT IMAGE         19320000
+         SR    R2,R2                                                    19330000
+         D     R2,X.NVICOLS       CALCULATE ROW #                       19340000
+         LR    R1,R2              SAVE THE REMAINDER                    19350000
+         SR    R2,R2                                                    19360000
+         M     R2,Y.NVICOLS       CALCULATE (ROW #) * (COLS #)          19370000
+                                                                        19380000
+         A     R3,@RGNOFF         ADD OFFSET FROM CONTAINER             19390000
+         A     R3,Y.NVIBUF@       CONVERT TO ABSOLUTE ADDRESS           19400000
+         AR    R1,R3              ADD THE REMAINDER                     19410000
+                                                                        19420000
+LATTLOOP DS    0H                                                       19430000
+         C     R1,Y.NVIBUF@                                             19440000
+         BL    LATTBOTM           IF OUTSIDE IMAGE, GO TO THE END       19450000
+                                                                        19460000
+         CLI   0(R1),ATT_STRT     CHECK FOR ATTRIBUTE RANGE             19470000
+         BL    LATTBACK                                                 19480000
+         CLI   0(R1),ATT_END                                            19490000
+         BH    LATTBACK           NOT WITHIN RANGE, BACK OFF            19500000
+         B     LATTRET            ATTR HIT, RETURN TO CALLER            19510000
+                                                                        19520000
+LATTBOTM DS    0H                                                       19530000
+         A     R1,Y.NVIIMGSZ      GO TO THE END OF IMAGE BUFFER         19540000
+         B     LATTLOOP           START ALL OVER AGAIN                  19550000
+                                                                        19560000
+LATTBACK DS    0H                 BACKING UP                            19570000
+         BCTR  R1,0                                                     19580000
+         B     LATTLOOP           LOOPING                               19590000
+                                                                        19600000
+LATTRET  DS    0H                                                       19610000
+         L     R14,12(,R13)       RESTORE RETURN ADDRESS                19620000
+         LM    R2,R12,28(R13)     RESTORE MAINLINE REGISTERS            19630000
+         BR    R14                RETURN                                19640000
+         DROP  X,Y                                                      19650000
+                                                                        19660000
+         EJECT                                                          19670000
+***************************************************************         19680000
+*                                                                       19690000
+*   Catastrophic errors                                                 19700000
+*                                                                       19710000
+***************************************************************         19720000
+                                                                        19730000
+ABN_VARP DS    0H                                                       19740000
+         $ABEND ABE_VARPOOL,DUMP=YES,                                  X19750000
+               TITLE='VARIABLE POOL MANAGEMENT FAILURE'                 19760000
+                                                                        19770000
+ABN_STG  DS    0H                                                       19780000
+         $ABEND ABE_STORAGE,DUMP=YES,                                  X19790000
+               TITLE='STORAGE MANAGEMENT FAILURE'                       19800000
+                                                                        19810000
+ABN_TBSV DS    0H                                                       19820000
+         $ABEND ABE_TBSERV,DUMP=YES,                                   X19830000
+               TITLE='TABLE SERVICE FAILURE'                            19840000
+                                                                        19850000
+         EJECT                                                          19860000
+***************************************************************         19870000
+*                                                                       19880000
+*   Local read-only storage, etc.                                       19890000
+*                                                                       19900000
+***************************************************************         19910000
+                                                                        19920000
+BLANKS   DC    CL32' '                                                  19930000
+LTRUE    DC    C'TRUE'                                                  19940000
+LFALSE   DC    C'FALSE'                                                 19950000
+                                                                        19960000
+*--------------------------------------------------------------         19970000
+*   Useful constants                                                    19980000
+*--------------------------------------------------------------         19990000
+                                                                        20000000
+##K      EQU   1024                                                     20010000
+##MAXSIZ EQU   ##K*128                                                  20020000
+##SEGMAX EQU   32                                                       20030000
+                                                                        20040000
+#MAXSIZE DC    A(##MAXSIZ)        WRAP RGN MGR - MAX SIZE OF IMAGE      20050000
+#SEGMAX  DC    A(##SEGMAX)        WRAP RGN MGR - MAX # OF SEGMENTS      20060000
+                                                                        20070000
+*--------------------------------------------------------------         20080000
+*   Message tables                                                      20090000
+*--------------------------------------------------------------         20100000
+                                                                        20110000
+WRAPERRS DS    0F                 WRAP RGN MGR - RETC/MSGID CONVERSION  20120000
+         DC    F'0'                  RC00 - NORMAL COMPLETION           20130000
+         DC    F'0'                  RC04 - RESERVED                    20140000
+         DC    F'170'                RC08 - REGION REJECTED / WIDTH     20150000
+         DC    F'171'                RC12 - TILING ERROR                20160000
+         DC    F'174'                RC16 - CAPACITY EXCEEDED           20170000
+         DC    F'0'                  RC20 - RESERVED                    20180000
+         DC    F'0'                  RC24 - STG ERRORS CURRENTLY ABEND  20190000
+         DC    F'0'                  RC28 - RESERVED                    20200000
+         DC    F'0'                  RC32 - RESERVED                    20210000
+                                                                        20220000
+         LTORG ,                                                        20230000
+                                                                        20240000
+*--------------------------------------------------------------         20250000
+*   Translate nulls and attribute bytes to blanks                       20260000
+*--------------------------------------------------------------         20270000
+                                                                        20280000
+TRTABADD DC    A(TRTABLE)                                               20290000
+TRTABLE  DC    256AL1(*-TRTABLE)                                        20300000
+         ORG   TRTABLE                                                  20310000
+         DC    C' '               X'00' -> BLANK                        20320000
+         ORG   TRTABLE+X'20'                                            20330000
+         DC    32C' '             FIELD ATTRIBUTE -> BLANK              20340000
+         ORG   ,                                                        20350000
+                                                                        20360000
+         EJECT                                                          20370000
+         PRINT NOGEN                                                    20380000
+         ICVT  ,                                                        20390000
+         ITASK ,                                                        20400000
+         IPCB  ,                                                        20410000
+         IUSER ,                                                        20420000
+         END   ,                                                        20430000

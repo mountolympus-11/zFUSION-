@@ -1,0 +1,488 @@
+IRESMNGR TITLE 'RESOURCE MANAGER SERVICE ROUTINE'                       00010000
+**<DOC-ON>******************************************************        00020000
+*                                                                       00030000
+* ROUTINE: IRESMNGR - Resource manager service routine                  00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This routine provides the facilities to assign and remove          00080000
+*    resource manager routines to and from a specified                  00090000
+*    workunit.  Resource manager entries are added in LIFO              00100000
+*    order.  $RESMGR DELETE requests may be issued to remove a          00110000
+*    resource manager routine using the token returned by the           00120000
+*    $RESMGR ADD request.                                               00130000
+*                                                                       00140000
+*    Additionally, a CALL facility is provided to schedule the          00150000
+*    execution of active resource management routines. Any              00160000
+*    requester may schedule a single resource manager by                00170000
+*    providing its token.  Once run, the resource manager is            00180000
+*    automatically DELeted.  A second form, intended soley for          00190000
+*    use by workunit termination routines, calls each of the            00200000
+*    active resource management routines in LIFO order,                 00210000
+*    DELeting them from the workunit.                                   00220000
+*                                                                       00230000
+*                                                                       00240000
+* NOTES:                                                                00250000
+*                                                                       00260000
+*    If a specified owning workunit is from a foreign ITASK             00270000
+*    (not current) the $RESMGR request must be made under               00280000
+*    control of the DISP lock.                                          00290000
+*                                                                       00300000
+*                                                                       00310000
+* ON ENTRY:                                                             00320000
+*                                                                       00330000
+*    R1  contains the address of the parameter list mapped              00340000
+*        by the RMPLIST DSECT ($RESMGR DSECT=YES)                       00350000
+*                                                                       00360000
+*                                                                       00370000
+* ON EXIT:                                                              00380000
+*                                                                       00390000
+*    R15 contains one of the following return codes.  R0                00400000
+*        may contain a reason code                                      00410000
+*                                                                       00420000
+*    Upon completion of this routine R15 will contain one               00430000
+*    of the following return codes:                                     00440000
+*                                                                       00450000
+*    R15 = RC00 - Normal completion                                     00460000
+*                                                                       00470000
+*          RC04 - Resource manager entry not found                      00480000
+*                                                                       00490000
+*          RC08 - Internal error                                        00500000
+*                                                                       00510000
+*                 RSN04 - Error occured deleting entry                  00520000
+*                                                                       00530000
+*          RC12 - Service failure                                       00540000
+*                                                                       00550000
+*                 RSN04 - Storage allocation error                      00560000
+*                                                                       00570000
+*          RC20 - Parameter error                                       00580000
+*                                                                       00590000
+*                 RSN04 - Invalid request code specified                00600000
+*                 RSN08 - Owner workunit is required                    00610000
+*                 RSN12 - Token address required for delete             00620000
+*                 RSN16 - Routine address required for add              00630000
+*                                                                       00640000
+**<DOC-OFF>*****************************************************        00650000
+                                                                        00660000
+         EJECT                                                          00670000
+****************************************************************        00680000
+*                                                                       00690000
+* MAINTENANCE:                                                          00700000
+*                                                                       00710000
+*    08/11/93  Ron Colmone                                              00720000
+*              Initial version.                                         00730000
+*                                                                       00740000
+*    09/23/94  Ron Colmone        Par# 144661                    144661 00750000
+*              Add support to manage a usecount associated       144661 00760000
+*              with a resource being shared by multiple          144661 00770000
+*              workunits within the same task.                   144661 00780000
+*                                                                       00790000
+*    01/09/95  R. Turgeon                                               00800000
+*              Added CALL capability allowing requesters to             00810000
+*              schedule-then-delete resource management routines        00820000
+*              by token.                                                00830000
+*                                                                       00840000
+****************************************************************        00850000
+                                                                        00860000
+         EJECT                                                          00870000
+         $RESMGR DSECT=YES        RESOURCE MANAGER DSECTS               00880000
+                                                                        00890000
+         EJECT                                                          00900000
+         @CB   WORKUNIT=YES       COMMON WORKUNIT HEADER                00910000
+                                                                        00920000
+         EJECT                                                          00930000
+         EQUS  ,                  GENERAL EQUATES                       00940000
+                                                                        00950000
+         EJECT                                                          00960000
+         TRACODES ,               TRACE EVENT CODES                     00970000
+                                                                        00980000
+         EJECT                                                          00990000
+         #WORK ,                  READ/WRITE WORKAREA                   01000000
+         #ENDWORK ,               END OF WORKAREA                       01010000
+                                                                        01020000
+         EJECT                                                          01030000
+IRESMNGR #ENTER BASE=R12,         ENTRY LINKAGE                        +01040000
+               PREG=R8                                                  01050000
+                                                                        01060000
+         USING ITASK,R10          ITASK ADDRESSABILITY                  01070000
+         USING RMPLIST,R8         RESOURCE MANAGER PLIST                01080000
+                                                                        01090000
+         ICM   R6,15,RMPLOWNR     ADDRESS OF OWNING WORKUNIT            01100000
+         BZ    ERR_OWNR           ERROR, OWNER REQUIRED                 01110000
+         USING @CB,R6             ADDRESSABILITY                        01120000
+                                                                        01130000
+         SR    R2,R2              PREPARE FOR INSERT             144661 01140000
+         ICM   R2,1,RMPLREQ       GET REQUEST TYPE               144661 01150000
+         BZ    ERR_REQ            ERROR, INVALID REQUEST                01160000
+         BCTR  R2,0               CONVERT TO INDEX                      01170000
+         SLL   R2,2                                                     01180000
+                                                                        01190000
+         B     *+4(R2)            BRANCH ON REQUEST TYPE                01200000
+         B     ADD_RES            ADD    RESOURCE MANAGER               01210000
+         B     DEL_RES            DELETE RESOURCE MANAGER               01220000
+         B     CALL_RES           CALL   RESOURCE MANAGER RTNS          01230000
+         EX    0,*                UNDEFINED                             01240000
+         EX    0,*                UNDEFINED                             01250000
+         EX    0,*                UNDEFINED                             01260000
+                                                                        01270000
+         EJECT                                                          01280000
+****************************************************************        01290000
+*                                                                       01300000
+*  ADD RESOURCE MANAGER TO WORKUNIT                                     01310000
+*                                                                       01320000
+****************************************************************        01330000
+ADD_RES  DS    0H                                                       01340000
+         ICM   R0,15,RMPLRTN@     ADDRESS OF ROUTINE                    01350000
+         BZ    ERR_RTN            ERROR, ROUTINE ADDR REQUIRED          01360000
+                                                                        01370000
+         $GETSTOR RMGRLN,OWNER=@CB,COND=YES   ALLOCATE ENTRY            01380000
+         BNZ   ERR_STG            ERROR, STORAGE ALLOCATION             01390000
+         LR    R7,R1              ADDR OF RESMGR ENTRY                  01400000
+         USING RMGRENT,R7         ADDRESSABILITY                        01410000
+                                                                        01420000
+         MVC   RMGRID,=CL8'RMGRENT'                                     01430000
+         MVC   RMGRRTN@,RMPLRTN@  ROUTINE ADDRESS                       01440000
+         MVC   RMGRPARM,RMPLPARM  PARAMETER LIST                        01450000
+                                                                        01460000
+         CLI   RMPLVER,RMPL$V1    VER1 OR HIGHER PARAMETER LIST  144661 01470000
+         BL    *+10               NO, USE COUNT NOT SUPPORTED    144661 01480000
+         MVC   RMGRUSE@,RMPLUSE@  USE COUNT ADDRESS              144661 01490000
+                                                                        01500000
+         L     R1,@CBRMTKN        GET RMGR TOKEN                        01510000
+         LA    R1,1(,R1)          INCREMENT FOR NEW TOKEN VALUE         01520000
+         ST    R1,@CBRMTKN        SAVE CURRENT TOKEN                    01530000
+         ST    R1,RMGRTKN         SET TOKEN IN RMGR ENTRY               01540000
+                                                                        01550000
+         ICM   R15,15,RMGRUSE@    USE COUNT MGMT REQUIRED        144661 01560000
+         BZ    ADD_RTRY           NO, ADD RESOURCE MANAGER ENTRY 144661 01570000
+                                                                        01580000
+ADD_USE  DS    0H                                                144661 01590000
+         L     R2,0(,R15)         RETRIEVE CURRENT USE COUNT     144661 01600000
+         LA    R1,1(,R2)          INCREMENT USECOUNT VALUE       144661 01610000
+         CS    R2,R1,0(R15)       SWAP IN NEW USECOUNT           144661 01620000
+         BNZ   ADD_USE            RETRY USECOUNT UPDATE          144661 01630000
+                                                                        01640000
+ADD_RTRY DS    0H                                                       01650000
+         L     R2,@CBRMGRL        ADDRESS OF RESMGR LIST                01660000
+         ST    R2,RMGRNEXT        CONNECT RMGR LIST                     01670000
+         CS    R2,R7,@CBRMGRL     ADD NEW ENTRY TO LIST                 01680000
+         BNZ   ADD_RTRY           RETRY ADD                             01690000
+                                                                        01700000
+         ICM   R1,15,RMPLTKN@     ADDRESS OF TOKEN WORD                 01710000
+         BZ    ADD_EXIT           NONE, RETURN                          01720000
+         MVC   0(L'RMGRTKN,R1),RMGRTKN  RETURN TOKEN                    01730000
+                                                                        01740000
+ADD_EXIT DS    0H                                                       01750000
+         $TRACE TRC_RESMGR_ADD,4*4 FORMAT RESMGR ADD TRACE ENTRY        01760000
+         BNZ   ADD_TRC             TRACE NOT ACTIVE                     01770000
+         MVC   0(4,R1),RMPLRTN@                                         01780000
+         MVC   4(4,R1),RMPLPARM                                         01790000
+         MVC   8(4,R1),RMPLOWNR                                         01800000
+         MVC   12(4,R1),RMGRTKN                                         01810000
+                                                                        01820000
+ADD_TRC  DS    0H                                                       01830000
+         B     NORMRET            RETURN                                01840000
+         DROP  R7                 RMGRENT                               01850000
+                                                                        01860000
+         EJECT                                                          01870000
+****************************************************************        01880000
+*                                                                       01890000
+*  DELETE RESOURCE MANAGER FROM WORKUNIT                                01900000
+*                                                                       01910000
+****************************************************************        01920000
+DEL_RES  DS    0H                                                       01930000
+         ICM   R2,15,RMPLTKN@     ADDRESS OF TOKEN                      01940000
+         BZ    *+8                ERROR, TOKEN REQUIRED                 01950000
+         L     R2,0(,R2)          RETRIEVE TOKEN VALUE                  01960000
+                                                                        01970000
+         $TRACE TRC_RESMGR_DEL,4*4 FORMAT RESMGR DEL TRACE ENTRY        01980000
+         BNZ   DEL_TRC             TRACE NOT ACTIVE                     01990000
+         MVC   0(4,R1),RMPLOWNR                                         02000000
+         ST    R2,4(,R1)                                                02010000
+                                                                        02020000
+DEL_TRC  DS    0H                                                       02030000
+                                                                        02040000
+*---------------------------------------------------------------        02050000
+*   DEQUEUE AND DELETE THE RMGRENT ENTRY IDENTIFIED BY TOKEN            02060000
+*---------------------------------------------------------------        02070000
+         LTR   R1,R2              TOKEN PROVIDED?                       02080000
+         BZ    ERR_TOKN           ERROR IF NOT                          02090000
+         BAS   R14,DEQUEUE        LOCATE CORR RMGRENT AND DEQUEUE IT    02100000
+         BNZ   ERR_NF             TOKEN NOT MATCHED                     02110000
+                                                                        02120000
+         $RETSTOR (R1),OWNER=@CB                                        02130000
+                                                                        02140000
+         B     NORMRET            RETURN                                02150000
+                                                                        02160000
+         EJECT                                                          02170000
+****************************************************************        02180000
+*                                                                       02190000
+*  SCHEDULE ALL STACKED RESOURCE MANAGEMENT ROUTINES                    02200000
+*                                                                       02210000
+*  There are two forms of the CALL request; one identifies a            02220000
+*  particular resource management routine by token, the other           02230000
+*  provides no token and requests execution of all routines.            02240000
+*  These are handled by separate sections of very similar code          02250000
+*  simplifying distinction by $TRACE ID, etc. at a later date.          02260000
+*                                                                       02270000
+****************************************************************        02280000
+CALL_RES DS    0H                                                       02290000
+         ICM   R1,15,RMPLTKN@     TOKEN PROVIDED BY CALLER?             02300000
+         BNZ   CBLL_RES           SINGLE ROUTINE FORM IF SO             02310000
+                                                                        02320000
+         ICM   R7,15,@CBRMGRL     ADDRESS OF FIRST/NEXT RMGRENT         02330000
+         USING RMGRENT,R7         ADDRESSABILITY                        02340000
+         BZ    CAL_EXIT           END OF RSRC MGR LIST                  02350000
+                                                                        02360000
+*---------------------------------------------------------------        02370000
+*   LOCATE AND/OR DEQUEUE THE DESIGNATED RESOURCE MANAGER ENTRY         02380000
+*---------------------------------------------------------------        02390000
+         L     R1,RMGRTKN         R1 <== RESOURCE MANAGER ENTRY TOKEN   02400000
+         BAS   R14,DEQUEUE        ACQUIRE RMGRENT AND DEQUEUE IT        02410000
+         BNZ   ERR_DEL            DEQUEUE ROUTINE FAILURE               02420000
+                                                                        02430000
+*---------------------------------------------------------------        02440000
+*   EXTRACT RSRC MGR INFO FROM ENTRY AND FREE IT                        02450000
+*---------------------------------------------------------------        02460000
+         L     R5,RMGRRTN@        ADDRESS OF ROUTINE                    02470000
+         L     R4,RMGRPARM        OBTAIN ROUTINE PARMS                  02480000
+         L     R3,RMGRUSE@        ADDRESS OF USECOUNT WORD       144661 02490000
+                                                                        02500000
+         $TRACE TRC_RESMGR_CAL,6*4 FORMAT RESMGR CALL TRACE ENTRY       02510000
+         BNZ   CAL_TRC             TRACE NOT ACTIVE                     02520000
+         ST    R5,0(,R1)                                                02530000
+         ST    R4,4(,R1)                                                02540000
+         MVC   8(4,R1),RMGRTKN                                          02550000
+         ST    R3,16(,R1)                                               02560000
+         LTR   R3,R3                                                    02570000
+         BZ    CAL_TRC                                                  02580000
+         L     R0,0(,R3)                                                02590000
+         ST    R0,20(,R1)                                               02600000
+                                                                        02610000
+CAL_TRC  DS    0H                                                       02620000
+         $RETSTOR (R7),OWNER=@CB                                        02630000
+                                                                        02640000
+*---------------------------------------------------------------        02650000
+*   INVOKE RSRC MGR ROUTINE WHEN MANAGED USE COUNT GOES TO ZERO         02660000
+*---------------------------------------------------------------        02670000
+         LTR   R3,R3              USECOUNT MANAGEMENT REQUIRED?  144661 02680000
+         BZ    CAL_RTN            NO, CALL RESOURCE MANAGER RTN  144661 02690000
+         ICM   R0,15,0(R3)        HAS USE COUNT GONE TO ZERO     144661 02700000
+         BNZ   CALL_RES           NO, SKIP RESOURCE MANAGER RTN  144661 02710000
+                                                                        02720000
+CAL_RTN  DS    0H                                                144661 02730000
+         LTR   R15,R5             ADDRESS OF RESMGR ROUTINE             02740000
+         BZ    CALL_RES           CALL NEXT RESOURCE MANAGER            02750000
+         LR    R1,R4              RESMGR PARAMETER                      02760000
+         LA    R0,@CB             ADDRESS OF WORKUNIT                   02770000
+         BASR  R14,R15            CALL RESOURCE MANAGER ROUTINE         02780000
+         B     CALL_RES           PROCESS NEXT ENTRY                    02790000
+                                                                        02800000
+CAL_EXIT DS    0H                                                       02810000
+         B     NORMRET            RETURN                                02820000
+         DROP  R7                 RMGRENT                               02830000
+                                                                        02840000
+         EJECT                                                          02850000
+****************************************************************        02860000
+*                                                                       02870000
+*  SCHEDULE AN EXPLICITLY DESIGNATED RESOURE MANAGEMENT ROUTINE         02880000
+*                                                                       02890000
+****************************************************************        02900000
+CBLL_RES DS    0H                 R1 <== TOKEN ADDRESS                  02910000
+         L     R1,0(,R1)          ACQUIRE TOKEN VALUE                   02920000
+         BAS   R14,DEQUEUE        ACQUIRE RMGRENT AND DEQUEUE IT        02930000
+         BNZ   ERR_NF             DESIGNATED RSRC MGR NOT DEFINED       02940000
+                                                                        02950000
+         LR    R7,R1              RESOURCE MANAGER ENTRY RETURNED       02960000
+         USING RMGRENT,R7         ADDRESSABILITY                        02970000
+                                                                        02980000
+*---------------------------------------------------------------        02990000
+*   EXTRACT RSRC MGR INFO FROM ENTRY AND FREE IT                        03000000
+*---------------------------------------------------------------        03010000
+         L     R5,RMGRRTN@        ADDRESS OF ROUTINE                    03020000
+         L     R4,RMGRPARM        OBTAIN ROUTINE PARMS                  03030000
+         L     R3,RMGRUSE@        ADDRESS OF USECOUNT WORD       144661 03040000
+                                                                        03050000
+         $TRACE TRC_RESMGR_CAL,4*4 FORMAT RESMGR CALL TRACE ENTRY       03060000
+         BNZ   CBL_TRC             TRACE NOT ACTIVE                     03070000
+         ST    R5,0(,R1)                                                03080000
+         ST    R4,4(,R1)                                                03090000
+         MVC   8(4,R1),RMGRTKN                                          03100000
+                                                                        03110000
+CBL_TRC  DS    0H                                                       03120000
+         $RETSTOR (R7),OWNER=@CB                                        03130000
+                                                                        03140000
+*---------------------------------------------------------------        03150000
+*   INVOKE RSRC MGR ROUTINE WHEN MANAGED USE COUNT GOES TO ZERO         03160000
+*---------------------------------------------------------------        03170000
+         LTR   R3,R3              USECOUNT MANAGEMENT REQUIRED?  144661 03180000
+         BZ    CBL_RTN            NO, CALL RESOURCE MANAGER RTN  144661 03190000
+         ICM   R0,15,0(R3)        HAS USE COUNT GONE TO ZERO     144661 03200000
+         BNZ   CBL_EXIT           NO, SKIP RESOURCE MANAGER RTN  144661 03210000
+                                                                        03220000
+CBL_RTN  DS    0H                                                144661 03230000
+         LTR   R15,R5             ADDRESS OF RESMGR ROUTINE             03240000
+         BZ    CBL_EXIT           DONE IF NOT                           03250000
+         LR    R1,R4              RESMGR PARAMETER                      03260000
+         LA    R0,@CB             ADDRESS OF WORKUNIT                   03270000
+         BASR  R14,R15            CALL RESOURCE MANAGER ROUTINE         03280000
+                                                                        03290000
+CBL_EXIT DS    0H                                                       03300000
+         B     NORMRET            RETURN                                03310000
+         DROP  R7                 RMGRENT                               03320000
+                                                                        03330000
+         EJECT                                                          03340000
+****************************************************************        03350000
+*                                                                       03360000
+*  ERROR HANDLERS                                                       03370000
+*                                                                       03380000
+****************************************************************        03390000
+                                                                        03400000
+NORMRET  DS    0H                 NORMAL COMPLETION                     03410000
+         LA    R0,RSN00                                                 03420000
+         LA    R15,RC00                                                 03430000
+         B     RETURN                                                   03440000
+                                                                        03450000
+ERR_NF   DS    0H                                                       03460000
+         LA    R0,RSN04           RESOURCE NOT FOUND                    03470000
+         LA    R15,RC04                                                 03480000
+         B     RETURN             RETURN                                03490000
+                                                                        03500000
+ERR_DEL  DS    0H                                                       03510000
+         LA    R0,RSN04           DEQUEUE ROUTINE FAILURE               03520000
+         LA    R15,RC08           INTERAL ERROR                         03530000
+         B     RETURN             RETURN                                03540000
+                                                                        03550000
+ERR_STG  DS    0H                                                       03560000
+         LA    R0,RSN04           STORAGE ALLOCATION ERROR              03570000
+         LA    R15,RC12           SERVICE ERROR                         03580000
+         B     RETURN             RETURN                                03590000
+                                                                        03600000
+ERR_REQ  DS    0H                                                       03610000
+         LA    R0,RSN04           INVALID REQUEST                       03620000
+         LA    R15,RC20           PARAMETER ERROR                       03630000
+         B     RETURN             RETURN                                03640000
+                                                                        03650000
+ERR_OWNR DS    0H                                                       03660000
+         LA    R0,RSN08           OWNING WORKUNIT REQUIRED              03670000
+         LA    R15,RC20           PARAMETER ERROR                       03680000
+         B     RETURN             RETURN                                03690000
+                                                                        03700000
+ERR_TOKN DS    0H                                                       03710000
+         LA    R0,RSN12           MISSING TOKEN ADDRESS                 03720000
+         LA    R15,RC20           PARAMETER ERROR                       03730000
+         B     RETURN             RETURN                                03740000
+                                                                        03750000
+ERR_RTN  DS    0H                                                       03760000
+         LA    R0,RSN16           ROUTINE ADDR REQ FOR ADD              03770000
+         LA    R15,RC20           PARAMETER ERROR                       03780000
+         B     RETURN             RETURN                                03790000
+                                                                        03800000
+         EJECT                                                          03810000
+****************************************************************        03820000
+*                                                                       03830000
+*  RETURN                                                               03840000
+*                                                                       03850000
+****************************************************************        03860000
+                                                                        03870000
+RETURN   DS    0H                                                       03880000
+         #EXIT ,                  RETURN                                03890000
+                                                                        03900000
+         EJECT                                                          03910000
+****************************************************************        03920000
+*                                                                       03930000
+* ROUTINE: DEQUEUE - Dequeue RSRC MGR entry frow workunit               03940000
+*                                                                       03950000
+* DESCRIPTION:                                                          03960000
+*                                                                       03970000
+*    The resource manager entry (RMGRENT) associated with the           03980000
+*    token provided is located and dequeued from the workunit           03990000
+*    resource manager stack.                                            04000000
+*                                                                       04010000
+*                                                                       04020000
+* ON ENTRY:                                                             04030000
+*                                                                       04040000
+*    R1  Contains the resource manager token value                      04050000
+*                                                                       04060000
+*    @CB is addressable                                                 04070000
+*                                                                       04080000
+*                                                                       04090000
+* ON EXIT:                                                              04100000
+*                                                                       04110000
+*    R15 Contains one of the following return codes.                    04120000
+*        The condition code is set accordingly.                         04130000
+*                                                                       04140000
+*        RC00 - dequeue complete                                        04150000
+*                                                                       04160000
+*               R1 - address of dequeued RMGRENT                        04170000
+*                                                                       04180000
+*        RC04 - token not matched to any active RMGRENT                 04190000
+*                                                                       04200000
+****************************************************************        04210000
+DEQUEUE  DS    0H                                                       04220000
+         STM   R14,R12,12(R13)    SAVE MAINLINE REGS                    04230000
+                                                                        04240000
+         LA    R3,@CBRMGRL        ADDRESS OF RMGR LIST HEADER           04250000
+         SH    R3,=AL2(RMGRNEXT-RMGRENT)  BACKUP OFFSET OF NEXT PTR     04260000
+                                                                        04270000
+P        USING RMGRENT,R3         ADDRESSABILITY (PREV ENT)             04280000
+         USING RMGRENT,R7         ADDRESSABILITY (CURR ENT)             04290000
+                                                                        04300000
+*---------------------------------------------------------------        04310000
+*   SCAN RSRC MGR STACK MATCHING TOKEN TO ENTRY, THEN DEQ IT            04320000
+*---------------------------------------------------------------        04330000
+DEQ_NEXT DS    0H                                                       04340000
+         ICM   R7,15,P.RMGRNEXT   ADDR OF NEXT ENTRY                    04350000
+         BZ    DEQ_NF             RESOURCE MANAGER NOT FOUND            04360000
+         C     R1,RMGRTKN         ENTRY MATCH                           04370000
+         BE    DEQ_REMV           REMOVE FROM LIST                      04380000
+         LR    R3,R7              MOVE FORWARD THROUGH LIST             04390000
+         B     DEQ_NEXT           PROCESS NEXT ENTRY                    04400000
+                                                                        04410000
+DEQ_REMV DS    0H                                                       04420000
+         MVC   P.RMGRNEXT,RMGRNEXT REMOVE ENTRY FROM LIST               04430000
+                                                                        04440000
+*---------------------------------------------------------------        04450000
+*   IF MANAGING RSRC USECOUNTS, ACCOUT FOR THIS REFERENCE               04460000
+*---------------------------------------------------------------        04470000
+         ICM   R15,15,RMGRUSE@    USECOUNT MGMT REQUIRED?        144661 04480000
+         BZ    DEQ_HIT            NO, FREE RSRC MGR ENTRY        144661 04490000
+                                                                        04500000
+DEQ_USE  DS    0H                                                144661 04510000
+         L     R2,0(,R15)         OBTAIN CURRENT USE COUNT       144661 04520000
+         LR    R1,R2              COPY USE COUNT VALUE           144661 04530000
+         BCTR  R1,0               DECREMENT USE COUNT            144661 04540000
+         CS    R2,R1,0(R15)       SAVE NEW USE COUNT             144661 04550000
+         BNZ   DEQ_USE            RETRY IF NECESSARY             144661 04560000
+                                                                        04570000
+*---------------------------------------------------------------        04580000
+*   RETURN COMPLETION STATUS AND RMGRENT TO CALLER                      04590000
+*---------------------------------------------------------------        04600000
+DEQ_HIT  DS    0H                 RSRC MGR ENTRY DEQUEUED               04610000
+         LA    R15,RC00           NORMAL COMPLETION                     04620000
+         LA    R1,RMGRENT         RETURN DEQUEUED RSRC MGR ENTRY        04630000
+         B     DEQ_DONE           RETURN                                04640000
+                                                                        04650000
+DEQ_NF   DS    0H                 TOKEN NOT MATCHED                     04660000
+         LA    R15,RC04           INDICATE WARNING/ERROR                04670000
+         SR    R1,R1              ENTRY NOT FOUND                       04680000
+                                                                        04690000
+DEQ_DONE DS    0H                 RETURN TO REQUESTER                   04700000
+         L     R14,12(,R13)       RESTORE RETURN ADDR                   04710000
+         LM    R2,R12,28(R13)     RESTORE MAINLINE REGS                 04720000
+         LTR   R15,R15            REFLECT COMPLETION STATUS VIA CC      04730000
+         BR    R14                DONE                                  04740000
+         DROP  P,R7               RMGRENT, PREV AND CURR                04750000
+                                                                        04760000
+         EJECT                                                          04770000
+****************************************************************        04780000
+*                                                                       04790000
+*   LITERALS AND CONSTANTS                                              04800000
+*                                                                       04810000
+****************************************************************        04820000
+         LTORG ,                                                        04830000
+                                                                        04840000
+         PRINT NOGEN                                                    04850000
+         ICVT  ,                                                        04860000
+         ITASK ,                                                        04870000
+         END   ,                                                        04880000

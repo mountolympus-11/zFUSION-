@@ -1,0 +1,613 @@
+IRECOFF  TITLE '- STOP AND SAVE SESSION RECORDING'                      00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE: IRECOFF - STOP AND SAVE SESSION RECORDING                    00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    THIS ROUTINE COMPLETES A SESSION RECORDING BY READING THE          00080000
+*    PARTIALLY COMPLETED SYSNAVIGATION, SYSIMAGE, AND SYSSKS            00090000
+*    ROWS STORED IN THE RECORDING TEMPORARY TABLE, AND POSTING          00100000
+*    THEM TO THE APPROPRIATE PERMANENT CATALOG TABLES.                  00110000
+*                                                                       00120000
+*                                                                       00130000
+* METHOD:                                                               00140000
+*                                                                       00150000
+*    SYSNAVIGATION ROWS MAY CONTAIN FOREIGN KEYS TO RELATED             00160000
+*    SYSIMAGE AND SYSSKS ROWS. THE LATTER APPEAR FIRST IN THE           00170000
+*    AUX TABLE AND ARE READ AND CATALOGED FIRST.  THE ROWIDS            00180000
+*    RETURNED BY TBADD ARE THEN USED TO PROVIDE THE APPROPRIATE         00190000
+*    INTER-TABLE FOREIGN KEYS.                                          00200000
+*                                                                       00210000
+*    THE ENTIRE TABLE COPY OPERATION IS SERIALIZED VIA THE              00220000
+*    MULTI-INSTANCE PROJECT LOCK TO ENSURE THAT SYSIMAGE SCREEN         00230000
+*    NUMBERS ARE ASSIGNED IN A CONTIGUOUS BLOCK. THE FIRST, OR          00240000
+*    BASE, SYSIMAGE SCREEN NUMBER IS ACQUIRED FROM IRECSEQ#.            00250000
+*                                                                       00260000
+*    AFTER ALL OF THE PENDING CATALOG UPDATES HAVE BEEN                 00270000
+*    MADE, THE SYSRECORDINGS RECORD IS READ AND REWRITTEN TO            00280000
+*    VALIDATE THE RECORDING BY REMOVING THE "INVALID" BIT.              00290000
+*    IRECTERM IS INVOKED TO PROVIDE NORMAL CLEANUP.                     00300000
+*                                                                       00310000
+*    IF RC04 IS RETURNED INDICATING THAT THE CANDIDATE RECORDING        00320000
+*    IS EMPTY, THE SYSRECORDINGS ENTRY IS DELETED.                      00330000
+*                                                                       00340000
+*                                                                       00350000
+* ON ENTRY:                                                             00360000
+*                                                                       00370000
+*    R1  CONTAINS THE ADDRESS OF THE SESSIMAG DEFINING THE              00380000
+*        CURRENT SESSION                                                00390000
+*                                                                       00400000
+*                                                                       00410000
+* ON EXIT:                                                              00420000
+*                                                                       00430000
+*    R15 CONTAINS ONE OF THE FOLLOWING RETURN CODES. REASON             00440000
+*        CODES, WHEN DEFINED, ARE RETURNED IN R0.                       00450000
+*                                                                       00460000
+*           RC00 - RECORDING STORED                                     00470000
+*                                                                       00480000
+*           RC04 - RECORDING CONTAINS NO INFORMATION                    00490000
+*                                                                       00500000
+*           RC08 - RECORDING NOT ACTIVE                                 00510000
+*                                                                       00520000
+**<DOC-OFF>****************************************************         00530000
+                                                                        00540000
+         EJECT                                                          00550000
+***************************************************************         00560000
+*                                                                       00570000
+* MAINTENANCE:                                                          00580000
+*                                                                       00590000
+*   12/06/94 R. Turgeon                                                 00600000
+*            Removed PAGE= / SHRPAGE= for $SPACE, $OBJECT,              00610000
+*            and TB* service requests                                   00620000
+*                                                                       00630000
+***************************************************************         00640000
+                                                                        00650000
+         EJECT                                                          00660000
+                                                                        00670000
+WORKAREA #WORK ,                                                        00680000
+                                                                        00690000
+FLAGS    DS    X                  LOCAL FLAG BYTE                       00700000
+FRCVRY   EQU   X'80'                 RECOVERY ENVIRONMENT ESTABLISHED   00710000
+FLOCK    EQU   X'40'                 RECORDING MIL ACQUIRED             00720000
+FEXBUFR  EQU   X'20'                 ROW BUFFER DYNAMICALLY ACQUIRED    00730000
+                                                                        00740000
+RETSTATS DS    0F                                                       00750000
+RETCODE  DS    F                  RETURN CODE                           00760000
+RSNCODE  DS    F                  REASON CODE                           00770000
+INFOCODE DS    F                  INFO CODE                             00780000
+                                                                        00790000
+ID#KEYS  DS    0F                 SYSNAVIGATION FOREIGN KEYS            00800000
+ID#SKS   DS    F                     ROWID OF SYSSKS ROW OR ZERO        00810000
+ID#IMG   DS    F                     ROWID OF S1 (RIGHT) SYSIMAGE       00820000
+ID#KEYLN EQU   *-ID#KEYS          LENGTH OF FOREIGN KEY RETENTION AREA  00830000
+                                                                        00840000
+SCRNBASE DS    F                  BASE FOR EXTERNAL SCREEN NUMBER       00850000
+LIMGRID  DS    F                  LAST SYSIMAGE ROWID CAPTURED          00860000
+SEQ#NAV  DS    F                  SYSNAVIGATION ENTRY SEQUENCE NUMBER   00870000
+                                                                        00880000
+ROWBUFR  DS    A                  ADDR OF ROW BUFFER                    00890000
+ROWBUFL  DS    F                  LENGTH OF ROW BUFFER                  00900000
+                                                                        00910000
+$SCRNAME DS    CL16               SCREEN NAME CONSTRUCTION AREA         00920000
+                                                                        00930000
+$SYSREC  DS    0D,XL(SRECLN)      SYSRECORDINGS ROW CONSTRUCTION AREA   00940000
+$SYSRECL EQU   *-$SYSREC                                                00950000
+                                                                        00960000
+WK256    DS    0D,XL256           GENERAL PURPOSE WORKAREA              00970000
+                                                                        00980000
+$TRECBUF DS    0D                                                       00990000
+$TRECAUX DS    XL(TRECAUXL+1024)  RECORDING TEMP STAGING AREA           01000000
+                                                                        01010000
+WORKLEN  #ENDWORK ,                                                     01020000
+                                                                        01030000
+         EJECT                                                          01040000
+         ICATALOG RECORDING,NAVIGATION,IMAGE,SKS                        01050000
+                                                                        01060000
+         EJECT                                                          01070000
+         IPROJ ,                                                        01080000
+                                                                        01090000
+         EJECT                                                          01100000
+         SESSIMAG ,               EMULATOR SESS / RECORDING AREA        01110000
+                                                                        01120000
+         EJECT                                                          01130000
+         TRECAUX ,                TEMP TABLE FOR CANDIDATE RECORDINGS   01140000
+                                                                        01150000
+         EJECT                                                          01160000
+         ABCODES ,                                                      01170000
+         EQUS  ,                                                        01180000
+                                                                        01190000
+         TBSERVIS SET,GET,ADD,DELETE,EXIST,PRINT=NOGEN                  01200000
+                                                                        01210000
+         EJECT                                                          01220000
+IRECOFF  #ENTER PREG=R8                                                 01230000
+                                                                        01240000
+         USING ICVT,R11           STDENV                                01250000
+         USING ITASK,R10                                                01260000
+         USING IPCB,R9            PROCESS MODE                          01270000
+         L     R9,TSKPCBC                                               01280000
+                                                                        01290000
+         EJECT ,                                                        01300000
+***************************************************************         01310000
+*                                                                       01320000
+*   VALIDATE REQUEST SEQUENCE                                           01330000
+*                                                                       01340000
+***************************************************************         01350000
+         USING SESSIMAG,R8        LIFE OF FUNCTION                      01360000
+         L     R7,SEIIPROJ        LOCATE PROJECT                        01370000
+         USING IPROJ,R7                                                 01380000
+                                                                        01390000
+         TM    SEIRECFL,SEIR_ACT  RECORDING ACTIVE?                     01400000
+         BNO   ERR_SEQ            INVALID SEQUENCE IF NOT               01410000
+                                                                        01420000
+         TM    SEIRECFL,SEIR_INP  VDEVICE INPUT CAPTURED BY RECORDING?  01430000
+         BNO   ERR_NULL           NOTHING WORTH SAVING IF NOT           01440000
+         ICM   R0,15,SEIAUX#      CANDIDATE RECORDING RECORDS PRESENT?  01450000
+         BZ    ERR_NULL           NOTHING TO SAVE IF NOT                01460000
+                                                                        01470000
+*--------------------------------------------------------------         01480000
+*   ESTABLISH RECOVERY ENVIR, ACQUIRE RECORDING MIL                     01490000
+*--------------------------------------------------------------         01500000
+         $RCVRY CREATE,RSRCMGR,PARM=(R13),MF=(E,MFE_LIST)               01510000
+         BZ    *+8                ASSERT SUCCESSFUL COMPLETION          01520000
+         EX    R0,*               DENIAL                                01530000
+         OI    FLAGS,FRCVRY       RECOVERY ENVIRONMENT ESTABLISHED      01540000
+                                                                        01550000
+         $SER  OBTAIN,LOCKPTR=PRJMILK                                   01560000
+         BZ    *+8                ASSERT SUCCESSFUL COMPLETION          01570000
+         EX    R0,*               DENIAL                                01580000
+         OI    FLAGS,FLOCK        RECORDING MIL ACQUIRED                01590000
+                                                                        01600000
+*--------------------------------------------------------------         01610000
+*   ACQUIRE BASE SYSIMAGE EXTERNAL IDENTIFIER                           01620000
+*--------------------------------------------------------------         01630000
+         LA    R1,IPROJ           PROJECT BLOCK                         01640000
+                                                                        01650000
+         @CALL IRECSEQ#,CTYPE=STD ACQUIRE STARTING SEQUENCE NUMBER      01660000
+                                                                        01670000
+         ST    R1,SCRNBASE        BASE EXTERNAL SYSIMAGE ID             01680000
+                                                                        01690000
+*--------------------------------------------------------------         01700000
+*   PREPARE FOR REREAD OF RECORDING TEMP TABLE                          01710000
+*--------------------------------------------------------------         01720000
+         TBSET POS=TOP,           ESTABLISH POSITION AT END OF TABLE   X01730000
+               TTOKEN=SEIAUXTK,                                        X01740000
+               MF=(E,WK256)                                             01750000
+                                                                        01760000
+         LTR   R15,R15                                                  01770000
+         BNZ   ABN_TBSV                                                 01780000
+                                                                        01790000
+         EJECT ,                                                        01800000
+***************************************************************         01810000
+*                                                                       01820000
+*   READ TEMP RECORDING ROWS REALLOCATING WORKAREA AS NEEDED            01830000
+*                                                                       01840000
+***************************************************************         01850000
+         LA    R0,$TRECAUX        FIXED LENGTH ROW BUFFER               01860000
+         ST    R0,ROWBUFR         ESTABLISH PTR                         01870000
+         LA    R0,L'$TRECAUX      LENGTH OF BUFFER                      01880000
+         ST    R0,ROWBUFL         ESTABLISH LENGTH                      01890000
+                                                                        01900000
+NEXTROW  DS    0H                                                       01910000
+         TBGET *ROWBUFR,          GET NEXT STORED RECORDING ROW        X01920000
+               LENGTH=*ROWBUFL,                                        X01930000
+               POS=NEXT,                                               X01940000
+               TTOKEN=SEIAUXTK,                                        X01950000
+               MF=(E,WK256)                                             01960000
+                                                                        01970000
+         CH    R15,=AL2(RC04)     TEST COMPLETION STATUS                01980000
+         BL    ACQUIRED           ROW ACQUIRED                          01990000
+         BH    ABN_TBSV           TABLE SERVICES ERROR                  02000000
+         LTR   R2,R0              ROW BUFFER TOO SMALL?                 02010000
+         BZ    EOT                END OF TEMP TABLE REACHED             02020000
+                                                                        02030000
+*--------------------------------------------------------------         02040000
+*   ROW BUFFER ALLOCATION IS NOT SUFFICIENT - FREE AND REALLOC          02050000
+*--------------------------------------------------------------         02060000
+         TM    FLAGS,FEXBUFR      ROW BUFFER DYNAMICALLY ALLOCATED?     02070000
+         BNO   REALLOC            SKIP IF NOT                           02080000
+                                                                        02090000
+         L     R3,ROWBUFR         FETCH BUFFER ADDRESS                  02100000
+         $RETSTOR (R3)            RELEASE IT                            02110000
+                                                                        02120000
+REALLOC  DS    0H                                                       02130000
+         L     R3,ROWBUFL         LENGTH OF OLD BUFFER                  02140000
+         AR    R3,R3              DOUBLE IT                             02150000
+         CR    R3,R2              SUFFICIENT TO SATISFY LAST REQUEST?   02160000
+         BNL   *+6                SKIP IF SO                            02170000
+         LR    R3,R2              ELSE RAISE THE POLE ACCORDINGLY       02180000
+                                                                        02190000
+         $GETSTOR (R3)            ACQUIRE A NEW BUFFER                  02200000
+                                                                        02210000
+         ST    R1,ROWBUFR         POST NEW BUFFER ADDRESS               02220000
+         ST    R3,ROWBUFL         AND ITS LENGTH                        02230000
+         OI    FLAGS,FEXBUFR      ROW BUFFER DYNAMICALLY ALLOCATED      02240000
+         B     NEXTROW            RETRY                                 02250000
+                                                                        02260000
+*--------------------------------------------------------------         02270000
+*   APPLY ACQUIRED ROW TO THE PROJECT'S CATALOG                         02280000
+*--------------------------------------------------------------         02290000
+ACQUIRED DS    0H                                                       02300000
+         L     R6,ROWBUFR         TEMP RECORDING ROW                    02310000
+         USING TRECAUX,R6         MAPPED                                02320000
+                                                                        02330000
+         CLC   =C'SSKS',TRECTYPE  SYSSKS ROW                            02340000
+         BE    SKS                                                      02350000
+         CLC   =C'SIMG',TRECTYPE  SYSIMAGE ROW                          02360000
+         BE    IMAGE                                                    02370000
+         CLC   =C'SNAV',TRECTYPE  SYSNAVIGATION ROW                     02380000
+         BE    NAVIGATE                                                 02390000
+         EX    R0,*               ASSERT CORRECTNESS OF ROW             02400000
+                                                                        02410000
+         EJECT ,                                                        02420000
+***************************************************************         02430000
+*                                                                       02440000
+*   SYSSKS ENTRY ACCEPTED                                               02450000
+*                                                                       02460000
+***************************************************************         02470000
+SKS      DS    0H                                                       02480000
+         L     R5,TRECVARX+4      LOCATE INNER RECORD                   02490000
+         USING SYSSKS,R5          SKS VARX RELOCATION                   02500000
+         MVC   SSKSREC,SEISREC    ASSOC SKS WITH RECORDING              02510000
+                                                                        02520000
+         L     R0,SSKSCRPT+4      OFFSET TO VARX SCRIPT                 02530000
+         AR    R0,R5              CONVERT TO ADDRESS                    02540000
+         ST    R0,SSKSCRPT+4      DATABASE-READY INNER ROW              02550000
+                                                                        02560000
+         TBADD (R5),              ADD ROW TO SYSSKS                    X02570000
+               TTOKEN=PRJTKSKS,                                        X02580000
+               MF=(E,WK256)                                             02590000
+                                                                        02600000
+         CH    R15,=AL2(RC08)     REQUEST COMPLETE?                     02610000
+         BNL   ABN_TBSV           FAIL IF NOT                           02620000
+                                                                        02630000
+         ST    R0,ID#SKS          SAVE KEY FOR TABLE LINKAGE            02640000
+         B     NEXTROW            DONE                                  02650000
+         DROP  R5                 SYSSKS                                02660000
+                                                                        02670000
+         EJECT ,                                                        02680000
+***************************************************************         02690000
+*                                                                       02700000
+*   SYSIMAGE ENTRY ACCEPTED                                             02710000
+*                                                                       02720000
+***************************************************************         02730000
+IMAGE    DS    0H                                                       02740000
+         L     R5,TRECVARX+4      LOCATE INNER RECORD                   02750000
+         USING SYSIMAGE,R5        IMAGE VARX RELOCATION                 02760000
+         MVC   SIMGREC,SEISREC    ASSOC IMAGE WITH RECORDING            02770000
+                                                                        02780000
+         L     R0,SIMGBUFR+4      OFFSET TO VARX IMAGE                  02790000
+         AR    R0,R5              CONVERT TO ADDRESS                    02800000
+         ST    R0,SIMGBUFR+4      DATABASE-READY INNER ROW              02810000
+                                                                        02820000
+         TBADD (R5),              ADD ROW TO SYSIMAGE                  X02830000
+               TTOKEN=PRJTKIMG,                                        X02840000
+               MF=(E,WK256)                                             02850000
+                                                                        02860000
+         CH    R15,=AL2(RC08)     REQUEST COMPLETE?                     02870000
+         BNL   ABN_TBSV           FAIL IF NOT                           02880000
+                                                                        02890000
+         ST    R0,ID#IMG          SAVE IMAGE KEY FOR TABLE LINKAGE      02900000
+         B     NEXTROW            DONE                                  02910000
+         DROP  R5                 SYSIMAGE                              02920000
+                                                                        02930000
+         EJECT                                                          02940000
+***************************************************************         02950000
+*                                                                       02960000
+*   SYSNAVIGATION ENTRY ACCEPTED - BUILD CROSS-TABLE LINKAGES           02970000
+*                                                                       02980000
+***************************************************************         02990000
+NAVIGATE DS    0H                                                       03000000
+         L     R5,TRECVARX+4      LOCATE SYSIMAGE RECORD                03010000
+         USING SNAVSECT,R5        MAP                                   03020000
+         MVC   SNAVREC,SEISREC    ASSOC IMAGE WITH RECORDING            03030000
+         MVC   SNAVSKSK,ID#SKS    FOREIGN KEY TO SYSSKS OR ZERO         03040000
+                                                                        03050000
+*--------------------------------------------------------------         03060000
+*   DESCRIBE S0                                                         03070000
+*--------------------------------------------------------------         03080000
+         TM    SNAVLSCR,BF        SPECIAL SOURCE STATE?                 03090000
+         BNZ   S0SET              NO ASSOCIATED SCREEN NUMBER IF SO     03100000
+         MVC   SNAVLKEY,LIMGRID   KEY (ROWID) OF PREV CAPTURED IMAGE    03110000
+         L     R1,SCRNBASE        EXTERNAL STATE # BASE                 03120000
+         AH    R1,SNAVLNO#        RELOCATE TO ASSIGNED RANGE            03130000
+         STH   R1,SNAVLNO#        SAVE EXTERNAL DESIGNATION             03140000
+                                                                        03150000
+         LA    R2,SCRNAME                                               03160000
+         TM    SNAVFLG0,SNV0CLR                                         03170000
+         BNO   *+8                                                      03180000
+         LA    R2,CLRNAME                                               03190000
+                                                                        03200000
+         BASR  R14,R2             GENERATE SCREEN NAME                  03210000
+         MVC   SNAVLSCR,0(R1)     INSERT IN ROW                         03220000
+                                                                        03230000
+S0SET    DS    0H                                                       03240000
+                                                                        03250000
+*--------------------------------------------------------------         03260000
+*   DESCRIBE S1                                                         03270000
+*--------------------------------------------------------------         03280000
+         L     R0,ID#IMG          S1 SYSIMAGE ROWID OR ZERO             03290000
+         ST    R0,SNAVRKEY        IDENTIFY S1 STATE                     03300000
+         ST    R0,LIMGRID         PRESERVE FOR SUBSEQUENT SNAV.S0       03310000
+                                                                        03320000
+         TM    SNAVRSCR,BF        SPECIAL TARGET STATE?                 03330000
+         BNZ   S1SET              SKIP IF SO                            03340000
+         L     R1,SCRNBASE        EXTERNAL STATE # BASE                 03350000
+         AH    R1,SNAVRNO#        RELOCATE TO ASSIGNED RANGE            03360000
+         STH   R1,SNAVRNO#        SAVE EXTERNAL DESIGNATION             03370000
+                                                                        03380000
+         LA    R2,SCRNAME                                               03390000
+         TM    SNAVFLG1,SNV1CLR                                         03400000
+         BNO   *+8                                                      03410000
+         LA    R2,CLRNAME                                               03420000
+                                                                        03430000
+         BASR  R14,R2             GENERATE SCREEN NAME                  03440000
+         MVC   SNAVRSCR,0(R1)     INSERT IN ROW                         03450000
+                                                                        03460000
+S1SET    DS    0H                                                       03470000
+                                                                        03480000
+*--------------------------------------------------------------         03490000
+*   ADD NAVIGATION ENTRY IN TIME-SEQUENCED ORDER                        03500000
+*--------------------------------------------------------------         03510000
+         L     R15,SEQ#NAV        SYSNAV ENTRY SEQUENCE NUMBER          03520000
+         LA    R15,1(,R15)        ACCOUNT FOR THIS ENTRY                03530000
+         ST    R15,SEQ#NAV        SAVE UPDATED COUNT                    03540000
+         STH   R15,SNAVSEQ#       POST ENTRY SEQUENCE NUMBER            03550000
+                                                                        03560000
+         TBADD (R5),              ADD ROW TO SYSNAVIGATION             X03570000
+               TTOKEN=PRJTKNAV,                                        X03580000
+               MF=(E,WK256)                                             03590000
+                                                                        03600000
+         CH    R15,=AL2(RC08)     REQUEST COMPLETE?                     03610000
+         BNL   ABN_TBSV           FAIL IF NOT                           03620000
+                                                                        03630000
+         XC    ID#KEYS(ID#KEYLN),ID#KEYS                                03640000
+         B     NEXTROW            DONE                                  03650000
+         DROP  R5,R6              SYSNAVIGATION, TRECAUX                03660000
+                                                                        03670000
+         EJECT ,                                                        03680000
+***************************************************************         03690000
+*                                                                       03700000
+*   VALIDATE RECORDING - REMOVE SYSRECORDINGS 'INVALID' FLAG.           03710000
+*   NOTE THAT THE TBDELETE/TBADD SEQUENCE EMPLOYED GUARANTEES           03720000
+*   THAT THE ROWID IS PRESERVED.                                        03730000
+*                                                                       03740000
+***************************************************************         03750000
+EOT      DS    0H                                                       03760000
+         LA    R5,$SYSREC         SYSRECORDINGS ROW BUFFER              03770000
+         USING SRECSECT,R5        MAPPED                                03780000
+         MVC   SRECNAME,SEIRECNM  RECORDING NAME IS TABLE KEY           03790000
+                                                                        03800000
+         TBEXIST $SYSREC,         TARGET ROW                           X03810000
+               LENGTH=$SYSRECL,                                        X03820000
+               TTOKEN=PRJTKREC,                                        X03830000
+               INDEX='RECNAME',                                        X03840000
+               KEYROW=$SYSREC,    KEY PREPARED IN TARGET ROW           X03850000
+               MF=(E,WK256)                                             03860000
+                                                                        03870000
+         LTR   R15,R15            TEST COMPLETION STATUS                03880000
+         BNZ   ABN_TBSV                                                 03890000
+                                                                        03900000
+         NI    SRECFLG1,FF-SRECFINV   VALIDATE THE ENTRY                03910000
+                                                                        03920000
+*--------------------------------------------------------------         03930000
+*   UPDATE ROW - DELETE OLD COPY AND INSERT UPDATED VERSION             03940000
+*--------------------------------------------------------------         03950000
+         TBDELETE POS=CURRENT,    DELETE OLD VERSION                   X03960000
+               TTOKEN=PRJTKREC,                                        X03970000
+               MF=(E,WK256)                                             03980000
+                                                                        03990000
+         CH    R15,=AL2(RC08)     REQUEST COMPLETE?                     04000000
+         BNL   ABN_TBSV           FAIL IF NOT                           04010000
+                                                                        04020000
+         TBADD $SYSREC,           REPLACE RECORDING DEFINITION         X04030000
+               TTOKEN=PRJTKREC,                                        X04040000
+               MF=(E,WK256)                                             04050000
+                                                                        04060000
+         CH    R15,=AL2(RC08)     REQUEST COMPLETE?                     04070000
+         BNL   ABN_TBSV           FAIL IF NOT                           04080000
+         B     RET_NORM           DONE                                  04090000
+         DROP  R5                 SRECSECT                              04100000
+                                                                        04110000
+         EJECT ,                                                        04120000
+***************************************************************         04130000
+*                                                                       04140000
+*   CLEANUP AND RETURN COMPLETION STATUS TO REQUESTOR                   04150000
+*                                                                       04160000
+***************************************************************         04170000
+RET_NORM DS    0H                                                       04180000
+         LA    R15,RC00           NORMAL COMPLETION                     04190000
+         SR    R0,R0                                                    04200000
+         SR    R1,R1                                                    04210000
+         B     RETURN             DONE                                  04220000
+                                                                        04230000
+ERR_NULL DS    0H                 RECORDING IS EMPTY                    04240000
+         LA    R15,RC04                                                 04250000
+         SR    R0,R0                                                    04260000
+         SR    R1,R1                                                    04270000
+         B     RETURN                                                   04280000
+                                                                        04290000
+ERR_SEQ  DS    0H                 RECORDING NOT ACTIVE                  04300000
+         LA    R15,RC08                                                 04310000
+         SR    R0,R0                                                    04320000
+         SR    R1,R1                                                    04330000
+         B     RETURN                                                   04340000
+                                                                        04350000
+RETURN   DS    0H                                                       04360000
+         STM   R15,R1,RETSTATS    SAVE ENDING STATUS                    04370000
+                                                                        04380000
+*--------------------------------------------------------------         04390000
+*   RELEASE RESOURCES                                                   04400000
+*--------------------------------------------------------------         04410000
+         TM    FLAGS,FLOCK        PROJECT MIL ACQUIRED?                 04420000
+         BNO   REL_LOCK           SKIP IF NOT                           04430000
+                                                                        04440000
+         $SER  RELEASE,LOCKPTR=PRJMILK                                  04450000
+                                                                        04460000
+REL_LOCK DS    0H                                                       04470000
+                                                                        04480000
+         TM    FLAGS,FEXBUFR      EXTERNAL BUFFER ALLOCATED?            04490000
+         BNO   REL_BUFR           SKIP IF NOT                           04500000
+                                                                        04510000
+         L     R3,ROWBUFR         BUFFER ORIGIN                         04520000
+         $RETSTOR (R3)            RELEASE IT                            04530000
+                                                                        04540000
+REL_BUFR DS    0H                                                       04550000
+                                                                        04560000
+         TM    FLAGS,FRCVRY       RECOVERY ENVIRONMENT ESTABLISHED      04570000
+         BNO   REL_RCVY           SKIP IF NOT                           04580000
+                                                                        04590000
+         $RCVRY DELETE,MF=(E,MFE_LIST)                                  04600000
+                                                                        04610000
+REL_RCVY DS    0H                                                       04620000
+                                                                        04630000
+*--------------------------------------------------------------         04640000
+*   PERFORM END-OF-RECORDING CLEANUP                                    04650000
+*--------------------------------------------------------------         04660000
+         L     R0,RETCODE         COMPLETION CODE IS TERM TYPE          04670000
+         LA    R1,SESSIMAG        CONTROL AREA                          04680000
+                                                                        04690000
+         @CALL IRECTERM,CTYPE=CVT CLEANUP                               04700000
+                                                                        04710000
+*--------------------------------------------------------------         04720000
+*   RETURN TO CALLER                                                    04730000
+*--------------------------------------------------------------         04740000
+         LM    R15,R1,RETSTATS    POST COMPLETION STATUS                04750000
+                                                                        04760000
+         #EXIT ,                                                        04770000
+                                                                        04780000
+         EJECT                                                          04790000
+***************************************************************         04800000
+*                                                                       04810000
+*   CATASTROPHIC FAILURES                                               04820000
+*                                                                       04830000
+***************************************************************         04840000
+ABN_TBSV DS    0H                 CATALOG / TABLE SERVICE FAILURE       04850000
+                                                                        04860000
+         $ABEND ABE_TBSERV,DUMP=YES,                                   X04870000
+               TITLE='TABLE SERVICE FAILURE'                            04880000
+                                                                        04890000
+         EJECT                                                          04900000
+***************************************************************         04910000
+*                                                                       04920000
+* ROUTINE: SCRNAME - GENERATE SCREEN NAME                               04930000
+*                                                                       04940000
+* ON ENTRY:                                                             04950000
+*                                                                       04960000
+*    R1 - EXTERNAL SCREEN NUMBER                                        04970000
+*                                                                       04980000
+* ON EXIT:                                                              04990000
+*                                                                       05000000
+*    R1 - SCREEN NAME (CL16)                                            05010000
+*                                                                       05020000
+***************************************************************         05030000
+SCRNAME  DS    0H                                                       05040000
+         MVC   $SCRNAME,SCRPFX    INITIALIZE SCREEN NAME                05050000
+                                                                        05060000
+         CVD   R1,DWORD           CONVERT TO DECIMAL                    05070000
+         MVC   FWORD,DWORD+4      LAST 7 DIGITS                         05080000
+         MVC   DWORD,=X'4020202020202120'                               05090000
+         LA    R1,DWORD+7         ENSURE SIGNIFICANCE                   05100000
+         EDMK  DWORD,FWORD                                              05110000
+         LA    R15,DWORD+7        LAST BYTE OF RESULT                   05120000
+         SR    R15,R1             LENGTH CODE OF RESULT                 05130000
+         EX    R15,*+4            APPEND TO TEMP TABLE PREFIX           05140000
+                                                                        05150000
+         MVC   $SCRNAME+L'SCRPFX(*-*),0(R1)                             05160000
+                                                                        05170000
+         LA    R1,$SCRNAME        RETURN SCREEN NAME                    05180000
+         BR    R14                DONE                                  05190000
+                                                                        05200000
+SCRPFX   DC    C'SCREEN'          SCREEN NAME PREFIX                    05210000
+         DC    CL16' '            BLANK PADDED                          05220000
+                                                                        05230000
+         EJECT                                                          05240000
+***************************************************************         05250000
+*                                                                       05260000
+* ROUTINE: CLRNAME - GENERATE CLEAR SCREEN NAME                         05270000
+*                                                                       05280000
+* ON ENTRY:                                                             05290000
+*                                                                       05300000
+*    R1 - EXTERNAL SCREEN NUMBER                                        05310000
+*                                                                       05320000
+* ON EXIT:                                                              05330000
+*                                                                       05340000
+*    R1 - SCREEN NAME (CL16)                                            05350000
+*                                                                       05360000
+***************************************************************         05370000
+CLRNAME  DS    0H                                                       05380000
+         MVC   $SCRNAME,CLRPFX    INITIALIZE CLEAR SCREEN NAME          05390000
+                                                                        05400000
+         CVD   R1,DWORD           CONVERT TO DECIMAL                    05410000
+         MVC   FWORD,DWORD+4      LAST 7 DIGITS                         05420000
+         MVC   DWORD,=X'4020202020202120'                               05430000
+         LA    R1,DWORD+7         ENSURE SIGNIFICANCE                   05440000
+         EDMK  DWORD,FWORD                                              05450000
+         LA    R15,DWORD+7        LAST BYTE OF RESULT                   05460000
+         SR    R15,R1             LENGTH CODE OF RESULT                 05470000
+         EX    R15,*+4            APPEND TO TEMP TABLE PREFIX           05480000
+                                                                        05490000
+         MVC   $SCRNAME+L'CLRPFX(*-*),0(R1)                             05500000
+                                                                        05510000
+         LA    R1,$SCRNAME        RETURN SCREEN NAME                    05520000
+         BR    R14                DONE                                  05530000
+                                                                        05540000
+CLRPFX   DC    C'CLEAR'           CLEAR SCREEN NAME PREFIX              05550000
+         DC    CL16' '            BLANK PADDED                          05560000
+                                                                        05570000
+         EJECT                                                          05580000
+***************************************************************         05590000
+*                                                                       05600000
+*   $RCVRY RESOURCE MANAGER                                             05610000
+*                                                                       05620000
+***************************************************************         05630000
+RSRCMGR  DS    0H                                                       05640000
+         PUSH  USING              PRESERVE STD ENVIRONMENT              05650000
+         DROP  R13                PRECLUDE UNINTENTIONAL REFERENCES     05660000
+         STM   R14,R12,12(R13)    SAVE ENTRANCE REGS                    05670000
+                                                                        05680000
+         LR    R3,R1              RESTORE ORIGINAL WORKAREA ADDR        05690000
+W        USING WORKAREA,R3        ADDRESSABILITY                        05700000
+                                                                        05710000
+         LA    R2,W.WK256         WORKING STORAGE AREA                  05720000
+         XC    0(72,R2),0(R2)     USER FOR SAVEAREA                     05730000
+         ST    R2,8(,R13)         SA FWD CHAIN                          05740000
+         ST    R13,4(,R2)         SA BWD CHAIN                          05750000
+         LR    R13,R2             AVAIL FOR SERVICE ROUTINES            05760000
+                                                                        05770000
+*--------------------------------------------------------------         05780000
+*   RELEASE PROJECT MIL IF HELD                                         05790000
+*--------------------------------------------------------------         05800000
+         TM    W.FLAGS,FLOCK      PROJECT MIL HELD?                     05810000
+         BNO   RSRCPERC           SKIP IF NOT                           05820000
+                                                                        05830000
+         $SER  RELEASE,LOCKPTR=PRJMILK,COND=YES                         05840000
+                                                                        05850000
+         NI    W.FLAGS,FF-FLOCK   INDICATE LOCK RELEASED                05860000
+                                                                        05870000
+*--------------------------------------------------------------         05880000
+*   RETURN TO RECOVERY                                                  05890000
+*--------------------------------------------------------------         05900000
+RSRCPERC DS    0H                 PERCOLATE                             05910000
+         LA    R15,RC00                                                 05920000
+                                                                        05930000
+         L     R13,4(,R13)                                              05940000
+         L     R14,12(,R13)                                             05950000
+         LM    R0,R12,20(R13)                                           05960000
+         BR    R14                                                      05970000
+         POP   USING                                                    05980000
+                                                                        05990000
+         EJECT                                                          06000000
+***************************************************************         06010000
+*                                                                       06020000
+*   LOCAL READ-ONLY DATA AREAS                                          06030000
+*                                                                       06040000
+***************************************************************         06050000
+         LTORG ,                                                        06060000
+                                                                        06070000
+         EJECT                                                          06080000
+         PRINT NOGEN                                                    06090000
+         ICVT  ,                                                        06100000
+         ITASK ,                                                        06110000
+         IPCB  ,                                                        06120000
+         END   ,                                                        06130000
