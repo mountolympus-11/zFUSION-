@@ -1,0 +1,1794 @@
+ILOGMGR  TITLE 'ILOGMGR - LOG FILE MANAGER'                             00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE: ILOGMGR - Log file manager                                   00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This routine provides a message logging function that              00080000
+*    accepts message buffers in $MSGHDR format via intertask            00090000
+*    $TSEND requests, formats those messages, and writes them           00100000
+*    to a pool of one or more sequential datasets.                      00110000
+*                                                                       00120000
+*    If a single dataset (file) is provided, once full, it is           00130000
+*    closed, reopend, and rewritten erasing all prior contents          00140000
+*    in the process.  When multiple files are given, each file          00150000
+*    is filled in turn, reusing the first file only after all           00160000
+*    of the other files have been filled, and so on.                    00170000
+*                                                                       00180000
+*    Candidate log files have DDNAMEs of the form LOGFILE#,             00190000
+*    where # designates a decimal digit in the range 1-9.               00200000
+*    Logging begins with the lowest numbered file, and proceeds         00210000
+*    thruough to the highest numbered file before wrapping.             00220000
+*    Log files do not need to be consecutively or contiguously          00230000
+*    numbered.                                                          00240000
+*                                                                       00250000
+*    Log files may be have fixed or variable length records.            00260000
+*    If not specified at allocation time or via JCL, the                00270000
+*    variable length format is selected by default.  Record             00280000
+*    length and blocksize are assigned.  Improper values are            00290000
+*    replaced without notification.                                     00300000
+*                                                                       00310000
+*                                                                       00320000
+* NOTES:                                                                00330000
+*                                                                       00340000
+*    Multiline messages normally chained via addresses in               00350000
+*    $MSGHDR.$MSBLINK must be converted to offsets using the            00360000
+*    first $MSGHDR address as base by the requester.                    00370000
+*                                                                       00380000
+*                                                                       00390000
+* FUTURES:                                                              00400000
+*                                                                       00410000
+*    Currently, a $ABEND is issued if no log files are                  00420000
+*    available initially, or if all files become unavailable            00430000
+*    during execution.  It would be desirable to leave the log          00440000
+*    task running possibly diverting all input messages to the          00450000
+*    joblog and remaining responsive to operator commands which         00460000
+*    may be used to diagnose the cause of failure.                      00470000
+*                                                                       00480000
+**<DOC-OFF>****************************************************         00490000
+                                                                        00500000
+         EJECT ,                                                        00510000
+***************************************************************         00520000
+*                                                                       00530000
+* MAINTENANCE:                                                          00540000
+*                                                                       00550000
+*    04/27/93 R. Turgeon                                                00560000
+*             Initial version                                           00570000
+*                                                                       00580000
+*    05/10/95 R. Colmone          Par# 187851                           00590000
+*             Retry sending command response to command                 00600000
+*             scheduler if undeliverable to original requester          00610000
+*                                                                       00620000
+*    12/11/95 R. Turgeon          Rel 2.1                               00630000
+*             Eliminate TIME SVC in message formatting loop             00640000
+*             for a multiline message                                   00650000
+*                                                                       00660000
+***************************************************************         00670000
+                                                                        00680000
+         EJECT ,                                                        00690000
+WORKAREA #WORK ,             BEGIN WORKAREA                             00700000
+FILDCB   DS    0F            DCB ATTRIBUTES OF ALL ELIBIGLE FILES       00710000
+FILRSVD  DS    XL3              RESERVED                                00720000
+FILRECFM DS    C                RECFM: LOG_FIXED OR LOG_VARIABLE        00730000
+FILLRECL DS    H                LRECL                                   00740000
+FILBLKSI DS    H                BLKSIZE                                 00750000
+FILFIRST DS    CL8              DDNAME OF FIRST LOG FILE                00760000
+                                                                        00770000
+STATUS   DS    X             STATUS FLAGS                               00780000
+STIOACT  EQU   X'80'            BUFFER WRITE IN PROGRESS                00790000
+STPEND   EQU   X'40'            'PENDING' BUFFER AWAITING WRITE         00800000
+STMSGQ   EQU   X'20'            MSGQUEUE ANCHORS INBOUND MESSAGES       00810000
+STCURECS EQU   X'10'            'CURRENT' BUFFER CONTAINS RECORDS       00820000
+STFAIL   EQU   X'08'            FILE FAILURE                            00830000
+STSWITCH EQU   X'04'            FILE SWITCH IN PROGRESS                 00840000
+STDRAIN  EQU   X'02'            TASK STOP LOG & TERMINATE REQUEST       00850000
+STTERM   EQU   STFAIL+STSWITCH+STDRAIN                                  00860000
+                                                                        00870000
+CMDFLAGS DS    X             EXPLICIT COMMAND REQUESTS                  00880000
+CMD$STOP EQU   X'80'            DRAIN AND STOP                          00890000
+CMD$CNCL EQU   X'40'            CANCEL                                  00900000
+CMD$SWIT EQU   X'08'            FILE SWITCH                             00910000
+CMD$FLSH EQU   X'04'            FLUSH AND TCLOSE                        00920000
+CMD$NMSG EQU   X'01'            NO CONFIRMATION MSG DESIRED             00930000
+CMDFUSER EQU   X'0F'            LOG SPECIFIC, USER INITIATED CMD REQS   00940000
+                                                                        00950000
+IOFUNC   DS    C             I/O REQUEST IN PROGRESS                    00960000
+IOF_NA   EQU   C' '                                                     00970000
+IOF_OPEN EQU   C'O'                                                     00980000
+IOF_CLOS EQU   C'C'                                                     00990000
+IOF_WRIT EQU   C'W'                                                     01000000
+IOF_CHCK EQU   C'K'                                                     01010000
+IOF_TCLS EQU   C'T'                                                     01020000
+                                                                        01030000
+IOERRDOC DS    X             I/O ERROR DOCUMENTATION FLAGS              01040000
+IOERR_SYNAD    EQU  X'80'       SYNAD MSG POSTED                        01050000
+                                                                        01060000
+BYTE     DS    X             WORKAREA                                   01070000
+RSVD1    DS    XL3           RESERVED                                   01080000
+TEXTLEN  DS    F             LENGTH OF MSG TEXT AFTER TRUNCATION        01090000
+RESUME   DS    A             ADDR OF ABEND RECOVERY RESUMPTION PT       01100000
+#FILES   DS    F             # OF USABLE LOG FILES                      01110000
+CURRLOG  DS    A             CURRENT LOGFILE ARRAY ENTRY                01120000
+MSGBASE  DS    A             ADDR OF 1ST MSG OF MULTILINE PACKET        01130000
+MSGQUEUE DS    A             ADDR OF NEXT INBOUND MSG LINE OR ZERO      01140000
+STOP_EPB DS    A             ADDR OF STOP REQUEST EPB OR ZERO           01150000
+RESTOKEN DS    F             $RESMGR RESOURCE MGR ROUTINE TOKEN         01160000
+                                                                        01170000
+RCVAREA  DS    A             INBOUND MSG RECEPTION AREA                 01180000
+RCVALN   DS    F             LENGTH OF RECEPTION AREA                   01190000
+                                                                        01200000
+BUFRCURR DS    A             CURRENT BUFFER                             01210000
+BUFRCBDW DS    A             CURRENT BUFFER BDW PTR OR ZERO             01220000
+BUFRNEXT DS    A             CURRENT BUFFER NEXT AVAILABLE BYTE         01230000
+BUFRLEFT DS    F             CURRENT BUFFER SPACE REMAINING             01240000
+BUFRPEND DS    A             PENDING BUFFER (I/O PENDING OR IN PROG)    01250000
+BUFRPLEN DS    F             PENDING BUFFER I/O TRANSFER LENGTH         01260000
+BUFRSIZE DS    F             SIZE OF CURRENT AND PENDING BUFFERS        01270000
+                                                                        01280000
+LOGARBXL DS    3F               LOGFILE ARRAY SCAN BXLE PARMS           01290000
+LOGARRAY DS    9XL(LOGFLN)      LOGFILE ARRAY (1-9)                     01300000
+LOGAREND EQU   *                LOGFILE ARRAY END                       01310000
+                                                                        01320000
+TIMEDATE DS    0F,0F         TIME AND DATE RETENTION                    01330000
+SAVETIME DS    F                TIME AS HHMMSSTH                        01340000
+SAVEDATE DS    F                DATE AS **DDYYYF                        01350000
+                                                                        01360000
+$CMDREQ  DS    A             ADDR COMMAND FUNCTION CMD REQUEST BLOCK    01370000
+$MSGRSRC DS    A             ADDR COMMAND FUNCTION MSG RESOURCE ID      01380000
+$RESPRCV DS    A             ADDR CMD FUNC RECIPIENT TASK NAME          01390000
+$CMDSCHD DS    A             ADDR OF COMMAND SCHEDULER WORKUNIT NAME    01400000
+                                                                        01410000
+EYEDATE  DS    CL5           YYDDD   - CURRENT RECORD                   01420000
+EYETIME  DS    CL7           HHMMSS* - CURRENT RECORD                   01430000
+LASTDATE DS    CL5           YYDDD   - PREVIOUS RECORD                  01440000
+LASTTIME DS    CL7           HHMMSS* - PREVIOUS RECORD                  01450000
+CURFDATE DS    CL6           YY.DDD  - PRESENTATION READY DATE          01460000
+CURFTIME DS    CL8           HH:MM:SS- PRESENTATION READY TIME          01470000
+                                                                        01480000
+$RESMFL  $RESMGR MF=L        $RESMGR PLIST CONSTRUCTION AREA            01490000
+$SRMMFL  $SRM  MF=L          $SRM  PLIST CONSTRUCTION AREA              01500000
+$TASKMFL $TASK MF=L          $TASK PLIST CONSTRUCTION                   01510000
+                                                                        01520000
+PROCREGS DS    16F           PROCLOG ROUTINE REGISTER SAVEAREA          01530000
+WRIREGS  DS    16F           WRIBUFR ROUTINE REGISTER SAVEAREA          01540000
+IMSGREGS DS    16F           IMSGS   ROUTINE REGISTER SAVEAREA          01550000
+REGSAVE  DS    16F           LOCAL SUBROUTINE REGISTER SAVEAREA #1      01560000
+REGSAVEX DS    16F           LOCAL SUBROUTINE REGISTER SAVEAREA #2      01570000
+WK256    DS    XL256         GENERAL PURPOSE WORKAREA                   01580000
+                                                                        01590000
+***************************************************************         01600000
+*                                                                       01610000
+*   Log record formatting area                                          01620000
+*                                                                       01630000
+***************************************************************         01640000
+                                                                        01650000
+MAXDATA  EQU   132           MAX LENGTH DATA PORTION OF RECORD          01660000
+                                                                        01670000
+$RECORG  DS    A             LOGICAL RECORD ORIGIN (RECFM DEPENDENT)    01680000
+$RECLEN  DS    F             LOGICAL RECORD LENGTH (RECFM DEPENDENT)    01690000
+                                                                        01700000
+RECLINE  DS    0F            INTERMEDIATE LOG RECORD BUFFER             01710000
+RECRDW   DS    F             RDW IF VARIABLE LENGTH RECORD              01720000
+RECHDR   DS    0C            LOG RECORD HEADER                          01730000
+RECDATE  DS    C'YY.DDD'     DATE STAMP                                 01740000
+RECSPC1  DS    C             SEPARATOR                                  01750000
+RECTIME  DS    C'HH:MM:SS'   TIME STAMP                                 01760000
+RECSPC2  DS    C             SEPARATOR                                  01770000
+RECMORG  DS    CL8           MSG SOURCE ITASK                           01780000
+RECHDRL  EQU   *-RECHDR                                                 01790000
+RECDATA  DS    CL(MAXDATA-RECHDRL)                                      01800000
+                                                                        01810000
+*--------------------------------------------------------------         01820000
+*   Data management control blocks                                      01830000
+*--------------------------------------------------------------         01840000
+                                                                        01850000
+         WRITE $FDECB,SF,MF=L                                           01860000
+                                                                        01870000
+         PUSH  PRINT                                                    01880000
+         PRINT NOGEN                                                    01890000
+$LOGDCB  DCB   DSORG=PS,MACRF=(WC),DDNAME=LOGFILE#                      01900000
+         POP   PRINT                                                    01910000
+                                                                        01920000
+SYNADMSG DS    CL(128-8-42)  SYNAD MSG PRODUCED BY SYNADAF              01930000
+                                                                        01940000
+WORKLEN  #ENDWORK ,          END WORKAREA                               01950000
+                                                                        01960000
+         EJECT                                                          01970000
+         LOGFILE ,           LOG FILE DESCRIPTOR                        01980000
+                                                                        01990000
+         EJECT                                                          02000000
+         TMSG  ,             INTERTASK MSG FORMAT                       02010000
+                                                                        02020000
+         EJECT                                                          02030000
+         CMDREQ ,            INTERTASK COMMAND REQUEST BLOCK            02040000
+                                                                        02050000
+         EJECT                                                          02060000
+         $COMSEND DSECT=YES  INTERTASK CMD REQUEST/RESPOND              02070000
+                                                                        02080000
+         EJECT                                                          02090000
+         $SRM  DSECT=YES     SHARED RESOURCE MANAGEMENT                 02100000
+                                                                        02110000
+         EJECT                                                          02120000
+         $TASK DSECT=YES     $TASK SERVICES                             02130000
+                                                                        02140000
+         EJECT                                                          02150000
+         $RESMGR DSECT=YES   RESOURCE MANAGER PLIST                     02160000
+                                                                        02170000
+         EJECT                                                          02180000
+         EVCODES ,           EVENT CODES                                02190000
+*                                                                       02200000
+         ABCODES ,           $ABEND CODES                               02210000
+*                                                                       02220000
+         MSGCODES ,          INTERTASK MESSAGING CODES                  02230000
+*                                                                       02240000
+         EQUS  ,                                                        02250000
+                                                                        02260000
+         $MSGDFT PREFIX=ICTPID,COMPID='LOG',TABLE=*#MSGS,              X02270000
+               CONID=*ICTCONID,CONNAME=ICTCONNM,                       X02280000
+               MF=(E,WK256),PRINT=NOGEN                                 02290000
+         EJECT                                                          02300000
+                                                                        02310000
+         EJECT ,                                                        02320000
+ILOGMGR  #ENTER AMODE=31,RMODE=24,BASE=(R12,R9)                         02330000
+                                                                        02340000
+         USING ITASK,R10                                                02350000
+                                                                        02360000
+*-------------------------------------------------------------          02370000
+*   Assume responsibility for message queue cleanup to prevent          02380000
+*   buildup of a lengthy $GETSTOR active extent list                    02390000
+*-------------------------------------------------------------          02400000
+                                                                        02410000
+         $RESMGR ADD,ROUTINE=*#RMXMSGQ,OWNER=ITASK,                    X02420000
+               TOKEN=RESTOKEN,                                         X02430000
+               MF=(E,$RESMFL)                                           02440000
+                                                                        02450000
+         BNZ   *+8                                                      02460000
+         OI    TSKWUFLG,TSKWUFLG_MSGQRESM                               02470000
+                                                                        02480000
+*-------------------------------------------------------------          02490000
+*   Post journalling information for sensitive callers                  02500000
+*-------------------------------------------------------------          02510000
+                                                                        02520000
+         LA    R0,L'RECDATA  MAX LENGTH ACCEPTED (W/O TRUNC) OF LOG REQ 02530000
+         ST    R0,ICTLOGMX   POST FOR SENSITIVE JOURNALERS              02540000
+                                                                        02550000
+         EJECT ,                                                        02560000
+**<DOC-ON>*****************************************************         02570000
+*                                                                       02580000
+*   For each candidate file identified, open the file and test          02590000
+*   for fallout in the form of an unsuitable file (improper             02600000
+*   DSORG, etc.) or an outright open ABEND.                             02610000
+*                                                                       02620000
+*   Although the log entries can be written as either fixed             02630000
+*   or variable length records, the DCB attributes of all log           02640000
+*   files (RECFM, LRECL, and BLKSIZE) must be identical. This           02650000
+*   is required because a block not accepted by one file                02660000
+*   (out-of-space, I/O error, etc) is written to the next               02670000
+*   eligible file, as is, without reformatting.  Note that              02680000
+*   each LOGFILE entry maintains individual DCB attribute               02690000
+*   values to simplify error analysis and to provide a basis            02700000
+*   for future enhancements.                                            02710000
+*                                                                       02720000
+**<DOC-OFF>****************************************************         02730000
+                                                                        02740000
+         LA    R1,LOGARRAY        LOGFILE1-LOGFILE9 ARRAY               02750000
+         @CALL ILOGTIOT           LOCATE ELIGIBLE LOG FILES             02760000
+         LTR   R15,R15            CANDIDATES IDENTIFIED?                02770000
+         BZ    VALFIN             NOTHING TO VALIDATE                   02780000
+                                                                        02790000
+         LA    R5,LOGARRAY        VISIT FILES IN LOW TO HIGH SEQ        02800000
+         LA    R6,LOGFLN          LENGTH OF LOGFILE STATUS ENTRY        02810000
+         LA    R7,LOGAREND-1      END OF LOG FILE ARRAY IN BXLE FORMAT  02820000
+         STM   R5,R7,LOGARBXL     FILE WRAP RESTART                     02830000
+         USING LOGFILE,R5         ENTRY FORMAT                          02840000
+                                                                        02850000
+         LA    R8,$LOGDCB         DCB INSPECTION                        02860000
+         USING IHADCB,R8          LIFE OF FUNCTION ADDRESSABILITY       02870000
+                                                                        02880000
+         $RCVRY CREATE,RECOVRTN,PARM=(R13),MF=(E,MFE_LIST)              02890000
+         BNZ   ERR_STG                                                  02900000
+                                                                        02910000
+*--------------------------------------------------------------         02920000
+*   Scan candidate files, evaluate suitability via trial open           02930000
+*--------------------------------------------------------------         02940000
+                                                                        02950000
+VALFILE  DS    0H                                                       02960000
+         TM    LOGFLAGS,LOG_AVAILABLE                                   02970000
+         BNO   VALNEXT                                                  02980000
+         ST    R5,CURRLOG         IDENTIFY CURRENT LOGFILE ENTRY        02990000
+         MVC   $LOGDCB(LOGDCBLN),LOGDCB                                 03000000
+         MVC   DCBDDNAM,LOGDDN    INSERT DDNAME                         03010000
+         LA    R1,$LOGDCB         R1 <== DCB ADDRESS                    03020000
+         BAS   R14,OPENFILE       OPEN THE DCB                          03030000
+                                                                        03040000
+         TM    DCBOFLGS,DCBOFOPN  SUCCESSFUL OPEN?                      03050000
+         BNO   VALFAIL            COULD NOT OPEN                        03060000
+         TM    LOGFLAGS,LOG_UNSUITABLE  SUITABLE FOR INTENDED USE?      03070000
+         BO    VALFAIL            REJECT IF NOT                         03080000
+                                                                        03090000
+*--------------------------------------------------------------         03100000
+*   Ensure conformance of log file attributes                           03110000
+*--------------------------------------------------------------         03120000
+                                                                        03130000
+         TM    FILFIRST,BF        FIRST FILE ACCEPTED?                  03140000
+         BNZ   VALCONFM           CONFORMANCE TEST IF NOT               03150000
+         MVC   FILFIRST,LOGDDN    FILE DDNAME                           03160000
+         MVC   FILRECFM,LOGRECFM  RECORD FORMAT                         03170000
+         MVC   FILBLKSI,LOGBLKSI  BLOCKSIZE                             03180000
+         MVC   FILLRECL,LOGLRECL  LRECL                                 03190000
+         B     VALACQ             FILE ACCEPTED                         03200000
+                                                                        03210000
+VALCONFM DS    0H                                                       03220000
+         OI    LOGFLAGS,LOG_CONFLICT      PRESUMPTION                   03230000
+         CLC   FILRECFM,LOGRECFM          RECFM CONFORMANCE             03240000
+         BNE   VALFAIL                                                  03250000
+         CLC   FILBLKSI,LOGBLKSI          BLKSIZE CONFORMANCE           03260000
+         BNE   VALFAIL                                                  03270000
+         CLC   FILLRECL,LOGLRECL          LRECL CONFORMANCE             03280000
+         BNE   VALFAIL                                                  03290000
+         NI    LOGFLAGS,FF-LOG_CONFLICT   RETRACTION                    03300000
+                                                                        03310000
+VALACQ   DS    0H                 FILE ACCEPTED                         03320000
+         L     R15,#FILES         NUMBER OF AVAILABLE LOG FILES         03330000
+         LA    R15,1(,R15)        ACCOUNT FOR THIS ONE                  03340000
+         ST    R15,#FILES         SAVE UPDATED ELIGIBILES               03350000
+         B     VALNEXT            DONE FOR NOW                          03360000
+                                                                        03370000
+VALFAIL  DS    0H                 LOG FILE REJECTED                     03380000
+         LA    R1,LOGFILE         R1 <== FILE DESCRIPTOR                03390000
+         BAS   R14,DROPFILE       DOCUMENT FILE FAILURE AND CLEANUP     03400000
+                                                                        03410000
+*--------------------------------------------------------------         03420000
+*   Close current file and redrive validation for next file             03430000
+*--------------------------------------------------------------         03440000
+                                                                        03450000
+VALNEXT  DS    0H                 ADVANCE TO NEXT FILE                  03460000
+         TM    DCBOFLGS,DCBOFOPN  LAST FILE PROCESSED IS OPEN?          03470000
+         BNO   VALADV             SKIP IF NOT                           03480000
+         LA    R1,$LOGDCB         R1 <== DCB ADDRESS                    03490000
+         BAS   R14,CLOSFILE       CLOSE THE FILE                        03500000
+                                                                        03510000
+VALADV   DS    0H                                                       03520000
+         BXLE  R5,R6,VALFILE      VERIFY NEXT FILE                      03530000
+                                                                        03540000
+VALFIN   DS    0H                 VALIDATION COMPLETE                   03550000
+         DROP  R5                 LOGFILE                               03560000
+                                                                        03570000
+         EJECT ,                                                        03580000
+**<DOC-ON>*****************************************************         03590000
+*                                                                       03600000
+*   Now select the next log file starting with the file having          03610000
+*   the lowest ID number.  As each file is filled it is closed          03620000
+*   and the next in ID number sequence is opened.  Once all             03630000
+*   files have been filled, wrap from the highest file ID to            03640000
+*   the lowest ID and start the process over. The use of a log          03650000
+*   file continiues until either:                                       03660000
+*                                                                       03670000
+*     1) a SWITCH request is received (an implicit switch               03680000
+*        occurs if the file fills to capacity), or                      03690000
+*                                                                       03700000
+*     2) an I/O error or some other ABEND precludes continued           03710000
+*        use of the log file, or                                        03720000
+*                                                                       03730000
+*     3) a shutdown (STOP or CANCEL) request is received                03740000
+*                                                                       03750000
+**<DOC-OFF>****************************************************         03760000
+                                                                        03770000
+         LM    R5,R7,LOGARBXL     LOGFILE ARRAY SCAN CONTROLS           03780000
+         USING LOGFILE,R5         ENTRY FORMAT                          03790000
+                                                                        03800000
+*--------------------------------------------------------------         03810000
+*   Scan log files forward from current position                        03820000
+*--------------------------------------------------------------         03830000
+                                                                        03840000
+SELFILE  DS    0H                 SELECT NEXT LOG FILE                  03850000
+         ICM   R0,15,#FILES       ELIGIBLE FILES REMAIN?                03860000
+         BZ    SELFTERM           NOTHING LEFT TO CHOSE FROM            03870000
+         TM    LOGFLAGS,LOG_AVAILABLE   ELIGIBLE FILE ENTRY FOUND?      03880000
+         BNO   SELNEXT                  CONTINUE SEARCH IF NOT          03890000
+                                                                        03900000
+         MVC   $LOGDCB(LOGDCBLN),LOGDCB                                 03910000
+         MVC   DCBDDNAM,LOGDDN    INSERT DDNAME                         03920000
+         LA    R1,$LOGDCB         R1 <== DCB ADDRESS                    03930000
+         BAS   R14,OPENFILE       OPEN THE DCB                          03940000
+                                                                        03950000
+         TM    DCBOFLGS,DCBOFOPN  SUCCESSFUL OPEN?                      03960000
+         BNO   SELFAIL            FAILURE TRAPPED                       03970000
+         TM    LOGFLAGS,LOG_UNSUITABLE  SUITABLE FOR INTENDED USE?      03980000
+         BO    SELFAIL            REJECT IF NOT                         03990000
+                                                                        04000000
+*--------------------------------------------------------------         04010000
+*   Allocate file buffers if needed                                     04020000
+*--------------------------------------------------------------         04030000
+                                                                        04040000
+         ICM   R0,15,BUFRCURR     BUFFERS PREVIOUSLY ALLOCATED?         04050000
+         BNZ   SELSTART           SYMETRICAL FILES, NO REALLOC REQ      04060000
+         LH    R2,LOGBLKSI        BLOCKSIE OF FIRST/EVERY FILE          04070000
+         ST    R2,BUFRSIZE        SIZE OF BUFFERS REQUIRED              04080000
+                                                                        04090000
+         $GETSTOR (R2),LOC=RES    ACQUIRE STORAGE IN OUR RMODE          04100000
+         ST    R1,BUFRCURR        CURRENT BUFFER                        04110000
+                                                                        04120000
+         $GETSTOR (R2),LOC=RES    ACQUIRE STORAGE IN OUR RMODE          04130000
+         ST    R1,BUFRPEND        PENDING BUFFER                        04140000
+                                                                        04150000
+*--------------------------------------------------------------         04160000
+*   Direct all subsequent msgs into newly opened log file               04170000
+*--------------------------------------------------------------         04180000
+                                                                        04190000
+SELSTART DS    0H                                                       04200000
+         ST    R5,CURRLOG         CURRENT LOG FILE ENTRY                04210000
+         OI    LOGFLAGS,LOG_ACTIVE                                      04220000
+         LR    R1,R5              R1 <== LOG FILE DESCRIPTOR            04230000
+         BAS   R14,PROCLOG        FILL LOGFILE                          04240000
+         LR    R3,R15             PRESERVE COMPLETION CODE              04250000
+         NI    LOGFLAGS,FF-LOG_ACTIVE                                   04260000
+                                                                        04270000
+         LA    R1,$LOGDCB         R1 <== DCB ADDRESS                    04280000
+         BAS   R14,CLOSFILE       CLOSE THE FILE                        04290000
+                                                                        04300000
+         B     *+4(R3)            ANALYZE COMPLETION CODE               04310000
+         B     SELNEXT               RC00 - IMPLICIT OR EXPLICIT SWITCH 04320000
+         B     SELSTOP               RC04 - TERMINATION REQUEST         04330000
+         B     SELFAIL               RC08 - FILE FAILURE                04340000
+                                                                        04350000
+*--------------------------------------------------------------         04360000
+*   Remove failing files from future consideration                      04370000
+*--------------------------------------------------------------         04380000
+                                                                        04390000
+SELFAIL  DS    0H                                                       04400000
+         LA    R1,LOGFILE         R1 <== LOG FILE DESCRIPTOR            04410000
+         BAS   R14,DROPFILE       REMOVE FILE FROM CONSIDERATION        04420000
+                                                                        04430000
+         L     R15,#FILES         ELIGIBLE FILE COUNT                   04440000
+         BCTR  R15,0              ACCOUNT FOR REMOVAL                   04450000
+         ST    R15,#FILES         SAVE UPDATED ELIGIBILITY COUNT        04460000
+                                                                        04470000
+*--------------------------------------------------------------         04480000
+*   Locate next file in wrap rotation                                   04490000
+*--------------------------------------------------------------         04500000
+                                                                        04510000
+SELNEXT  DS    0H                                                       04520000
+         BXLE  R5,R6,SELFILE      EXAMINE REMAINING FILES               04530000
+         L     R5,LOGARBXL        WRAP FROM HIGH TO LOW FILE #          04540000
+         B     SELFILE            AND CONTINUE                          04550000
+                                                                        04560000
+*--------------------------------------------------------------         04570000
+*   No eligible log files defined or remaining                          04580000
+*--------------------------------------------------------------         04590000
+                                                                        04600000
+SELFTERM DS    0H                                                       04610000
+         BAS   R14,SELCLEAN       GENERAL RESOURCE CLEANUP              04620000
+                                                                        04630000
+         $ABEND ABE_LOGFILES,DUMP=NO,                                  X04640000
+               TITLE='No eligible log files defined or remaining'       04650000
+                                                                        04660000
+*--------------------------------------------------------------         04670000
+*   Task terminating due to STOP or CANCEL request                      04680000
+*--------------------------------------------------------------         04690000
+                                                                        04700000
+SELSTOP  DS    0H                                                       04710000
+         BAS   R14,SELCLEAN       GENERAL RESOURCE CLEANUP              04720000
+                                                                        04730000
+         ICM   R1,15,STOP_EPB     SYNCH EPB PROVIDED BY SENDER?         04740000
+         BZ    *+8                SKIP IF NOT                           04750000
+         BAS   R14,POSTEPB        SYNC WITH REQUESTER                   04760000
+                                                                        04770000
+         LA    R15,RC00           NORMAL COMPLETION                     04780000
+         #EXIT ,                  RETURN                                04790000
+         DROP  R5                 LOGFILE                               04800000
+                                                                        04810000
+         EJECT ,                                                        04820000
+***************************************************************         04830000
+*                                                                       04840000
+* ROUTINE:  SELCLEAN - Log file selection termination cleanup           04850000
+*                                                                       04860000
+***************************************************************         04870000
+                                                                        04880000
+SELCLEAN DS    0H                                                       04890000
+         STM   R0,R15,REGSAVE     PRESEVE MAINLINE REGS                 04900000
+                                                                        04910000
+         $RCVRY DELETE,MF=(E,MFE_LIST)                                  04920000
+                                                                        04930000
+         ICM   R1,15,BUFRCURR     CURRENT BUFFER?                       04940000
+         BZ    SELCLNB1           STORAGE NOT AVAIL                     04950000
+                                                                        04960000
+         $RETSTOR (R1)            RELEASE ACQUIRED STORAGE              04970000
+                                                                        04980000
+SELCLNB1 DS    0H                                                       04990000
+                                                                        05000000
+         ICM   R1,15,BUFRPEND     PENDING BUFFER?                       05010000
+         BZ    SELCLNB2           STORAGE NOT AVAIL                     05020000
+                                                                        05030000
+         $RETSTOR (R1)            RELEASE ACQUIRED STORAGE              05040000
+                                                                        05050000
+SELCLNB2 DS    0H                                                       05060000
+                                                                        05070000
+         LM    R0,R14,REGSAVE     RESTORE REGS                          05080000
+         SR    R15,R15            RC NOT DEFINED                        05090000
+         BR    R14                RETURN                                05100000
+                                                                        05110000
+         EJECT ,                                                        05120000
+***************************************************************         05130000
+*                                                                       05140000
+* ROUTINE:  PROCLOG - Accept messages for current log file              05150000
+*                                                                       05160000
+***************************************************************         05170000
+                                                                        05180000
+PROCLOG  DS    0H                                                       05190000
+         STM   R0,R15,PROCREGS    SAVE MAINLINE REGS                    05200000
+         LR    R5,R1              LOG FILE ENTRY                        05210000
+         USING LOGFILE,R5         MAPPED                                05220000
+         XC    LOGRECS,LOGRECS    RESET RECORD COUNT                    05230000
+                                                                        05240000
+         MVC   $FDECB(FDECBLN),FDECB   REFRESH I/O DECB                 05250000
+         NI    STATUS,FF-STTERM        RESET TERMINATION CONDITIONS     05260000
+                                                                        05270000
+         BAS   R14,CURBUFIN       INIT CURRENT (COLLECTION) BUFFER      05280000
+                                                                        05290000
+         XC    EYEDATE,EYEDATE    RESET DATE CURRENT RECORD             05300000
+         XC    EYETIME,EYETIME    RESET DATE CURRENT RECORD             05310000
+         XC    LASTDATE,LASTDATE  RESET DATE PRIOR RECORD               05320000
+         XC    LASTTIME,LASTTIME  RESET DATE PRIOR RECORD               05330000
+                                                                        05340000
+*--------------------------------------------------------------         05350000
+*   Issue switch completion msg if opr forced file change               05360000
+*--------------------------------------------------------------         05370000
+                                                                        05380000
+         TM    CMDFLAGS,CMD$SWIT  REENTRY AFTER SWITCH PROCESS?         05390000
+         BNO   PROCGO             SKIP IF NOT                           05400000
+         ICM   R3,15,$CMDREQ      COMMAND REQUEST BLOCK IDENTIFIED?     05410000
+         BZ    PROCGO             SKIP IF NOT                           05420000
+         USING CMDREQ,R3          TEMP ADDRESSABILITY                   05430000
+                                                                        05440000
+         $MSG  053,               NOW RECORDING ON ...                 X05450000
+               CONID=*CMRQCNID,CONNAME=CMRQCNAM,                       X05460000
+               DEST=*CMRQDMSK,                                         X05470000
+               MSGQA=*CMRQMQA,STGQH=*CMRQSTGQ,                         X05480000
+               FIELDS=(LOGDDN)                                          05490000
+                                                                        05500000
+         BAS   R14,CCREPLY        END OF COMMAND                        05510000
+                                                                        05520000
+PROCGO   DS    0H                                                       05530000
+         NI    CMDFLAGS,FF-CMDFUSER   CLEAR TRANSIENT CONDITIONS        05540000
+         DROP  R3                 CMDREQ                                05550000
+                                                                        05560000
+         EJECT ,                                                        05570000
+***************************************************************         05580000
+*                                                                       05590000
+*   Evaluate state - process CMD functions in I/O-idle window           05600000
+*                                                                       05610000
+*   Termination requests and all file oriented operations such          05620000
+*   as FLUSH can be honored only when there is no I/O in                05630000
+*   progress.  CANCEL and SWITCH operations are honored as soon         05640000
+*   as the current I/O operation, if any, terminates.  A STOP           05650000
+*   request is honored after logging all messages received up           05660000
+*   to that point.                                                      05670000
+*                                                                       05680000
+***************************************************************         05690000
+                                                                        05700000
+PROCTOP  DS    0H                                                       05710000
+         MVC   BYTE,STATUS        STATUS FLAGS                          05720000
+         NI    BYTE,STTERM        BITS SIGNALING TERMINATION PENDING    05730000
+         OC    BYTE,CMDFLAGS      ANY TERMINATION OR CMD ACTION PENDS?  05740000
+         BZ    PROCSTD            NORMAL STATE OTHERWISE                05750000
+                                                                        05760000
+         TM    STATUS,STIOACT     I/O ACTIVE                            05770000
+         BO    PROCDRAN           CANNOT PROCEDE UNTIL I/O DRAINS       05780000
+                                                                        05790000
+         TM    STATUS,STFAIL      FILE FAILURE ENCOUNTERED?             05800000
+         BO    PROCFAIL           TERMINATE IF SO                       05810000
+         TM    CMDFLAGS,CMD$CNCL  CANCEL REQUEST?                       05820000
+         BO    PROCSTOP           IMMEDIATE TERMINATION IF SO           05830000
+         TM    STATUS,STSWITCH    FILE SWITCH?                          05840000
+         BO    PROCSWIT           PERCOLATE REQUEST IF SO               05850000
+                                                                        05860000
+         TM    STATUS,STDRAIN     DRAINING ALL BUFFERS?                 05870000
+         BO    PROCDRAN           GATE UNTIL DRAINED STATE ACHIEVED     05880000
+         TM    CMDFLAGS,CMD$STOP  STOPPING?                             05890000
+         BO    PROCSTOP           TERMINATE IF SO                       05900000
+                                                                        05910000
+*--------------------------------------------------------------         05920000
+*   Preform force operation if requested by command                     05930000
+*--------------------------------------------------------------         05940000
+                                                                        05950000
+         TM    CMDFLAGS,CMD$FLSH  FLUSH REQUEST?                        05960000
+         BNO   PROCSTD            SKIP IF NOT                           05970000
+                                                                        05980000
+         LA    R1,$LOGDCB         R1 <== CURRENT LOGFILE DCB            05990000
+         BAS   R14,TCLOSFIL       UPDATE FILE STATUS AND EOF MARKER     06000000
+         TM    CMDFLAGS,CMD$NMSG  SUPPRESS CONFIRMATION MSG?            06010000
+         BO    PROCFLNM           SKIP $MSG IF SO                       06020000
+                                                                        06030000
+*--------------------------------------------------------------         06040000
+*   Issue flush completion msg if opr forced file change                06050000
+*--------------------------------------------------------------         06060000
+                                                                        06070000
+         ICM   R3,15,$CMDREQ      COMMAND REQUEST BLOCK IDENTIFIED?     06080000
+         BZ    PROCFLNM           SKIP IF NOT                           06090000
+         USING CMDREQ,R3          TEMP ADDRESSABILITY                   06100000
+                                                                        06110000
+         $MSG  054,               LOG FILE FLUSHED                     X06120000
+               CONID=*CMRQCNID,CONNAME=CMRQCNAM,                       X06130000
+               DEST=*CMRQDMSK,                                         X06140000
+               MSGQA=*CMRQMQA,STGQH=*CMRQSTGQ,                         X06150000
+               FIELDS=(LOGDDN)                                          06160000
+                                                                        06170000
+         BAS   R14,CCREPLY        END OF COMMAND                        06180000
+                                                                        06190000
+PROCFLNM DS    0H                                                       06200000
+         NI    CMDFLAGS,FF-CMDFUSER                                     06210000
+         B     PROCSTD                                                  06220000
+         DROP  R3                 CMDREQ                                06230000
+                                                                        06240000
+*--------------------------------------------------------------         06250000
+*   Express flush I/O buffers if draining for any reason                06260000
+*--------------------------------------------------------------         06270000
+                                                                        06280000
+PROCDRAN DS    0H                                                       06290000
+         TM    STATUS,STIOACT     I/O IN PROGRESS?                      06300000
+         BNO   PROCD1             SKIP IF NOT                           06310000
+         BAS   R14,IOCHECK        ELSE AWAIT COMPLETION                 06320000
+         B     PROCDFIN           DETERMINE RESULTS                     06330000
+                                                                        06340000
+PROCD1   DS    0H                 REDRIVE I/O IF BUFFER PENDING WRITE   06350000
+         TM    STATUS,STPEND      BUFFER PENDING BUT NOT WRITTEN?       06360000
+         BNO   PROCD2             SKIP IF NOT                           06370000
+         L     R1,BUFRPEND        R1 <== BLOCK ADDRESS                  06380000
+         L     R0,BUFRPLEN        R0 <== BLOCK LENGTH                   06390000
+         BAS   R14,IOWRITE        WRITE PENDING BUFFER                  06400000
+         B     PROCDFIN           DETERMINE RESULTS                     06410000
+                                                                        06420000
+PROCD2   DS    0H                 PROCESS LAST PARTIALLY FILLED BUFFER  06430000
+         TM    STATUS,STCURECS    BUFFERED RECORDS READY FOR WRITE?     06440000
+         BNO   PROCD3             SKIP IF NOT                           06450000
+         BAS   R14,WRIBUFR        ELSE START IN MOTION                  06460000
+         B     PROCDFIN           DETERMINE RESULTS                     06470000
+                                                                        06480000
+PROCD3   DS    0H                 NO PENDING ACTIVITY                   06490000
+         NI    STATUS,FF-STDRAIN  BUFFERS DRAINED                       06500000
+                                                                        06510000
+PROCDFIN DS    0H                 ANALYZE CURRENT STATE                 06520000
+         B     PROCTOP                                                  06530000
+                                                                        06540000
+         EJECT                                                          06550000
+***************************************************************         06560000
+*                                                                       06570000
+*   Before resuming standard inbound msg processing, ensure             06580000
+*   that I/O is started for the pending buffer if ready. This           06590000
+*   logic is placed here to ensure that msg loop interruption           06600000
+*   and resumption as a result of a log file SWITCH or failure          06610000
+*   does not cause a buffer loss.                                       06620000
+*                                                                       06630000
+***************************************************************         06640000
+                                                                        06650000
+PROCSTD  DS    0H                                                       06660000
+         TM    STATUS,STIOACT     WRITE IN PROGRESS?                    06670000
+         BO    PROCONT            SKIP IF SO                            06680000
+         TM    STATUS,STPEND      PENDING BUFFER AWAITING WRITE?        06690000
+         BNO   PROCONT            SKIP IF NOT                           06700000
+                                                                        06710000
+         L     R1,BUFRPEND        R1  <== BLOCK ADDRESS                 06720000
+         L     R0,BUFRPLEN        R0  <== BLOCK LENGTH                  06730000
+         BAS   R14,IOWRITE        WRITE PENDING BUFFER                  06740000
+                                                                        06750000
+PROCONT  DS    0H                 PROCESS LOG DATA STILL ON INBOUND Q   06760000
+         TM    STATUS,STMSGQ      MSG QUEUE EMPTY?                      06770000
+         BNO   PROCRCV            SKIP IF NOT                           06780000
+         BAS   R14,IMSGS          DEQUEUE INBOUND MESSAGES              06790000
+         B     PROCTOP            ANALYZE RESULTANT STATE               06800000
+                                                                        06810000
+         EJECT                                                          06820000
+**<DOC-ON>*****************************************************         06830000
+*                                                                       06840000
+*   Await and process inbound messages and command requests             06850000
+*                                                                       06860000
+*   Messages and termination directives are sent to the log             06870000
+*   manager as intertask messages.  The following logic accepts         06880000
+*   inbound message lines framed in $MSGHDR format, standard            06890000
+*   CANCEL messages, and a log-specific STOP request.  the              06900000
+*   standard system STOP request is ignored to afford other             06910000
+*   tasks the opportunity to send termination messages without          06920000
+*   asynchronously loosing the log function.                            06930000
+*                                                                       06940000
+**<DOC-OFF>****************************************************         06950000
+                                                                        06960000
+PROCRCV  DS    0H                                                       06970000
+         CLC   EYEDATE,LASTDATE      SIGNIFICANT DATE GAP?              06980000
+         BNE   PROCMARK              UPDATE FILE STATS IF SO            06990000
+         CLC   EYETIME(4),LASTTIME   SIGNIFICANT TIME GAP?              07000000
+         BE    PROCINRQ              WAIT FOR NEW REQ OTHERWISE         07010000
+                                                                        07020000
+PROCMARK DS    0H                                                       07030000
+         OI    CMDFLAGS,CMD$FLSH+CMD$NMSG                               07040000
+         OI    STATUS,STDRAIN     DRAIN I/O BUFFERS                     07050000
+         MVC   LASTDATE,EYEDATE   TRACK TIME/DATE OF LAST RECORD        07060000
+         MVC   LASTTIME,EYETIME                                         07070000
+         B     PROCTOP            ANALYZE CURRENT STATE                 07080000
+                                                                        07090000
+PROCINRQ DS    0H                                                       07100000
+         $TRECV (*RCVAREA,*RCVALN),MF=(E,MFE_LIST)                      07110000
+                                                                        07120000
+         B     *+4(R15)           ANALYZE COMPLETION CODE               07130000
+         B     PROCMSG               00 - MESSAGE ARRIVED               07140000
+         B     PROCWAIT              04 - NO MESSAGES RECEIVED          07150000
+         B     PRORESIZ              08 - MESSAGE AREA TOO SMALL        07160000
+         B     PROCSTOP              12 - STORAGE FAILURE               07170000
+                                                                        07180000
+*--------------------------------------------------------------         07190000
+*   Inbound message area reallocation required                          07200000
+*--------------------------------------------------------------         07210000
+                                                                        07220000
+PRORESIZ DS    0H                                                       07230000
+         LR    R3,R1              MIN REQUIREMENT                       07240000
+         ICM   R2,15,RCVAREA      MSG AREA ALLOCATED?                   07250000
+         BZ    PROALLOC           INITIAL ALLOC IF NOT                  07260000
+                                                                        07270000
+         STGRETN ADDR=(R2),LEN=*RCVALN,QH=TSKSTG                        07280000
+         BNZ   ERR_STG                                                  07290000
+                                                                        07300000
+PROALLOC DS    0H                                                       07310000
+         AR    R3,R3              DOUBLE SPACE REQUIRMENT TO REDUCE     07320000
+         STGGET (R3),QH=TSKSTG    ... NUMBER OF TRIPS TO THE WELL       07330000
+         BNZ   ERR_STG                                                  07340000
+         ST    R1,RCVAREA         SAVE $TRECV AREA ADDRESS              07350000
+         ST    R3,RCVALN          SAVE AREA LENGTH                      07360000
+         B     PROCRCV                                                  07370000
+                                                                        07380000
+*--------------------------------------------------------------         07390000
+*   Wait for event                                                      07400000
+*--------------------------------------------------------------         07410000
+                                                                        07420000
+PROCWAIT DS    0H                                                       07430000
+         TM    STATUS,STDRAIN     STOP REQUEST PENDING?                 07440000
+         BO    WRIBUFR            EXPRESS PATH OUT                      07450000
+                                                                        07460000
+         $TASK SETEPB,            AWAIT INBOUND MESSAGES               X07470000
+               EPB=TSKMEPB,       INTERTASK MESSAGING EPB              X07480000
+               ECODE=EC$MSG,      STD MSG DELIVERY CODE                X07490000
+               MF=(E,$TASKMFL)                                          07500000
+                                                                        07510000
+PROCWTSK DS    0H                                                       07520000
+         $TASK WAIT,              WAIT FOR EVENT                       X07530000
+               MESSAGE=PROCRCV,   INBOUND MESSAGES INCLUDING 'STOP'    X07540000
+               CANCEL=PROCANCL,   IMMEDIATE TERMINATION                X07550000
+               MF=(E,$TASKMFL)                                          07560000
+         B     PROCWTSK           IGNORE ANYTHING ELSE                  07570000
+                                                                        07580000
+PROCANCL DS    0H                 CANCEL REQUEST                        07590000
+         OI    CMDFLAGS,CMD$CNCL  POST ACCORDINGLY                      07600000
+         B     PROCTOP            PROCESS                               07610000
+                                                                        07620000
+*--------------------------------------------------------------         07630000
+*   Accept inbound log record packets and maintask drain req            07640000
+*--------------------------------------------------------------         07650000
+                                                                        07660000
+PROCMSG  DS    0H                                                       07670000
+         L     R4,RCVAREA         INTERTASK MESSAGE BUFFER              07680000
+         USING TMSGSTD,R4         MAPPED                                07690000
+                                                                        07700000
+         CLC   TMSGTYPE,=A(ITM_LOG_DATA)                                07710000
+         BE    PROCMLOG           INBOUND MESSAGE LINES                 07720000
+         CLC   TMSGTYPE,=A(ITM_CONS_CMD)                                07730000
+         BE    PROCCMD            EXTRACT CONSOLE COMMANDS              07740000
+         CLC   TMSGTYPE,=A(ITM_LOG_STOP)                                07750000
+         BE    PROCM1                                                   07760000
+                                                                        07770000
+         $TMSGDFT (R4)            DEFAULT MESSAGE PROCESSING            07780000
+                                                                        07790000
+         B     PROCRCV            UNKNOWN REQUEST IS DISCARDED          07800000
+                                                                        07810000
+PROCCMD  DS    0H                                                       07820000
+         LR    R1,R4              R1 <== INTERTASK COMMAND MESSAGE      07830000
+         BAS   R14,CCMDEXEC       PARSE AND EXECUTE                     07840000
+         B     PROCTOP            ANALYZE RESULTANT STATE               07850000
+                                                                        07860000
+PROCM1   DS    0H                                                       07870000
+         MVC   STOP_EPB,TMSGEPB   STOPPER REQUESTING SYNC POST          07880000
+         OI    CMDFLAGS,CMD$STOP  INDICATE STOP                         07890000
+         OI    STATUS,STDRAIN     AFTER DRAINING BUFFERS                07900000
+         B     PROCTOP            PROCESS                               07910000
+                                                                        07920000
+*--------------------------------------------------------------         07930000
+*   Message packet received, post sync EPB if requested                 07940000
+*--------------------------------------------------------------         07950000
+                                                                        07960000
+PROCMLOG DS    0H                                                       07970000
+         ICM   R1,15,TMSGEPB      SYNCH EPB PROVIDED BY SENDER?         07980000
+         BZ    *+8                SKIP IF NOT                           07990000
+         BAS   R14,POSTEPB        INDICATE INBOUND MSGS RECEIVED        08000000
+                                                                        08010000
+         ICM   R0,15,TMSGINFL     CONTAINS LOG RECORDS?                 08020000
+         BNP   PROCRCV            DISCARD OTHERWISE                     08030000
+                                                                        08040000
+         LA    R3,TMSGINFO        DATA PORTION                          08050000
+         ST    R3,MSGQUEUE        MESSAGES AWAITING HOME IN I/O BUFFER  08060000
+         ST    R3,MSGBASE         OFFLINK BASE IS ORIGIN OF 1ST MSG     08070000
+         OI    STATUS,STMSGQ      INDICATE MSG PROCESSING OUTSTANDING   08080000
+         B     PROCTOP            PROCESS                               08090000
+         DROP  R4                 TMSG - INTERTASK PACKET               08100000
+                                                                        08110000
+***************************************************************         08120000
+*                                                                       08130000
+*   Termination condition encountered, return to file mgr               08140000
+*                                                                       08150000
+***************************************************************         08160000
+                                                                        08170000
+PROCSWIT DS    0H                 IMPLICIT OR EXPLICIT SWITCH           08180000
+         LA    R15,RC00                                                 08190000
+         TM    CMDFLAGS,CMD$SWIT  EXPLICIT SWITCH REQUEST?              08200000
+         BNO   PROCRET            SKIP IF NOT                           08210000
+         ICM   R3,15,$CMDREQ      COMMAND REQUEST BLOCK IDENTIFIED?     08220000
+         BZ    PROCRET            SKIP IF NOT                           08230000
+         USING CMDREQ,R3          TEMP ADDRESSABILITY                   08240000
+                                                                        08250000
+         $MSG  052,               LOGFILE CLOSING FOR SWITCH           X08260000
+               CONID=*CMRQCNID,CONNAME=CMRQCNAM,                       X08270000
+               DEST=*CMRQDMSK,                                         X08280000
+               MSGQA=*CMRQMQA,STGQH=*CMRQSTGQ,                         X08290000
+               FIELDS=(LOGDDN)                                          08300000
+                                                                        08310000
+         LA    R15,RC00                                                 08320000
+         B     PROCRET                                                  08330000
+         DROP  R3                 CMDREQ                                08340000
+                                                                        08350000
+*--------------------------------------------------------------         08360000
+                                                                        08370000
+PROCSTOP DS    0H                 STOP OR CANCEL REQUEST RECEIVED       08380000
+         LA    R15,RC04                                                 08390000
+         B     PROCRET                                                  08400000
+                                                                        08410000
+PROCFAIL DS    0H                 FILE FAILURE                          08420000
+         LA    R15,RC08                                                 08430000
+                                                                        08440000
+PROCRET  DS    0H                                                       08450000
+         LM    R0,R14,PROCREGS    RESTORE CALLERS REGS                  08460000
+         BR    R14                                                      08470000
+                                                                        08480000
+         EJECT ,                                                        08490000
+***************************************************************         08500000
+*                                                                       08510000
+*   Catastrophic failures                                               08520000
+*                                                                       08530000
+***************************************************************         08540000
+                                                                        08550000
+ERR_STG  DS    0H                 STORAGE FAILURE, RC IN R15            08560000
+         LR    R2,R15                                                   08570000
+         $ABEND ABE_STORAGE,(R2),DUMP=YES,                             X08580000
+               TITLE='STORAGE MANAGEMENT FAILURE'                       08590000
+                                                                        08600000
+         EJECT ,                                                        08610000
+***************************************************************         08620000
+*                                                                       08630000
+* ROUTINE:  IMSGS - Dequeue inbound messages and format for log         08640000
+*                                                                       08650000
+* NOTES:                                                                08660000
+*                                                                       08670000
+*    EMPTY BUFFER VIA WRIBUFR                                           08680000
+*    STATUS.STMSGS                                                      08690000
+*                                                                       08700000
+***************************************************************         08710000
+                                                                        08720000
+IMSGS    DS    0H                                                       08730000
+         STM   R0,R15,IMSGREGS    PRESERVE MAINLINE REGS                08740000
+         ICM   R3,15,MSGQUEUE     WORK TO DO?                           08750000
+         BZ    IMSGEOL            FAST OUT IF NOT                       08760000
+                                                                        08770000
+*--------------------------------------------------------------         08780000
+*   Generate time stamp for multi-line message block                    08790000
+*--------------------------------------------------------------         08800000
+                                                                        08810000
+         TIME  ,                  ACQUIRE TIME AND DATE                 08820000
+         STM   R0,R1,TIMEDATE     SAVE RESULTS                          08830000
+                                                                        08840000
+         UNPK  EYEDATE,SAVEDATE+1(3)                                    08850000
+         MVC   CURFDATE+0(2),EYEDATE+0                                  08860000
+         MVI   CURFDATE+2,C'.'                                          08870000
+         MVC   CURFDATE+3(3),EYEDATE+2                                  08880000
+                                                                        08890000
+         UNPK  EYETIME,SAVETIME                                         08900000
+         MVC   CURFTIME+0(2),EYETIME+0                                  08910000
+         MVI   CURFTIME+2,C':'                                          08920000
+         MVC   CURFTIME+3(2),EYETIME+2                                  08930000
+         MVI   CURFTIME+5,C':'                                          08940000
+         MVC   CURFTIME+6(2),EYETIME+4                                  08950000
+                                                                        08960000
+*--------------------------------------------------------------         08970000
+*   Buffer management                                                   08980000
+*--------------------------------------------------------------         08990000
+                                                                        09000000
+IMSGNEXT DS    0H                                                       09010000
+         ICM   R3,15,MSGQUEUE     ACQUIRE NEXT MESSAGE FROM QUEUE       09020000
+         BZ    IMSGEOL            ALL MSGS PROCESSED                    09030000
+                                                                        09040000
+         USING $MSBHDR,R3         $MSG LINE FORMAT                      09050000
+         L     R4,RCVAREA         REFRESH INTERTASK MSG PACKET          09060000
+         USING TMSGSTD,R4         MAPPED                                09070000
+                                                                        09080000
+         LH    R1,$MSBLEN         MESSAGE LENGTH                        09090000
+         LTR   R1,R1              ADMISSABLE?                           09100000
+         BNP   IMSGADV            NEXT MESSAGE                          09110000
+         LA    R0,L'RECDATA       MAX DATA LENGTH ACCEPTED              09120000
+         CR    R1,R0              INBOUND MSG EXCEEDS CAPACITY?         09130000
+         BNH   *+6                SKIP IF NOT                           09140000
+         LR    R1,R0              ELSE TRUNCATE                         09150000
+         ST    R1,TEXTLEN         PRESERVE TEXT LENGTH                  09160000
+                                                                        09170000
+         LA    R2,RECHDRL(,R1)    MINIMUM LENGTH OF RECORD              09180000
+         AL    R2,LOGROVHD        MIN LENGTH OF COMPLETE VAR REC        09190000
+         LA    R15,RECRDW         ORIGIN OF VAR LENGTH RECORD           09200000
+         CLI   LOGRECFM,LOG_VARIABLE                                    09210000
+         BE    *+12               DONE IF VARIABLE LENGTH RECORDS       09220000
+         LH    R2,LOGLRECL        ELSE REPLACE CALC WITH FIXED LENGTH   09230000
+         LA    R15,RECHDR         ORIGIN OF FIXED LENGTH RECORD         09240000
+                                                                        09250000
+         C     R2,BUFRLEFT        SUFFICIENT SPACE LEFT IN BUFFER?      09260000
+         BNH   IMFORMAT           BUILD AND INSERT A LOGREC IF SO       09270000
+         BAS   R14,WRIBUFR        ELSE BUFFER FLUSH AND SWAP            09280000
+         B     IMSGFIN            ANALYZE RESULTS                       09290000
+                                                                        09300000
+*--------------------------------------------------------------         09310000
+*   Construct a formatted log record from inbound msg line              09320000
+*--------------------------------------------------------------         09330000
+                                                                        09340000
+IMFORMAT DS    0H                                                       09350000
+         ST    R15,$RECORG        ORIGIN OF LOG-FORMATTED RECORD        09360000
+         ST    R2,$RECLEN         LENGTH OF LOG-FORMATTED RESULT        09370000
+                                                                        09380000
+         MVI   RECDATA,C' '       CLEAR LOG RECORD DATA                 09390000
+         MVC   RECDATA+1(L'RECDATA-1),RECDATA                           09400000
+         MVC   RECMORG,TMSGORG    ORIGIN ITASK                          09410000
+                                                                        09420000
+         L     R15,TEXTLEN        TRUNCATED TEXT LENGTH                 09430000
+         BCTR  R15,0              PREPARE FOR COPY                      09440000
+         EX    R15,*+4            COPY TEXT INTO TEMPLATE               09450000
+         MVC   RECDATA(*-*),$MSBTEXT                                    09460000
+                                                                        09470000
+         MVI   RECSPC1,C' '                                             09480000
+         MVI   RECSPC2,C' '                                             09490000
+         MVC   RECDATE,CURFDATE   INSERT FORMATTED DATE                 09500000
+         MVC   RECTIME,CURFTIME   INSERT FORMATTED TIME                 09510000
+                                                                        09520000
+*--------------------------------------------------------------         09530000
+*   Promote formatted record into I/O buffer                            09540000
+*--------------------------------------------------------------         09550000
+                                                                        09560000
+         L     R15,$RECLEN        LOGICAL RECORD LENGTH                 09570000
+         STH   R15,RECRDW         FUNCTIONAL ONLY IF RECFM=V            09580000
+         L     R14,BUFRNEXT       COLLECTION BUFFER INSERT ADDR         09590000
+                                                                        09600000
+         LA    R0,0(R15,R14)      INSERT ADDR FOR NEXT PASS             09610000
+         ST    R0,BUFRNEXT        SAVE UPDATED PTR                      09620000
+         L     R1,BUFRLEFT        LENGTH REMAINING IN BUFFER            09630000
+         SR    R1,R15             UPDATE FOR NEXT PASS                  09640000
+         ST    R1,BUFRLEFT        SAVE ACCORDINGLY                      09650000
+                                                                        09660000
+         L     R2,$RECORG         LOGICAL RECORD ORIGIN                 09670000
+         BCTR  R15,0              PREPARE FOR COPY                      09680000
+         EX    R15,*+4            COPY                                  09690000
+         MVC   0(*-*,R14),0(R2)   EX OBJECT                             09700000
+                                                                        09710000
+         OI    STATUS,STCURECS    CURRENT BUFFER CONTAINS RECORDS       09720000
+         L     R1,LOGRECS         RECORD COUNT                          09730000
+         LA    R1,1(,R1)          ACCOUNT FOR NEW ADDITION              09740000
+         ST    R1,LOGRECS         SAVE UPDATED COUNT                    09750000
+                                                                        09760000
+*--------------------------------------------------------------         09770000
+*   Locate next inbound message line or go back to the well             09780000
+*--------------------------------------------------------------         09790000
+                                                                        09800000
+IMSGADV  DS    0H                                                       09810000
+         ICM   R3,15,$MSBLINK     ADVANCE TO NEXT INBOUND LINE          09820000
+         BZ    IMSGEOL            END OF LINES                          09830000
+         AL    R3,MSGBASE         CONVERT OFFLINK TO ADDRESS            09840000
+         ST    R3,MSGQUEUE        SAVE PTR FOR RESTART                  09850000
+         B     IMSGNEXT           EXTRACT NEXT INBOUND MSG              09860000
+                                                                        09870000
+IMSGEOL  DS    0H                                                       09880000
+         NI    STATUS,FF-STMSGQ   ALL INBOUND MSGS BUFFERED FOR I/O     09890000
+                                                                        09900000
+IMSGFIN  DS    0H                                                       09910000
+         LM    R0,R14,IMSGREGS    RESTORE MAINLINE REGS                 09920000
+         SR    R15,R15            RETCODE UNDEFINED                     09930000
+         BR    R14                RETURN                                09940000
+         DROP  R4,R3              TMSG, $MSGHDR                         09950000
+                                                                        09960000
+         EJECT ,                                                        09970000
+***************************************************************         09980000
+*                                                                       09990000
+* ROUTINE:  CCMDEXEC - Parse and execute console command                10000000
+*                                                                       10010000
+* ON ENTRY:                                                             10020000
+*                                                                       10030000
+*    R1  contains the address of a TMSG header framing an               10040000
+*        intertask command execution request                            10050000
+*                                                                       10060000
+***************************************************************         10070000
+                                                                        10080000
+CCMDEXEC DS    0H                                                       10090000
+         STM   R0,R14,REGSAVE     SAVE MAINLINE REGS                    10100000
+         LR    R4,R1              COMMAND PACKET                        10110000
+         USING TMSGSTD,R4         STANDARD MESSAGE FORMAT               10120000
+                                                                        10130000
+         LA    R0,TMSGORG         DIRECT RESP TO CMD SCHED IF FAILURE   10140000
+         ST    R0,$CMDSCHD        RETAIN COMMAND SCHEDULAR INFO         10150000
+                                                                        10160000
+         @CALL ILOGCMDS,((R4),$CMDREQ,$MSGRSRC),                       X10170000
+               MF=(E,MFE_LIST)                                          10180000
+                                                                        10190000
+         B     *+4(R15)           ANALYZE COMPLETION CODE               10200000
+         B     CCMACPT               RC00 - COMMAND ACCEPTED            10210000
+         B     CCMUSER               RC04 - USER ERROR (SYNTAX, ETC)    10220000
+         B     CCMSEVER              RC08 - COMMAND AQUIRE ERROR        10230000
+                                                                        10240000
+CCMACPT  DS    0H                 CMD ACCEPTED, DETERMINE TYPE          10250000
+         LR    R1,R0              SUITABLE BASE REG                     10260000
+         B     *+4(R1)            IDENTIFY SOURCE COMMAND               10270000
+         B     CCMDDISP              DISPLAY                            10280000
+         B     CCMDFLSH              FLUSH                              10290000
+         B     CCMDSWIT              SWITCH                             10300000
+                                                                        10310000
+*--------------------------------------------------------------         10320000
+*   Display                                                             10330000
+*--------------------------------------------------------------         10340000
+                                                                        10350000
+CCMDDISP DS    0H                                                       10360000
+         ICM   R3,15,$CMDREQ      COMMAND REQUEST BLOCK IDENTIFIED?     10370000
+         BZ    CCMDDISX           SKIP IF NOT                           10380000
+         USING CMDREQ,R3          TEMP ADDRESSABILITY                   10390000
+                                                                        10400000
+         $MSG  051,                                                    X10410000
+               CONID=*CMRQCNID,CONNAME=CMRQCNAM,                       X10420000
+               DEST=*CMRQDMSK,                                         X10430000
+               MSGQA=*CMRQMQA,STGQH=*CMRQSTGQ,                         X10440000
+               FIELDS=(LOGDDN,LOGRECS)                                  10450000
+                                                                        10460000
+         BAS   R14,CCREPLY        END OF COMMAND                        10470000
+                                                                        10480000
+CCMDDISX DS    0H                                                       10490000
+         B     CCMDRET                                                  10500000
+         DROP  R3                 CMDREQ                                10510000
+                                                                        10520000
+*--------------------------------------------------------------         10530000
+*   Switch                                                              10540000
+*--------------------------------------------------------------         10550000
+                                                                        10560000
+CCMDSWIT DS    0H                                                       10570000
+         OI    CMDFLAGS,CMD$SWIT  SWITCH COMMAND                        10580000
+         OI    STATUS,STSWITCH    ORDER                                 10590000
+         B     CCMDRET                                                  10600000
+                                                                        10610000
+*--------------------------------------------------------------         10620000
+*   Flush                                                               10630000
+*--------------------------------------------------------------         10640000
+                                                                        10650000
+CCMDFLSH DS    0H                                                       10660000
+         OI    CMDFLAGS,CMD$FLSH  FLUSH COMMAND                         10670000
+         OI    STATUS,STDRAIN     DRAIN I/O BUFFERS                     10680000
+         B     CCMDRET                                                  10690000
+                                                                        10700000
+***************************************************************         10710000
+*                                                                       10720000
+*   Command request failed because of usage-oriented error              10730000
+*                                                                       10740000
+***************************************************************         10750000
+                                                                        10760000
+CCMUSER  DS    0H                                                       10770000
+         mvc   $RESPRCV,$CMDSCHD  IDENTIFY/OVERRIDE RESPONSE RECIPIENT  10780000
+                                                                        10790000
+         BAS   R14,CCREPLY        COMMAND REPLY AND DISCHARGE           10800000
+         B     CCMDRET                                                  10810000
+                                                                        10820000
+***************************************************************         10830000
+*                                                                       10840000
+*   Command acquisition error, log the failure                          10850000
+*                                                                       10860000
+***************************************************************         10870000
+                                                                        10880000
+CCMSEVER DS    0H                                                       10890000
+         STM   R0,R1,DWORD        $COMACK (RETCODE,RSNCODE)             10900000
+                                                                        10910000
+         $MSG  026,FIELDS=(TMSGORG,(DWORD+0,4),(DWORD+4,4))             10920000
+                                                                        10930000
+         B     CCMDRET                                                  10940000
+                                                                        10950000
+***************************************************************         10960000
+*                                                                       10970000
+*   Command request posted, return to requester                         10980000
+*                                                                       10990000
+***************************************************************         11000000
+                                                                        11010000
+CCMDRET  DS    0H                                                       11020000
+         LM    R0,R14,REGSAVE     RESTORE REGS                          11030000
+         BR    R14                                                      11040000
+         DROP  R4                 TMSGSTD                               11050000
+                                                                        11060000
+         EJECT ,                                                        11070000
+***************************************************************         11080000
+*                                                                       11090000
+* ROUTINE:  CCREPLY - Command response and discharge                    11100000
+*                                                                       11110000
+***************************************************************         11120000
+                                                                        11130000
+CCREPLY  DS    0H                                                       11140000
+         STM   R0,R15,REGSAVEX    PRESERVE MAINLINE REGS                11150000
+                                                                        11160000
+*--------------------------------------------------------------         11170000
+*   Reply if one is expected or if a std error has been raised          11180000
+*--------------------------------------------------------------         11190000
+                                                                        11200000
+         ICM   R3,15,$CMDREQ      COMMAND IN PROGRESS                   11210000
+         BZ    CCREXIT            STRANGE BUT NO FAILURE                11220000
+         USING CMDREQ,R3                                                11230000
+                                                                        11240000
+         ICM   R2,15,$MSGRSRC     MESSAGES COLLECTED FOR RETURN?        11250000
+         BNZ   CCRESP             MUST RESPOND IF SO                    11260000
+         ICM   R0,15,CMRQCOMP     STANDARD COMPLETION CODE?             11270000
+         BZ    CCREXIT            DONE IF NOT                           11280000
+                                                                        11290000
+CCRESP   DS    0H                                                       11300000
+         $COMSEND RESPONSE,       RESPOND TO SCHEDULER/REQUESTER       X11310000
+               REQLEN=CMRQLN+SRMRIDLN,    RETURN CMDREQ AND RSRCID     X11320000
+               MSGRSRCID=(R2),            $MSG COLLECTOR RSRCID OR 0   X11330000
+               WORKUNIT=*$RESPRCV         SCHEDULER TASKNAME OR 0       11340000
+                                                                        11350000
+         BZ    CCRLSE             SUCCESSSFUL RESP NOTIFICATION  187851 11360000
+         OC    $RESPRCV,$RESPRCV  COMMAND SCHEDULER NOTIFIED     187851 11370000
+         BNZ   CCRLSE             YES,  ONLY TRY IT ONCE         187851 11380000
+         MVC   $RESPRCV,$CMDSCHD  RETRY WITH COMMAND SCHEDULER   187851 11390000
+         B     CCRESP             RETRY                          187851 11400000
+                                                                        11410000
+*--------------------------------------------------------------         11420000
+*   Release control of $msg collection resource                         11430000
+*--------------------------------------------------------------         11440000
+                                                                        11450000
+CCRLSE   DS    0H                                                       11460000
+         LTR   R2,R2              $MSG COLLECTOR RESOURCE ACQUIRED?     11470000
+         BZ    CCRNRSRC           SKIP IF NOT                           11480000
+                                                                        11490000
+         $SRM  RELEASE,           RELEASE CONTROL OF SHARED RESOURCE   X11500000
+               RSRCID=(R2),       RESOURCE IDENTIFIER ORIGIN           X11510000
+               MF=(E,$SRMMFL)                                           11520000
+                                                                        11530000
+CCRNRSRC DS    0H                                                       11540000
+                                                                        11550000
+*--------------------------------------------------------------         11560000
+*   Discharge current command and return                                11570000
+*--------------------------------------------------------------         11580000
+                                                                        11590000
+CCREXIT  DS    0H                                                       11600000
+         NI    CMDFLAGS,FF-CMDFUSER                                     11610000
+         XC    $CMDREQ,$CMDREQ    COMMAND REQUEST BLOCK                 11620000
+         XC    $MSGRSRC,$MSGRSRC  $MSG COLLECTOR AREA RESOURCE ID       11630000
+         XC    $RESPRCV,$RESPRCV  RESPONSE RECIPIENT                    11640000
+         XC    $CMDSCHD,$CMDSCHD  COMMAND SCHEDULER                     11650000
+                                                                        11660000
+         LM    R0,R14,REGSAVEX    RESTORE MAINLINE REGS                 11670000
+         SR    R15,R15            RETURN CODES NOT DEFINED              11680000
+         BR    R14                EXIT                                  11690000
+         DROP  R3                 CMDREQ                                11700000
+                                                                        11710000
+         EJECT ,                                                        11720000
+***************************************************************         11730000
+*                                                                       11740000
+* ROUTINE:  WRIBUFR - DISPOSE OF CURRENT BUFFER                         11750000
+*                                                                       11760000
+* DESCRIPTION:                                                          11770000
+*                                                                       11780000
+*    the CURRENT buffer is now ready for disposition.  Any I/O          11790000
+*    in progress against the PENDING buffer is first allowed            11800000
+*    to complete.  Then, the two buffers are swapped and the            11810000
+*    STPEND flag is raised to indicate that the new PENDING             11820000
+*    buffer is ready for write.                                         11830000
+*                                                                       11840000
+***************************************************************         11850000
+                                                                        11860000
+WRIBUFR  DS    0H                                                       11870000
+         STM   R0,R15,WRIREGS     PRESERVE MAINLINE REGS                11880000
+                                                                        11890000
+         TM    STATUS,STIOACT     I/O IN PROGRESS ON PENDING BUFFER?    11900000
+         BNO   WRISTART           ONWARD IF NOT                         11910000
+         BAS   R14,IOCHECK        AWAIT COMPLETION                      11920000
+         BNZ   WRIEXIT            I/O FAILURE - EXIT WITH RETCODE       11930000
+                                                                        11940000
+WRISTART DS    0H                 BEGIN NEW I/O OPERATION               11950000
+         TM    STATUS,STCURECS    CURRENT BUFFER CONTAINS RECORDS?      11960000
+         BZ    WRIFIN             NOTHING REALLY TO DO                  11970000
+                                                                        11980000
+         L     R2,BUFRSIZE        TOTAL SIZE OF BUFFER                  11990000
+         S     R2,BUFRLEFT        MINUS SPACE NOT USED                  12000000
+         ST    R2,BUFRPLEN        YIELDS AMOUNT TO WRITE                12010000
+         ICM   R1,15,BUFRCBDW     VARIABLE LENGTH RECORDS?              12020000
+         BZ    *+8                SKIP IF NOT                           12030000
+         STH   R2,0(,R1)          ELSE POST THE BDW                     12040000
+                                                                        12050000
+         L     R0,BUFRPEND        INACTIVE BUFFER                       12060000
+         MVC   BUFRPEND,BUFRCURR  SWAP WITH FULL BUFFER                 12070000
+         ST    R0,BUFRCURR        REPLACE RECORD COLLECTION BUFFER      12080000
+         NI    STATUS,FF-STCURECS NEW 'CURRENT' BUFFER IS EMPTY         12090000
+         OI    STATUS,STPEND      INDICATE PENDING BUFF READY FOR WRITE 12100000
+                                                                        12110000
+WRIFIN   DS    0H                                                       12120000
+         BAS   R14,CURBUFIN       REINIT CURRENT (COLLECTION) BUFFER    12130000
+         LA    R15,RC00           NORMAL COMPLETION                     12140000
+                                                                        12150000
+WRIEXIT  DS    0H                                                       12160000
+         LM    R0,R14,WRIREGS     RESTORE REGS                          12170000
+         BR    R14                RETURN                                12180000
+                                                                        12190000
+         EJECT ,                                                        12200000
+***************************************************************         12210000
+*                                                                       12220000
+* ROUTINE:  CURBUFIN - Reinitialize current buffer                      12230000
+*                                                                       12240000
+***************************************************************         12250000
+                                                                        12260000
+CURBUFIN DS    0H                                                       12270000
+         STM   R0,R15,REGSAVE     SAVE CALLERS REGS                     12280000
+                                                                        12290000
+         LA    R15,RC04           PRESUME INIT ALREADY PERFORMED        12300000
+         TM    STATUS,STCURECS    CURRENT BUFFER CONTAINS RECORDS?      12310000
+         BO    CURBUFEX           ALREADY INITIALIZED IF SO             12320000
+                                                                        12330000
+*--------------------------------------------------------------         12340000
+*   Initial buffer state depends on RECFM                               12350000
+*--------------------------------------------------------------         12360000
+                                                                        12370000
+         SR    R0,R0              PRESUME RECFM=F, NO BDW               12380000
+         L     R1,BUFRSIZE        TOTAL SIZE OF BUFFER                  12390000
+         L     R2,BUFRCURR        PHYSICAL ORIGIN OF BUFFER             12400000
+                                                                        12410000
+         CLI   LOGRECFM,LOG_FIXED FIXED LENGTH RECORDS?                 12420000
+         BE    CURBUFP            POST BUFR PARMS                       12430000
+                                                                        12440000
+         L     R0,BUFRCURR        ELSE BDW AFFIXED TO BLOCK             12450000
+         SH    R1,=H'4'           REDUCE AVAIL SPACE ACCORDINGLY        12460000
+         AH    R2,=H'4'           ADJUST FREE PTR AS WELL               12470000
+                                                                        12480000
+*--------------------------------------------------------------         12490000
+*   Initialize current (collection) buffer                              12500000
+*--------------------------------------------------------------         12510000
+                                                                        12520000
+CURBUFP  DS    0H                                                       12530000
+         ST    R0,BUFRCBDW        BDW ADDRESS                           12540000
+         ST    R1,BUFRLEFT        SPACE REMAINING                       12550000
+         ST    R2,BUFRNEXT        FREE SPACE ORIGIN                     12560000
+         LA    R15,RC00           INIT COMPLETE                         12570000
+                                                                        12580000
+CURBUFEX DS    0H                                                       12590000
+         LM    R0,R14,REGSAVE     RESTORE REGS                          12600000
+         LTR   R15,R15            REFLECT COMPLETION STATUS             12610000
+         BR    R14                RETURN                                12620000
+                                                                        12630000
+         EJECT ,                                                        12640000
+***************************************************************         12650000
+*                                                                       12660000
+* ROUTINE:  POSTEPB - Notify requester of receipt-of-request            12670000
+*                                                                       12680000
+***************************************************************         12690000
+                                                                        12700000
+POSTEPB  DS    0H                                                       12710000
+         STM   R0,R15,REGSAVE     SAVE CALLERS REGS                     12720000
+         LR    R2,R1              EPB ADDRESS                           12730000
+                                                                        12740000
+         $TASK POST,              POST THE EPB                         X12750000
+               EPB=(R2),          EPB ADDRESS                          X12760000
+               PCODE=EC$REQOK,    REQUEST RECEIVED                     X12770000
+               MF=(E,$TASKMFL)                                          12780000
+                                                                        12790000
+         LM    R2,R14,REGSAVE+8   RESTORE MAINLINE REGS                 12800000
+         BR    R14                RETURN                                12810000
+                                                                        12820000
+         EJECT ,                                                        12830000
+***************************************************************         12840000
+*                                                                       12850000
+* ROUTINE:  OPENFILE - Open log file under recovery environ             12860000
+*                                                                       12870000
+***************************************************************         12880000
+                                                                        12890000
+OPENFILE DS    0H                                                       12900000
+         STM   R0,R15,REGSAVE     SAVE CALLERS REGS                     12910000
+         LR    R2,R1              DCB ADDRESS                           12920000
+                                                                        12930000
+         LA    R0,OPENRES         ERROR RECOVERY IF OPEN ABENDS         12940000
+         ST    R0,RESUME                                                12950000
+         MVI   IOFUNC,IOF_OPEN                                          12960000
+         MVC   MFE_LIST(FOPENLN),FOPEN                                  12970000
+                                                                        12980000
+         OPEN  ((R2),(OUTPUT)),MF=(E,MFE_LIST)                          12990000
+                                                                        13000000
+OPENRES  DS    0H                                                       13010000
+         MVI   IOFUNC,IOF_NA                                            13020000
+         XC    RESUME,RESUME                                            13030000
+         LM    R0,R15,REGSAVE                                           13040000
+         BR    R14                                                      13050000
+                                                                        13060000
+***************************************************************         13070000
+*                                                                       13080000
+* ROUTINE:  CLOSFILE - close log file under recovery environ            13090000
+*                                                                       13100000
+***************************************************************         13110000
+                                                                        13120000
+CLOSFILE DS    0H                                                       13130000
+         STM   R0,R15,REGSAVE     SAVE CALLERS REGS                     13140000
+         LR    R2,R1              DCB ADDRESS                           13150000
+                                                                        13160000
+         LA    R0,CLOSRES         ERROR RECOVERY IF CLOSE ABENDS        13170000
+         ST    R0,RESUME                                                13180000
+         MVI   IOFUNC,IOF_CLOS                                          13190000
+         MVC   MFE_LIST(FCLOSELN),FCLOSE                                13200000
+                                                                        13210000
+         CLOSE ((R2)),MF=(E,MFE_LIST)                                   13220000
+                                                                        13230000
+CLOSRES  DS    0H                                                       13240000
+         MVI   IOFUNC,IOF_NA                                            13250000
+         XC    RESUME,RESUME                                            13260000
+         LM    R0,R15,REGSAVE                                           13270000
+         BR    R14                                                      13280000
+                                                                        13290000
+***************************************************************         13300000
+*                                                                       13310000
+* ROUTINE:  TCLOSFIL - TCLOSE log file under recovery environ           13320000
+*                                                                       13330000
+***************************************************************         13340000
+                                                                        13350000
+TCLOSFIL DS    0H                                                       13360000
+         STM   R0,R15,REGSAVE     SAVE CALLERS REGS                     13370000
+         LR    R2,R1              DCB ADDRESS                           13380000
+                                                                        13390000
+         LA    R0,TCLOSRES        ERROR RECOVERY IF CLOSE ABENDS        13400000
+         ST    R0,RESUME                                                13410000
+         MVI   IOFUNC,IOF_TCLS                                          13420000
+         MVC   MFE_LIST(FTCLOSLN),FTCLOSE                               13430000
+                                                                        13440000
+         CLOSE ((R2)),TYPE=T,MF=(E,MFE_LIST)                            13450000
+                                                                        13460000
+TCLOSRES DS    0H                                                       13470000
+         MVI   IOFUNC,IOF_NA                                            13480000
+         XC    RESUME,RESUME                                            13490000
+         LM    R0,R15,REGSAVE                                           13500000
+         BR    R14                                                      13510000
+                                                                        13520000
+         EJECT ,                                                        13530000
+***************************************************************         13540000
+*                                                                       13550000
+* ROUTINE:  IOWRITE - Write buffer to log file with recovery            13560000
+*                                                                       13570000
+* ON ENTRY:                                                             13580000
+*                                                                       13590000
+*    R1  - block origin                                                 13600000
+*    R0  - block size                                                   13610000
+*                                                                       13620000
+***************************************************************         13630000
+                                                                        13640000
+IOWRITE  DS    0H                                                       13650000
+         STM   R0,R15,REGSAVE     PRESERVE MAINLINE REGS                13660000
+         L     R5,CURRLOG         LOGFILE ENTRY                         13670000
+         USING LOGFILE,R5                                               13680000
+         STH   R0,DCBBLKSI        POST SIZE OF BLOCK                    13690000
+         LR    R3,R1              BLOCK ORIGIN                          13700000
+                                                                        13710000
+         LA    R0,WRITRES         ERROR RECOVERY IF ABEND               13720000
+         ST    R0,RESUME                                                13730000
+         MVI   IOFUNC,IOF_WRIT                                          13740000
+                                                                        13750000
+*--------------------------------------------------------------         13760000
+                                                                        13770000
+         $AMODE 24,SAVE=FWORD     OS/VS ACCESS METHOD                   13780000
+                                                                        13790000
+         WRITE $FDECB,SF,$LOGDCB,(R3),'S',MF=E                          13800000
+                                                                        13810000
+         $AMODE FROM=FWORD        RESTORE ENTRY AMODE                   13820000
+                                                                        13830000
+*--------------------------------------------------------------         13840000
+                                                                        13850000
+WRITRES  DS    0H                                                       13860000
+         L     R5,CURRLOG         REFRESH LOGFILE ENTRY                 13870000
+         OI    STATUS,STIOACT     INDICATE I/O IN PROGRESS              13880000
+         MVI   IOFUNC,IOF_NA                                            13890000
+         XC    RESUME,RESUME                                            13900000
+                                                                        13910000
+         LM    R0,R15,REGSAVE     RESTORE REGS                          13920000
+         BR    R14                RETURN                                13930000
+         DROP  R5                 LOGFILE                               13940000
+                                                                        13950000
+         EJECT ,                                                        13960000
+***************************************************************         13970000
+*                                                                       13980000
+* ROUTINE:  IOCHECK - I/O completion under recovery environ             13990000
+*                                                                       14000000
+***************************************************************         14010000
+                                                                        14020000
+IOCHECK  DS    0H                                                       14030000
+         STM   R0,R15,REGSAVE     PRESERVE MAINLINE REGS                14040000
+         L     R5,CURRLOG         LOGFILE ENTRY                         14050000
+         USING LOGFILE,R5                                               14060000
+         LA    R0,IOSYNAD         SYNAD ROUTINE                         14070000
+         ST    R0,DCBSYNAD        INTERCEPT I/O FAILURES                14080000
+                                                                        14090000
+         LA    R0,CHECKRES        ERROR RECOVERY IF ABEND               14100000
+         ST    R0,RESUME                                                14110000
+         MVI   IOFUNC,IOF_CHCK                                          14120000
+                                                                        14130000
+*--------------------------------------------------------------         14140000
+                                                                        14150000
+         $AMODE 24,SAVE=FWORD     OS/VS ACCESS METHOD                   14160000
+                                                                        14170000
+         CHECK $FDECB             AWAIT COMPLETION                      14180000
+                                                                        14190000
+         $AMODE FROM=FWORD        RESTORE ENTRY AMODE                   14200000
+                                                                        14210000
+*--------------------------------------------------------------         14220000
+                                                                        14230000
+CHECKRES DS    0H                                                       14240000
+         L     R5,CURRLOG         REFRESH LOGFILE ENTRY                 14250000
+         NI    STATUS,FF-STIOACT  I/O COMPLETED OR TERMINATED           14260000
+         MVI   IOFUNC,IOF_NA                                            14270000
+         XC    RESUME,RESUME                                            14280000
+                                                                        14290000
+         TM    IOERRDOC,IOERR_SYNAD                                     14300000
+         BNO   IOCNOSYN           NO SYNAD ERROR MSG GENERATED          14310000
+         NI    IOERRDOC,FF-IOERR_SYNAD                                  14320000
+                                                                        14330000
+         $MSG  005,               PRESENT ACSMETH DIAGNOSTICS          X14340000
+               FIELDS=(SYNADMSG)                                        14350000
+                                                                        14360000
+IOCNOSYN DS    0H                                                       14370000
+         LA    R15,RC04           PRESUME I/O FAILURE                   14380000
+         TM    STFAIL,STFAIL      PRESUMPTION CORRECT?                  14390000
+         BO    IOCRET             DONE IF SO                            14400000
+         NI    STATUS,FF-STPEND   ELSE INDICATE BLOCK WRITTEN           14410000
+         LA    R15,RC00           SUCCESSFUL COMPLETION                 14420000
+                                                                        14430000
+IOCRET   DS    0H                                                       14440000
+         LM    R0,R14,REGSAVE     RESTORE MAINLINE REGS                 14450000
+         LTR   R15,R15            REFLECT STATUS VIA CC                 14460000
+         BR    R14                RETURN                                14470000
+                                                                        14480000
+***************************************************************         14490000
+*                                                                       14500000
+* ROUTINE: IOSYNAD - logfile (BSAM) SYNAD error routine                 14510000
+*                                                                       14520000
+***************************************************************         14530000
+                                                                        14540000
+IOSYNAD  DS    0H                                                       14550000
+         SYNADAF ACSMETH=BSAM                                           14560000
+                                                                        14570000
+         L     R3,4(,R13)         TRACE BACK THRU SAVEAREAS             14580000
+WKA      USING WORKAREA,R3        ORIGINAL WORKAREA                     14590000
+                                                                        14600000
+         OI    LOGFLAGS,LOG_FAIL                                        14610000
+                                                                        14620000
+         MVC   WKA.SYNADMSG,8+42(R1) SYNAD MESSAGE                      14630000
+         OI    WKA.IOERRDOC,IOERR_SYNAD                                 14640000
+         OI    WKA.STATUS,STFAIL                                        14650000
+         DROP  WKA                                                      14660000
+                                                                        14670000
+         SYNADRLS ,                                                     14680000
+                                                                        14690000
+         BR    R14                                                      14700000
+         DROP  R5                 LOGFILE                               14710000
+                                                                        14720000
+         EJECT ,                                                        14730000
+**<DOC-ON>*****************************************************         14740000
+*                                                                       14750000
+* ROUTINE:  DROPFILE - DOCUMENT LOG FILE FAILURE AND REMOVE             14760000
+*                                                                       14770000
+* DESCRIPTION:                                                          14780000
+*                                                                       14790000
+*    When a log file is found to be unusable for any of a               14800000
+*    variety of reasons summarized in the corresponding LOGFILE         14810000
+*    entry, this routine is used to document the error and to           14820000
+*    drop the file from any future consideration.                       14830000
+*                                                                       14840000
+**<DOC-OFF>****************************************************         14850000
+                                                                        14860000
+DROPFILE DS    0H                                                       14870000
+         STM   R0,R15,REGSAVE     SAVE CALLERS REGS                     14880000
+         LR    R5,R1              LOG FILE DESCRIPTOR                   14890000
+         USING LOGFILE,R5         ADDRESSABILITY                        14900000
+                                                                        14910000
+         NI    LOGFLAGS,FF-LOG_AVAILABLE                                14920000
+                                                                        14930000
+*--------------------------------------------------------------         14940000
+*   Document reason for failure                                         14950000
+*--------------------------------------------------------------         14960000
+                                                                        14970000
+         TM    LOGFLAGS,LOG_UNSUITABLE                                  14980000
+         BNO   DROPC1                                                   14990000
+                                                                        15000000
+         $MSG  001,FIELDS=(LOGDDN)                                      15010000
+                                                                        15020000
+DROPC1   DS    0H                                                       15030000
+                                                                        15040000
+*------- ABEND PROCESSING LOGFILE -----------------------------         15050000
+                                                                        15060000
+         TM    LOGFLAGS,LOG_ABEIO+LOG_ABEOCEOV                          15070000
+         BZ    DROPC2                                                   15080000
+                                                                        15090000
+         $MSG  002,FIELDS=(LOGABEND,LOGABRSN,LOGDDN)                    15100000
+                                                                        15110000
+DROPC2   DS    0H                                                       15120000
+                                                                        15130000
+*------- CONFLICTING ATTRIBUTES -------------------------------         15140000
+                                                                        15150000
+         TM    LOGFLAGS,LOG_CONFLICT                                    15160000
+         BZ    DROPC3                                                   15170000
+                                                                        15180000
+         $MSG  003,FIELDS=(LOGDDN,FILFIRST)                             15190000
+                                                                        15200000
+DROPC3   DS    0H                                                       15210000
+                                                                        15220000
+*------- LOG FILE DROPPED -------------------------------------         15230000
+                                                                        15240000
+         $MSG  009,FIELDS=(LOGDDN)                                      15250000
+                                                                        15260000
+         LM    R0,R14,REGSAVE     RESTORE MAINLINE REGS                 15270000
+         SR    R15,R15            RC NOT DEFINED                        15280000
+         BR    R14                RETURN                                15290000
+         DROP  R5                                                       15300000
+                                                                        15310000
+         EJECT ,                                                        15320000
+**<DOC-ON>*****************************************************         15330000
+*                                                                       15340000
+* ROUTINE: XITOPEN - DCB OPEN EXIT                                      15350000
+*                                                                       15360000
+* DESCRIPTION:                                                          15370000
+*                                                                       15380000
+*    This DCB open exit assigns a RECRM, LRECL, and BLKSIZE             15390000
+*    to (new) log files having incomplete or inappropriate              15400000
+*    combinations of these parameters.  The RECFM must be               15410000
+*    either blocked or unblocked fixed or variable length               15420000
+*    records in a physical sequential file.  The variable               15430000
+*    format is preferrred.  If the BLKSIZE present after                15440000
+*    OPEN merge is not consistent with the LRECL assignment,            15450000
+*    an arbitrary blocking factor is applied.                           15460000
+*                                                                       15470000
+* ON ENTRY:                                                             15480000
+*                                                                       15490000
+*    CURRLOG addresses the current log file descriptor.                 15500000
+*    Note that the save area addressed by R13 is not available          15510000
+*    to DCB exit routines.                                              15520000
+*                                                                       15530000
+**<DOC-OFF>****************************************************         15540000
+                                                                        15550000
+XITOPEN  DS    0H                 OPEN EXIT                             15560000
+         LA    R8,0(,R1)          LOG DCB                               15570000
+         USING IHADCB,R8          OUTPUT DCB FORMAT (QSAM)              15580000
+         L     R5,CURRLOG         CORRESPONDING LOG FILE ENTRY          15590000
+         USING LOGFILE,R5         ENTRY FORMAT                          15600000
+                                                                        15610000
+*--------------------------------------------------------------         15620000
+*   Validate file organization and record format                        15630000
+*--------------------------------------------------------------         15640000
+         TM    DCBDSRG1,DCBDSGPS  PHYSICAL SEQUENTIAL?                  15650000
+         BNO   XITREJ             REJECT                                15660000
+                                                                        15670000
+         TM    DCBRECFM,DCBRECF+DCBRECV   RECFM SELECTED?               15680000
+         BO    XITREJ             BOTH BITS = DCBRECU - UNDEFINED       15690000
+         BNZ   *+8                SKIP IF NOT                           15700000
+         OI    DCBRECFM,DCBRECV   ASSIGN PREFERRED FORMAT               15710000
+                                                                        15720000
+         TM    DCBRECFM,DCBRECF   FIXED LENGTH RECORDS?                 15730000
+         BNO   XITNFIX            SKIP IF NOT                           15740000
+         MVI   LOGRECFM,LOG_FIXED                                       15750000
+         XC    LOGROVHD,LOGROVHD  NO RECORD OVERHEAD                    15760000
+XITNFIX  DS    0H                                                       15770000
+                                                                        15780000
+         TM    DCBRECFM,DCBRECV   VARIABLE LENGTH RECORDS?              15790000
+         BNO   XITNVAR            SKIP IF NOT                           15800000
+         MVI   LOGRECFM,LOG_VARIABLE                                    15810000
+         MVC   LOGROVHD,=F'4'     RDW OVERHEAD PER RECORD               15820000
+XITNVAR  DS    0H                                                       15830000
+                                                                        15840000
+         NI    DCBRECFM,FF-DCBRECCA-DCBRECCM   NO CARRIAGE CNTL         15850000
+                                                                        15860000
+*--------------------------------------------------------------         15870000
+*   Assign a record length consistent with RECFM                        15880000
+*--------------------------------------------------------------         15890000
+                                                                        15900000
+         LA    R2,MAXDATA         FIXED LENGTH RECORD REQUIREMENT       15910000
+         TM    DCBRECFM,DCBRECF   MATCHES RECFM?                        15920000
+         BO    *+8                SKIP IF SO                            15930000
+         LA    R2,4(,R2)          ELSE ACCOUNT FOR RDW                  15940000
+         STH   R2,DCBLRECL        REPLACE ANY PRIOR SPECIFICATION       15950000
+         STH   R2,LOGLRECL        RETAIN IN LOGFILE ENTRY               15960000
+                                                                        15970000
+*--------------------------------------------------------------         15980000
+*   Select a BLKSIZE consistent with RECFM and LRECL                    15990000
+*--------------------------------------------------------------         16000000
+                                                                        16010000
+         ICM   R1,3,DCBBLKSI      BLOCKSIZE SUGGESTED?                  16020000
+         BZ    XITBCALC           NEEDS ASSIGNMENT                      16030000
+         TM    DCBRECFM,DCBRECF   FIXED FORMAT?                         16040000
+         BO    XITBLKFB           ELSEWHERE IF SO                       16050000
+         SH    R1,DCBLRECL        BLKSIZE > LRECL                       16060000
+         BNP   XITBCALC           RESET IT IF NOT                       16070000
+         CH    R1,=H'4'           SPACE SUFFICIENT FOR BDW?             16080000
+         BL    XITBCALC           RESET BLOCKSIZE IF NOT                16090000
+         B     XITEBLK            ACCEPT SUGGESTED BLOCKSIZE            16100000
+                                                                        16110000
+XITBLKFB DS    0H                 FIXED LENGTH RECORDS                  16120000
+         SR    R0,R0              PREPARE FOR DIVIDE                    16130000
+         DR    R0,R2              BLOCKSIZE VS LRECL                    16140000
+         LTR   R0,R0              BLOCKSIZE = N * LRECL?                16150000
+         BZ    XITEBLK            ACCEPT SUGGESTED BLOCKSIZE            16160000
+                                                                        16170000
+XITBCALC DS    0H                 SYSTEM TO ASSIGN BLOCKSIZE            16180000
+         LH    R1,DCBLRECL        FETCH LRECL                           16190000
+         MH    R1,=H'20'          RATHER ARBITRARY                      16200000
+         TM    DCBRECFM,DCBRECV   VARIABLE LENGTH?                      16210000
+         BNO   *+8                SKIP IF NOT                           16220000
+         LA    R1,4(,R1)          ELSE ACCOUNT FOR BDW                  16230000
+         STH   R1,DCBBLKSI        ASSIGN BLKSIZE                        16240000
+         OI    DCBRECFM,DCBRECBR  BLOCKED RECORDS                       16250000
+                                                                        16260000
+XITEBLK  DS    0H                                                       16270000
+         MVC   LOGBLKSI,DCBBLKSI  RETAIN IN LOGFILE ENTRY               16280000
+         B     XITRETRN                                                 16290000
+                                                                        16300000
+*--------------------------------------------------------------         16310000
+*   Return to open                                                      16320000
+*--------------------------------------------------------------         16330000
+                                                                        16340000
+XITREJ   DS    0H                                                       16350000
+         OI    LOGFLAGS,LOG_UNSUITABLE                                  16360000
+                                                                        16370000
+XITRETRN DS    0H                 RETURN                                16380000
+         BR    R14                                                      16390000
+         DROP  R5,R8              LOGFILE, DCB                          16400000
+                                                                        16410000
+         EJECT ,                                                        16420000
+**<DOC-ON>*****************************************************         16430000
+*                                                                       16440000
+* ROUTINE: RECOVRTN - ITASK ABEND RECOVERY ROUTINE                      16450000
+*                                                                       16460000
+* DESCRIPTION:                                                          16470000
+*                                                                       16480000
+*    This $RCVRY routine traps ABENDs that occur under control          16490000
+*    of the access method or OPEN/CLOSE/EOV and attempts                16500000
+*    to recover by marking the current log file in error.               16510000
+*    In the case of an X37 ABEND, a file switch request is              16520000
+*    raised and the ABEND condition is not posted to the                16530000
+*    mainline.                                                          16540000
+*                                                                       16550000
+*    The recovery action consists of restoring regs R12 and R13         16560000
+*    and selecting the resumption point identified by the               16570000
+*    various log manager I/O interfaces.  Regs other than               16580000
+*    R10-R13 must be restored by the retry/resumpton routine if         16590000
+*    necessary. recovery is not attempted if the ABEND occurred         16600000
+*    outside of an I/O function.                                        16610000
+*                                                                       16620000
+**<DOC-OFF>****************************************************         16630000
+                                                                        16640000
+RECOVRTN DS    0H                                                       16650000
+         PUSH  USING              PRESERVE STD ENVIRONMENT              16660000
+         DROP  R13                PRECLUDE UNINTENTIONAL REFERENCES     16670000
+         STM   R14,R12,12(R13)    SAVE ENTRANCE REGS                    16680000
+         CR    R0,R10             RUNNING UNDER HOME ITASK?             16690000
+         BNE   RECPERC            CANT HANDLE OTHERWISE                 16700000
+                                                                        16710000
+         LR    R3,R1              RESTORE ORIGINAL WORKAREA ADDR        16720000
+W        USING WORKAREA,R3        ADDRESSABILITY                        16730000
+         L     R7,TSK@ERR         LOCATE FAILURE INFO                   16740000
+         USING TSKERR,R7          DIRECTLY ADDRESSABLE                  16750000
+                                                                        16760000
+         CLI   W.IOFUNC,IOF_NA    SYSTEM I/O REQUEST IN PROGRESS?       16770000
+         BE    RECPERC            UNEXPECTED FAILURE IF NOT             16780000
+         L     R5,W.CURRLOG       CURRENT LOG FILE DESCRIPTOR           16790000
+         USING LOGFILE,R5         MAPPED                                16800000
+                                                                        16810000
+*--------------------------------------------------------------         16820000
+*   Raise file switch req if x37 abend                                  16830000
+*--------------------------------------------------------------         16840000
+                                                                        16850000
+RECTEST  DS    0H                                                       16860000
+         SR    R0,R0                                                    16870000
+         IC    R0,TSKERC+3        ABEND CODE SUFFIX                     16880000
+         CH    R0,=AL2(X37)       ABENDSX37?                            16890000
+         BNE   RECFAIL            HARD FAILURE OTHERWISE                16900000
+         OI    W.STATUS,STSWITCH  ELSE RAISE SWTICH                     16910000
+         NI    TSKELOGF,FF-TSKELG_LOG                                   16920000
+         NI    TSKEABFL,FF-TSKEAB_DUMP                                  16930000
+                                                                        16940000
+         TM    TSKEINFO,TSKEINF_NRETRY   RETRY CAPABLE?                 16950000
+         BNO   RECRETRY           ATTEMPT RETRY                         16960000
+                                                                        16970000
+*--------------------------------------------------------------         16980000
+*   File cleanup if retry is not allowed                                16990000
+*--------------------------------------------------------------         17000000
+                                                                        17010000
+         LA    R8,W.$LOGDCB       LOCATE THE LOGFILE DCB                17020000
+         USING IHADCB,R8          DCB ADDRESSABILITY                    17030000
+         TM    DCBOFLGS,DCBOFOPN  LOGFILE DCB IS OPEN?                  17040000
+         BNO   RECPERC            ABANDON SHIP IF NOT                   17050000
+                                                                        17060000
+         MVC   W.MFE_LIST(FCLOSELN),FCLOSE                              17070000
+         CLOSE ((R8)),MF=(E,W.MFE_LIST)                                 17080000
+                                                                        17090000
+         B     RECPERC            PERCOLATE                             17100000
+                                                                        17110000
+*--------------------------------------------------------------         17120000
+*   Terminate file processing if other error                            17130000
+*--------------------------------------------------------------         17140000
+                                                                        17150000
+RECFAIL  DS    0H                                                       17160000
+         OI    W.STATUS,STFAIL    FILE FAILURE                          17170000
+         OI    LOGFLAGS,LOG_FAIL  ATTACH STIGMA TO FILE                 17180000
+         MVC   LOGABEND,TSKERC    ABEND CODE                            17190000
+         MVC   LOGABRSN,TSKERSN   REASON                                17200000
+                                                                        17210000
+         SR    R1,R1              ABEND TYPE                            17220000
+         CLI   W.IOFUNC,IOF_OPEN                                        17230000
+         BNE   *+8                                                      17240000
+         LA    R1,LOG_ABEOCEOV                                          17250000
+         CLI   W.IOFUNC,IOF_CLOS                                        17260000
+         BNE   *+8                                                      17270000
+         LA    R1,LOG_ABEOCEOV                                          17280000
+         CLI   W.IOFUNC,IOF_WRIT                                        17290000
+         BNE   *+8                                                      17300000
+         LA    R1,LOG_ABEIO                                             17310000
+         CLI   W.IOFUNC,IOF_CHCK                                        17320000
+         BNE   *+8                                                      17330000
+         LA    R1,LOG_ABEIO                                             17340000
+                                                                        17350000
+         OI    LOGFLAGS,*-*       POST ABEND TYPE SUMMARY               17360000
+         EX    R1,*-4                                                   17370000
+                                                                        17380000
+*--------------------------------------------------------------         17390000
+*   Attempt recovery                                                    17400000
+*--------------------------------------------------------------         17410000
+                                                                        17420000
+RECRETRY DS    0H                                                       17430000
+         ST    R12,TSKERCVR+(R12*4)                                     17440000
+         ST    R3,TSKERCVR+(R13*4)                                      17450000
+         L     R15,W.RESUME                                             17460000
+         B     RECRET                                                   17470000
+                                                                        17480000
+RECPERC  DS    0H                 PERCOLATE                             17490000
+         SR    R15,R15                                                  17500000
+                                                                        17510000
+RECRET   DS    0H                 RETURN                                17520000
+         L     R14,12(,R13)                                             17530000
+         LM    R0,R12,20(R13)                                           17540000
+         BR    R14                                                      17550000
+         POP   USING                                                    17560000
+                                                                        17570000
+         EJECT ,                                                        17580000
+***************************************************************         17590000
+*                                                                       17600000
+*   Local read/only data areas, etc.                                    17610000
+*                                                                       17620000
+***************************************************************         17630000
+                                                                        17640000
+X37      EQU   X'37'                                                    17650000
+                                                                        17660000
+         WRITE FDECB,SF,MF=L      DECB TEMPLATE                         17670000
+FDECBLN  EQU   *-FDECB            LENGTH OF TEMPLATE                    17680000
+                                                                        17690000
+FOPEN    OPEN  (*-*,(OUTPUT)),MF=L                                      17700000
+FOPENLN  EQU   *-FOPEN                                                  17710000
+                                                                        17720000
+FCLOSE   CLOSE (*-*),MF=L                                               17730000
+FCLOSELN EQU   *-FCLOSE                                                 17740000
+                                                                        17750000
+FTCLOSE  CLOSE (*-*),TYPE=T,MF=L                                        17760000
+FTCLOSLN EQU   *-FTCLOSE                                                17770000
+                                                                        17780000
+         PRINT NOGEN                                                    17790000
+LOGDCB   DCB   DSORG=PS,MACRF=(WC),DDNAME=LOGFILE1,EXLST=EXITLIST       17800000
+LOGDCBLN EQU   *-LOGDCB                                                 17810000
+                                                                        17820000
+EXITLIST DC    0A(0),AL1(X'85'),AL3(XITOPEN)                            17830000
+                                                                        17840000
+*--------------------------------------------------------------         17850000
+                                                                        17860000
+         LTORG ,                                                        17870000
+                                                                        17880000
+         PRINT NOGEN                                                    17890000
+         ICVT  ,                                                        17900000
+         ITASK ,                                                        17910000
+                                                                        17920000
+         DCBD   DSORG=PS,DEVD=DA                                        17930000
+         END   ,                                                        17940000
