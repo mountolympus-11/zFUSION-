@@ -1,0 +1,380 @@
+IIMGLOAD TITLE 'LOAD IMAGE INTO NAVIGATION NETWORK'                     00010000
+**<DOC-ON>******************************************************        00020000
+*                                                                       00030000
+* ROUTINE:  IIMGLOAD - Load Image into Navigation Network               00040000
+*                                                                       00050000
+* FUNCTION:                                                             00060000
+*                                                                       00070000
+*   int  imgload( struct stghdrq *qh, struct nvstn *stn ) ;             00080000
+*                                                                       00090000
+* DESCRIPTION:                                                          00100000
+*                                                                       00110000
+*   This routine will retrieve a SYSIMAGE table row and                 00120000
+*   construct an IMAGE structure for the model image associated         00130000
+*   with an STN (State transition network entry).  The model            00140000
+*   images are retieved on demand when required by the PLAN             00150000
+*   execution service.  Since runtime projects may be concurrently      00160000
+*   accessed by serveral users,  updating the navigation strucuture     00170000
+*   must be serialized using the project multiple-instance lock         00180000
+*   (MIL).  A recovery environment is also establish to provide         00190000
+*   resource cleanup of the project MIL.                                00200000
+*                                                                       00210000
+*   After the SYSIMAGE row is retrieved,  an IMGBLD request             00220000
+*   is made to constuct the image structure and an IMGPREP              00230000
+*   request is made to prepare the image for comparison.                00240000
+*                                                                       00250000
+* NOTES:  This routine uses standard SASC linkage conventions,          00260000
+*         provided by the CENTRY and CEXIT macros.                      00270000
+*                                                                       00280000
+* ENTRY:  Upon entry to this routine R1 contains the address            00290000
+*         of the parameter list as follows.                             00300000
+*                                                                       00310000
+*             +0 - A(stghdrq)     Storage manager queue hdr             00320000
+*             +4 - A(nvstn)       Navigation state trans entry          00330000
+*                                                                       00340000
+* EXIT:   Upon return from this routine R15 will contain one            00350000
+*         of the following return codes:                                00360000
+*                                                                       00370000
+*             RC00 - Image successfully loaded                          00380000
+*             RC04 - No image associated with this STN                  00390000
+*             RC08 - Unable to retrieve SYSIMAGE row                    00400000
+*             RC12 - Error constructing IMAGE structure                 00410000
+*                                                                       00420000
+**<DOC-OFF>*****************************************************        00430000
+                                                                        00440000
+         EJECT ,                                                        00450000
+****************************************************************        00460000
+*                                                                       00470000
+* MAINTENANCE:                                                          00480000
+*                                                                       00490000
+*   10/12/93 Ron Colmone                                                00500000
+*            Initial version                                            00510000
+*                                                                       00520000
+*   01/23/96 Ron Colmone          Par #238074                           00530000
+*            Construct default NVIMAGE for clear screen                 00540000
+*                                                                       00550000
+****************************************************************        00560000
+                                                                        00570000
+         EJECT ,                                                        00580000
+         TBSERVIS GET             TABLE SERVICES                        00590000
+                                                                        00600000
+         EJECT ,                                                        00610000
+         NAV   ,                  NAVIGATION STRUCTURES                 00620000
+                                                                        00630000
+         EJECT ,                                                        00640000
+         ICATALOG IMAGE           CATALOG TABLE STRUCTURES              00650000
+                                                                        00660000
+         EJECT ,                                                        00670000
+         ABCODES ,                ABEND CODES                           00680000
+                                                                        00690000
+         EJECT ,                                                        00700000
+         EQUS  ,                  GENERAL EQUATES                       00710000
+                                                                        00720000
+         EJECT ,                                                        00730000
+         COPY  CRAB               "C"  RUNTIME ANCHOR BLOCK             00740000
+         USING CRAB,R12           LIFETIME ADDRESSABILITY               00750000
+                                                                        00760000
+         EJECT ,                                                        00770000
+         COPY  DSA                DYNAMIC SAVE AREA                     00780000
+WORKDSA  DS    0D                 DSA USER SECTION                      00790000
+WRK256   DS    XL256              GENERAL WORKAREA                      00800000
+MFE_LIST DS    10F                PARAMETER LIST AREA                   00810000
+RETCODE  DS    F                  RETURN CODE                           00820000
+                                                                        00830000
+FLAGS    DS    X                  FLAGS                                 00840000
+$LOCKED  EQU   X'80'                PROJ MULTI-INSTANCE LOCK ACQUIRED   00850000
+                                                                        00860000
+STGQH@   DS    A                  ADDRESS OF STGMGR QUEUE HEADER        00870000
+SYSIMG@  DS    A                  ADDRESS OF SYSIMAGE ROW               00880000
+IMGBUFF  DS    A,F                IMAGE BUFFER ADDR/LEN                 00890000
+                                                                        00900000
+         CMPINFO DSECT=NO         COMPARE INFO MAPPING                  00910000
+                                                                        00920000
+WORKLEN  EQU   *-WORKDSA          LENGTH OF DSA USER SECTION            00930000
+DSALEN   EQU   *-DSA              LENGTH OF DSA                         00940000
+                                                                        00950000
+#DFTROWS EQU   24                 DFT NUMBER OF ROWS ON CLR SCREEN      00960000
+#DFTCOLS EQU   80                 DFT NUMBER OF COLS ON CLR SCREEN      00970000
+                                                                        00980000
+         EJECT ,                                                        00990000
+IIMGLOAD CSECT ,                                                        01000000
+IMGLOAD  CENTRY DSA=DSALEN,INDEP=YES                                    01010000
+         USING DSA,R13            ADDRESSABILITY                        01020000
+                                                                        01030000
+         LR    R8,R1              SAVE PARM ADDRESS                     01040000
+                                                                        01050000
+         LA    R0,WORKDSA         WORKAREA ORIGIN                       01060000
+         LA    R1,WORKLEN         LENGTH OF WORKAREA                    01070000
+         SR    R15,R15            PREPAREA FOR CLEAR                    01080000
+         MVCL  R0,R14             CLEAR WORKAREA                        01090000
+                                                                        01100000
+         LM    R5,R6,0(R8)        OBTAIN PARMS                          01110000
+         ST    R5,STGQH@          ADDRESS OF STORAGE QUEUE HEADER       01120000
+         USING NVSTN,R6           ADDRESSABILITY                        01130000
+                                                                        01140000
+*---------------------------------------------------------------        01150000
+*  RESTORE STANDARD ENVIRONMENT                                         01160000
+*---------------------------------------------------------------        01170000
+         @RESTENV ,                                                     01180000
+         USING ICVT,R11           ADDRESSABILITY                        01190000
+         USING ITASK,R10          ADDRESSABILITY                        01200000
+                                                                        01210000
+         L     R7,TSKPCBC         ADDRESS OF CURRENT PCB                01220000
+         USING IPCB,R7            TEMP ADDRESSABILITY                   01230000
+         L     R7,PCBUSER         ADDRESS OF CURRENT USER               01240000
+         USING IUSER,R7           TEMP ADDRESSABILITY                   01250000
+         L     R7,USRPROJ         ADDRESS OF PROJECT                    01260000
+         USING IPROJ,R7           ADDRESSABILITY                        01270000
+                                                                        01280000
+         EJECT ,                                                        01290000
+***************************************************************         01300000
+*                                                                       01310000
+*  ESTABLISH A RECOVERY ENVIRONMENT TO RELEASE PROJECT LOCK             01320000
+*  SHOULD THE NAVIGATION DATA AREAS CONSTRUCTION LOGIC FAIL.            01330000
+*                                                                       01340000
+***************************************************************         01350000
+                                                                        01360000
+         $RCVRY CREATE,RECOVRTN,PARM=WORKDSA,MF=(E,MFE_LIST)            01370000
+                                                                        01380000
+***************************************************************         01390000
+*                                                                       01400000
+*  ACQUIRE PROJECT MULTIPLE INSTANCE LOCK                               01410000
+*                                                                       01420000
+***************************************************************         01430000
+                                                                        01440000
+         $SER  OBTAIN,LOCKPTR=PRJMILK                                   01450000
+         CH    R15,=AL2(RC04)     LOCK ACQUIRED                         01460000
+         BH    ABN_LOCK           FAILED                                01470000
+         BE    LOADIMG            CONTINUE WITH IMAGE LOAD              01480000
+         OI    FLAGS,$LOCKED      PROJ LOCK ACQUIRED                    01490000
+                                                                        01500000
+         EJECT ,                                                        01510000
+***************************************************************         01520000
+*                                                                       01530000
+*  RETRIEVE SYSIMAGE ROW ASSOCIATED WITH STN                            01540000
+*                                                                       01550000
+***************************************************************         01560000
+LOADIMG  DS    0H                                                       01570000
+         ICM   R1,15,NVSIMGA      IMAGE ALREADY LOADED?                 01580000
+         BNZ   RET_NORM           YES, RETURN                           01590000
+                                                                        01600000
+*--------------------------------------------------------------         01610000
+*  RETRIEVE SYSIMAGE TABLE ROW                                          01620000
+*--------------------------------------------------------------         01630000
+         LA    R3,WRK256          TRIAL IMAGE BUFFER                    01640000
+         LA    R4,L'WRK256        LENGTH OF TRIAL BUFFER                01650000
+         ICM   R5,15,NVSIMGID     RETRIEVE IMAGE KEY                    01660000
+         BZ    CLR_IMG            NO SYSIMAGE AVAILABLE                 01670000
+                                                                        01680000
+GETIMG   DS    0H                                                       01690000
+         ST    R3,SYSIMG@         SAVE ADDR OF                          01700000
+                                                                        01710000
+         TBGET (R3),              ACQUIRE DESIGNATED SYSIMAGE          +01720000
+               LENGTH=(R4),                                            +01730000
+               POS=(R5),                                               +01740000
+               TTOKEN=PRJTKIMG,                                        +01750000
+               MF=(E,MFE_LIST)                                          01760000
+                                                                        01770000
+         C     R15,=A(RC04)       SYSIMAGE RETRIEVED ?                  01780000
+         BH    ERR_IMG            ERROR, IMAGE NOT FOUND                01790000
+         BL    BLDIMG             OK,  CONTINUE WITH IMAGE BUILD        01800000
+         LTR   R0,R0              INSUFFICIENT BUFFER SIZE?             01810000
+         BZ    ERR_IMG            NO, ROW NOT FOUND                     01820000
+                                                                        01830000
+*--------------------------------------------------------------         01840000
+*  INTERNAL TRIAL BUFFER IS NOT LARGE ENOUGH TO HOLD IMAGE,             01850000
+*  REALLOCATE BUFFER FOR REQUIRED SIZE.                                 01860000
+*--------------------------------------------------------------         01870000
+         LR    R4,R0              STORAGE REQUIREMENT                   01880000
+         L     R2,STGQH@          ADDRESS OF STG QUEUE HEADER           01890000
+         STGGET (R4),QH=(R2)      ALLOC IMAGE BUFFER                    01900000
+         LR    R3,R1              ADDRESS OF STORAGE                    01910000
+         STM   R3,R4,IMGBUFF      SAVE IMAGE BUFFER INFO                01920000
+         B     GETIMG             RETRY ROW RETRIEVAL                   01930000
+                                                                        01940000
+         EJECT ,                                                        01950000
+***************************************************************         01960000
+*                                                                       01970000
+*  IF THE STATE REPRESENTS A CLEAR SCREEN, CONSTRUCT DFT IMAGE          01980000
+*                                                                       01990000
+***************************************************************         02000000
+CLR_IMG  DS    0H                                                       02010000
+         TM    NVSFLG,NVSFUSS     VTAM/USS SPECIAL STATE?               02020000
+         BO    WRN_IMG            YES,  NO IMAGE REQUIRED               02030000
+         TM    NVSFLG,NVSFCLR     CLEAR SCREEN?                         02040000
+         BZ    WRN_IMG            NO IMAGE AVAILABLE                    02050000
+                                                                        02060000
+         LA    R4,(#DFTROWS*#DFTCOLS)+SIMGLN                            02070000
+         L     R2,STGQH@          ADDRESS OF STG QUEUE HEADER           02080000
+         STGGET (R4),QH=(R2)      ALLOC IMAGE BUFFER                    02090000
+         LR    R3,R1              ADDRESS OF STORAGE                    02100000
+         STM   R3,R4,IMGBUFF      SAVE IMAGE BUFFER INFO                02110000
+                                                                        02120000
+         ST    R3,SYSIMG@         DEFAULT SYSIMAGE ROW                  02130000
+         USING SYSIMAGE,R3        ADDRESSABILITY                        02140000
+                                                                        02150000
+         LA    R0,#DFTROWS        CLEAR SCREEN ROWS                     02160000
+         ST    R0,SIMGROWS                                              02170000
+         LA    R0,#DFTCOLS        CLEAR SCREEN COLS                     02180000
+         ST    R0,SIMGCOLS                                              02190000
+         DROP  R3                 SYSIMAGE                              02200000
+                                                                        02210000
+         EJECT ,                                                        02220000
+***************************************************************         02230000
+*                                                                       02240000
+*  BUILD AN IMAGE STRUCTURE AND PREPARE IMAGE FOR COMPARE               02250000
+*                                                                       02260000
+***************************************************************         02270000
+BLDIMG   DS    0H                                                       02280000
+         @CALL IMGBLD,(*STGQH@,*SYSIMG@,NVSTNAME),MF=(E,MFE_LIST)       02290000
+         LTR   R5,R15             IMAGE CONSTRUCTED?                    02300000
+         BZ    ERR_IMGB           IMAGE BUILD FAILED                    02310000
+         USING NVIMAGE,R5         ADDRESSABILITY                        02320000
+                                                                        02330000
+         ST    R5,NVSIMGA         SAVE IMAGE STRUCTURE ADDRESS          02340000
+         MVC   NVIATTR,NVSFLG     COPY STATE FLAG / IMAGE ATTRS         02350000
+         MVC   NVIRGNTR,NVSRGN    COPY ADDRESS OF REGION TREE           02360000
+                                                                        02370000
+*--------------------------------------------------------------         02380000
+*  PREPARE MODEL IMAGE FOR SCREEN COMPARISON                            02390000
+*--------------------------------------------------------------         02400000
+         @CALL IMGPREP,(*STGQH@,(R5),0,CMPINFO),MF=(E,MFE_LIST)         02410000
+                                                                        02420000
+         EJECT ,                                                        02430000
+***************************************************************         02440000
+*                                                                       02450000
+*  NORMAL AND ERROR COMPLETION ROUTINES                                 02460000
+*                                                                       02470000
+***************************************************************         02480000
+RET_NORM DS    0H                                                       02490000
+         LA    R15,RC00           NORMAL COMPLETION                     02500000
+         ST    R15,RETCODE        SAVE RETURN CODE                      02510000
+         B     FREEBUF            FREE STORAGE AND RELEASE LOCK         02520000
+                                                                        02530000
+WRN_IMG  DS    0H                                                       02540000
+         LA    R15,RC04           NO SYSIMAGE ASSOCIATED WITH STN       02550000
+         ST    R15,RETCODE        SAVE RETURN CODE                      02560000
+         B     FREEBUF            FREE STORAGE AND RELEASE LOCK         02570000
+                                                                        02580000
+ERR_IMG  DS    0H                                                       02590000
+         LA    R15,RC08           SYSIMAGE NOT FOUND                    02600000
+         ST    R15,RETCODE        SAVE RETURN CODE                      02610000
+         B     FREEBUF            FREE STORAGE AND RELEASE LOCK         02620000
+                                                                        02630000
+ERR_IMGB DS    0H                                                       02640000
+         LA    R15,RC12           IMAGE CONSTRUCTION FAILED             02650000
+         ST    R15,RETCODE        SAVE RETURN CODE                      02660000
+         B     FREEBUF            FREE STORAGE AND RELEASE LOCK         02670000
+                                                                        02680000
+***************************************************************         02690000
+*                                                                       02700000
+*  RELEASE SYSIMAGE BUFFER STORAGE                                      02710000
+*                                                                       02720000
+***************************************************************         02730000
+FREEBUF  DS    0H                                                       02740000
+         LM    R3,R4,IMGBUFF      ADDR/LEN OF SYSIMAGE BUFFER           02750000
+         LTR   R3,R3              BUFFER ALLOCATED?                     02760000
+         BZ    RELLOCK            NO, CONTINUE WITH LOCK RELEASE        02770000
+         L     R2,STGQH@          ADDRESS OF STORAGE QUEUE HDR          02780000
+                                                                        02790000
+         STGRETN ADDR=(R3),LEN=(R4),QH=(R2)                             02800000
+                                                                        02810000
+***************************************************************         02820000
+*                                                                       02830000
+*  RELEASE LOCK ASSOCIATED WITH THE PROJECT IF PREV ACQUIRED            02840000
+*                                                                       02850000
+***************************************************************         02860000
+RELLOCK  DS    0H                                                       02870000
+         TM    FLAGS,$LOCKED      PROJ MULTI-INSTANCE LOCK ACQ          02880000
+         BZ    DEL_RCVY           NO, DELETE RECOVERY ENVIRONMENT       02890000
+                                                                        02900000
+         $SER  RELEASE,LOCKPTR=PRJMILK                                  02910000
+                                                                        02920000
+***************************************************************         02930000
+*                                                                       02940000
+*  DELETE RECOVERY ENVIRONMENT                                          02950000
+*                                                                       02960000
+***************************************************************         02970000
+DEL_RCVY DS    0H                                                       02980000
+         $RCVRY DELETE,MF=(E,MFE_LIST)                                  02990000
+                                                                        03000000
+         EJECT ,                                                        03010000
+***************************************************************         03020000
+*                                                                       03030000
+*  RETURN                                                               03040000
+*                                                                       03050000
+***************************************************************         03060000
+RETURN   DS    0H                                                       03070000
+         L     R15,RETCODE        RESTORE RETURN CODE                   03080000
+         CEXIT RC=(R15)           RETURN                                03090000
+                                                                        03100000
+         EJECT ,                                                        03110000
+***************************************************************         03120000
+*                                                                       03130000
+*   CATASTROPHIC ERRORS                                                 03140000
+*                                                                       03150000
+***************************************************************         03160000
+                                                                        03170000
+ABN_LOCK DS    0H                                                       03180000
+         $ABEND ABE_PROJLOCK,TITLE='UNABLE TO ACQUIRE PROJ MI-LOCK'     03190000
+                                                                        03200000
+         EJECT                                                          03210000
+***************************************************************         03220000
+*                                                                       03230000
+*   $RCVRY RECOVERY ROUTINE                                             03240000
+*                                                                       03250000
+***************************************************************         03260000
+RECOVRTN DS    0H                                                       03270000
+         PUSH  USING              PRESERVE STD ENVIRONMENT              03280000
+         DROP  R13                PRECLUDE UNINTENTIONAL REFERENCES     03290000
+         STM   R14,R12,12(R13)    SAVE ENTRANCE REGS                    03300000
+                                                                        03310000
+         LR    R3,R1              RESTORE ORIGINAL WORKAREA ADDR        03320000
+         USING WORKDSA,R3         ADDRESSABILITY                        03330000
+                                                                        03340000
+         LA    R2,WRK256          WORKING STORAGE AREA                  03350000
+         XC    0(72,R2),0(R2)     USER FOR SAVEAREA                     03360000
+         ST    R2,8(,R13)         SA FWD CHAIN                          03370000
+         ST    R13,4(,R2)         SA BWD CHAIN                          03380000
+         LR    R13,R2             AVAIL FOR SERVICE ROUTINES            03390000
+                                                                        03400000
+*--------------------------------------------------------------         03410000
+*   RELEASE PROJECT MIL IF HELD                                         03420000
+*--------------------------------------------------------------         03430000
+         TM    FLAGS,$LOCKED      PROJECT MIL HELD?                     03440000
+         BNO   RECVPERC           SKIP IF NOT                           03450000
+                                                                        03460000
+         $SER  RELEASE,LOCKPTR=PRJMILK,COND=YES                         03470000
+                                                                        03480000
+         NI    FLAGS,FF-$LOCKED   INDICATE LOCK RELEASED                03490000
+                                                                        03500000
+*--------------------------------------------------------------         03510000
+*   RETURN TO RECOVERY                                                  03520000
+*--------------------------------------------------------------         03530000
+RECVPERC DS    0H                 PERCOLATE                             03540000
+         LA    R15,RC00                                                 03550000
+                                                                        03560000
+         L     R13,4(,R13)                                              03570000
+         L     R14,12(,R13)                                             03580000
+         LM    R0,R12,20(R13)                                           03590000
+         BR    R14                                                      03600000
+                                                                        03610000
+         EJECT ,                                                        03620000
+****************************************************************        03630000
+*                                                                       03640000
+*  LITERALS AND CONSTANTS                                               03650000
+*                                                                       03660000
+****************************************************************        03670000
+         LTORG ,                                                        03680000
+                                                                        03690000
+         PRINT NOGEN                                                    03700000
+         ICVT  ,                                                        03710000
+         ITASK ,                                                        03720000
+         IPCB  ,                                                        03730000
+         IUSER ,                                                        03740000
+         IPROJ ,                                                        03750000
+         IHAPSA ,                                                       03760000
+         IKJTCB ,                                                       03770000
+         PRINT GEN                                                      03780000
+                                                                        03790000
+         END   ,                                                        03800000
