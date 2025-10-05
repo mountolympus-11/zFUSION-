@@ -1,0 +1,319 @@
+ISQKYNDX TITLE '- DEFINE INDECIES FOR SQL RESULT SET'                   00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE: ISQKYNDX - Define indecies for a SQL result set              00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This routine is invoked to build table index definitions           00080000
+*    for a SQL result set if any of the following constructs            00090000
+*    appear in the SQL statement:                                       00100000
+*                                                                       00110000
+*       1) SELECT: an ORDER BY clause                                   00120000
+*                                                                       00130000
+*       2) SELECT: the DISTINCT keyword                                 00140000
+*                                                                       00150000
+*    The indecies ensure that the appropriate row ordering              00160000
+*    and/or filtering occurs as TBADD calls are made against            00170000
+*    the base table.  The routine may not be used to construct          00180000
+*    indecies for tables that have been previously                      00190000
+*    materialized.                                                      00200000
+*                                                                       00210000
+*    Upon successful completion, the address of a KYNDXRET              00220000
+*    structure is returned and contains fields ready for use            00230000
+*    in a table create operation as shown below:                        00240000
+*                                                                       00250000
+*       TBCREATE ...,KEYCNT=*KYNDXCNT,KEYLST=KYNDXLST,...               00260000
+*                                                                       00270000
+*                                                                       00280000
+* ON ENTRY:                                                             00290000
+*                                                                       00300000
+*    R1  contains the address of a parameter list constructed           00310000
+*        as follows:                                                    00320000
+*                                                                       00330000
+*           +00 - address of the query content summary (QCS)            00340000
+*                                                                       00350000
+*           +04 - address of the result set definition in the           00360000
+*                 form of a TBCOLDEF pointer vector as used in          00370000
+*                 a TBCREATE COLLST= operation                          00380000
+*                                                                       00390000
+*           +08 - number of leading TBCOLDEF vector entries             00400000
+*                 used in the base table to represent the               00410000
+*                 result set subset                                     00420000
+*                                                                       00430000
+*                                                                       00440000
+* ON EXIT:                                                              00450000
+*                                                                       00460000
+*    R15 contains one of the following return codes.  For RC08          00470000
+*        and higher, QCSECLEX contains the address of the failing       00480000
+*        #CLEX, if applicable.                                          00490000
+*                                                                       00500000
+*        RC00 - TBCREATE index definitions have been built in a         00510000
+*               process-owned storage area returned in R1 and           00520000
+*               mapped by KYNDXRET which is expanded below.             00530000
+*                                                                       00540000
+*               The caller is responsible for $RETSTORing the           00550000
+*               KYNDXRET area anytime after TBCREATE is issued.         00560000
+*                                                                       00570000
+*        RC04 - no index definitions were created or required.          00580000
+*               R1 contains zero.                                       00590000
+*                                                                       00600000
+*        RC08 - a logical request (SQL) error was encountered           00610000
+*               while processing the ORDER BY clause.                   00620000
+*                                                                       00630000
+*               R1  contains the id of a static message                 00640000
+*                   describing the error                                00650000
+*                                                                       00660000
+*               QCSECLEX contains the address of the #CLEX in           00670000
+*               error if applicable.                                    00680000
+*                                                                       00690000
+*        RC12 - an error was encountered while defining the             00700000
+*               DISTINCT index.                                         00710000
+*                                                                       00720000
+*        RC16 - environmental error                                     00730000
+*                                                                       00740000
+**<DOC-OFF>****************************************************         00750000
+                                                                        00760000
+         EJECT                                                          00770000
+***************************************************************         00780000
+*                                                                       00790000
+* MAINTENANCE:                                                          00800000
+*                                                                       00810000
+*    09/27/95  R. Turgeon         INT 2.0                               00820000
+*              Initial version                                          00830000
+*                                                                       00840000
+***************************************************************         00850000
+                                                                        00860000
+         EJECT                                                          00870000
+         QCS   ,             QUERY CONTENT SUMMARY                      00880000
+                                                                        00890000
+         EJECT                                                          00900000
+         SQLSEMAL ,          SQL SEMANTIC SUMMARY                       00910000
+                                                                        00920000
+         EJECT                                                          00930000
+         KYNDXRET ,          INDEX DEFINITION RETURN AREA               00940000
+                                                                        00950000
+         EJECT                                                          00960000
+         @TBKEYDF ,          TABLE KEY DEFINITION                       00970000
+                                                                        00980000
+         EJECT                                                          00990000
+         EQUS  ,                                                        01000000
+                                                                        01010000
+         EJECT                                                          01020000
+WORKAREA #WORK ,                                                        01030000
+                                                                        01040000
+COLDEF   DS    0A,0F         RESULT SET TABLE COLUMN DEFINITION         01050000
+COLDEFV  DS    A                TBCOLDEF POINTER ARRAY                  01060000
+COLDEFCT DS    F                TBOCLDEF POINTER ARRAY ENTRY COUNT      01070000
+                                                                        01080000
+WORKLEN  #ENDWORK                                                       01090000
+                                                                        01100000
+         EJECT                                                          01110000
+ISQKYNDX #ENTER PREG=R8                                                 01120000
+                                                                        01130000
+         USING ITASK,R10                                                01140000
+                                                                        01150000
+         EJECT                                                          01160000
+***************************************************************         01170000
+*                                                                       01180000
+*   Fetch passed parameters.  Index creation occurs only for            01190000
+*   SELECT statement, the only statement type that returns a            01200000
+*   result set.                                                         01210000
+*                                                                       01220000
+***************************************************************         01230000
+                                                                        01240000
+         L     R5,4(,R8)          TBCOLDEF POINTER VECTOR               01250000
+         L     R6,8(,R8)          TBCOLDEF POINTER (RSCOLUMN) COUNT     01260000
+         STM   R5,R6,COLDEF       RETAIN FOR LATER USE                  01270000
+                                                                        01280000
+         L     R8,0(,R8)          QUERY CONTENT SUMMARY                 01290000
+         USING QCS,R8             LIFE OF FUNCTION                      01300000
+                                                                        01310000
+         L     R7,QCSSSMRY        SEMANTIC SUMMARY BLOCK                01320000
+         USING SQSEMAL,R7         LIFE OF FUNCTION                      01330000
+                                                                        01340000
+         CLI   QCSQUERY,QCSQ_SEL  SELECT STATEMENT?                     01350000
+         BNE   RET_NREQ           FUNCTION NOT DEFINED OTHERWISE        01360000
+                                                                        01370000
+**<DOC-ON>*****************************************************         01380000
+*                                                                       01390000
+*   Compute the amount of storage required for the index                01400000
+*   definitions required to support the use of ORDER BY and/or          01410000
+*   DISTINCT.  Space for a KYNDXRET return area plus a TBKEYDEF         01420000
+*   for each index required is allocated in a single process            01430000
+*   owned storage extent.                                               01440000
+*                                                                       01450000
+*   For ORDER BY, the TBKEYDEF contains a TBCOLDEF pointer for          01460000
+*   each column referenced in that clause.                              01470000
+*                                                                       01480000
+*   For SELECT DISTINCT, the TBKEYDEF contains a TBCOLDEF               01490000
+*   pointer for every column in the result set.                         01500000
+*                                                                       01510000
+**<DOC-OFF>****************************************************         01520000
+                                                                        01530000
+         ICM   R5,15,SQSAORDC+8   # OF ORDER-BY COLUMN REFERENCES       01540000
+         BZ    SZORDEND           NOT APPLICABLE                        01550000
+         SLL   R5,2               POINTER ARRAY ENTRY FOR EACH          01560000
+         LA    R5,TBKEYDFL(,R5)   ACCOUNT FOR TBKEYDEF PROPER           01570000
+                                                                        01580000
+SZORDEND DS    0H                 R5 <== ORDER BY TBKEYDEF RQMT         01590000
+                                                                        01600000
+         SR    R6,R6              ASSUME DISTINCT NOT PRESENT           01610000
+         CLI   SQSDIST,SQS$DIST   DISTINCT RESULT SET ROWS ONLY?        01620000
+         BNE   SZDSTEND           NOT APPLICABLE                        01630000
+         L     R6,COLDEFCT        NUMBER OF COLUMNS IN RESULT SET       01640000
+         SLL   R6,2               POINTER ARRAY ENTRY FOR EACH          01650000
+         LA    R6,TBKEYDFL(,R6)   ACCOUNT FOR TBKEYDEF PROPER           01660000
+                                                                        01670000
+SZDSTEND DS    0H                 R6 <== DISTINCT TBKEYDEF RQMT         01680000
+                                                                        01690000
+         LR    R4,R5              ORDER BY REQUIREMENT                  01700000
+         AR    R4,R6              PLUS DISINCT REQUIREMENT              01710000
+         BNP   RET_NREQ           NO REQUIREMENTS                       01720000
+         LA    R4,KYNDXPFL(,R4)   ELSE INCLUDE RETURN AREA FRAME        01730000
+                                                                        01740000
+*--------------------------------------------------------------         01750000
+*   ACQUIRE AND INITIALIZE 'KYNDXRET' RETURN AREA                       01760000
+*--------------------------------------------------------------         01770000
+         $GETSTOR (R4)            ACQUIRE SUITABLE STORAGE AREA         01780000
+                                                                        01790000
+         LR    R3,R1              ALLOCATED STORAGE                     01800000
+         USING KYNDXRET,R3        FORMATTED RETURN AREA                 01810000
+         MVC   KYNDXEYE,=CL8'KYNDXRET'   CONTROL BLOCK ID               01820000
+         ST    R4,KYNDXLEN        LENGTH OF RETURN AREA                 01830000
+                                                                        01840000
+         LA    R4,KYNDXRET+KYNDXPFL  LOCATION FOR FIRST INDEX DEF       01850000
+                                                                        01860000
+         EJECT                                                          01870000
+**<DOC-ON>*****************************************************         01880000
+*                                                                       01890000
+*   Invoke ISQKYORD to create a row "ordering" index for the            01900000
+*   result set if ORDER BY is specified.  The name of this              01910000
+*   index will be promoted into the QCS upon return so that it          01920000
+*   can be used explicitly in future table retrieval (TBGET)            01930000
+*   requests.                                                           01940000
+*                                                                       01950000
+*   There are a number of ways in which the ORDER BY request            01960000
+*   can fail or be invalid.  Appropriate error messages are             01970000
+*   generated for failing return / reason code pairs.                   01980000
+*                                                                       01990000
+**<DOC-OFF>****************************************************         02000000
+                                                                        02010000
+         LTR   R5,R5              ORDER BY CLAUSE PRESENT?              02020000
+         BNP   ORD_FIN            DONE IF NOT                           02030000
+                                                                        02040000
+         @CALL ISQKYORD,(SQSEMAL,*COLDEFV,*COLDEFCT,(R4)),             X02050000
+               MF=(E,MFE_LIST)                                          02060000
+                                                                        02070000
+         CH    R15,=AL2(RC04)     ANALYZE COMPLETION STATUS?            02080000
+         BE    ORD_FIN            NO ORDER BY CLAUSE FOUND              02090000
+         BH    ORD_FAIL           TERMINATING ERROR ENCOUNTERED         02100000
+                                                                        02110000
+*--------------------------------------------------------------         02120000
+*   ACCEPT RETURNED ORDER-BY NDX DEFINITION INCLUDING ITS NAME          02130000
+*--------------------------------------------------------------         02140000
+         L     R2,KYNDXCNT        # OF INDECIES POSTED SO FAR           02150000
+         LA    R0,1(,R2)          ACCOUNT FOR THIS ONE                  02160000
+         ST    R0,KYNDXCNT        RETURN INDEX ARRAY LENGTH             02170000
+                                                                        02180000
+         SLL   R2,2               CONVERT INDEX COUNT TO SLOT OFFSET    02190000
+         LA    R2,KYNDXLST(R2)    CONVERT OFFSET TO ADDRESS             02200000
+         ST    R1,0(,R2)          ADD TBKEYDEF PTR TO ARRAY             02210000
+                                                                        02220000
+         AR    R4,R5              TBKEYDEF AREA FOR NEXT INDEX          02230000
+         MVC   QCSTNDX,TBKEYNAM-TBKEYDEF(R1)                            02240000
+         B     ORD_FIN                                                  02250000
+                                                                        02260000
+*--------------------------------------------------------------         02270000
+*   DOCUMENT ERRORS DISCOVERED IN ORDER-BY CLAUSE                       02280000
+*--------------------------------------------------------------         02290000
+ORD_FAIL DS    0H                                                       02300000
+         ST    R1,QCSECLEX        #CLEX IN ERROR OR ZER                 02310000
+                                                                        02320000
+         LR    R1,R0              RETAIN REASON CODE DESCRIBING ERROR   02330000
+         SRL   R1,2               CONVERT TO MESSAGE NUMBER INCREMENT   02340000
+         LA    R1,270(,R1)        ACQUIRE DETAIL MSG MESSAGE ID         02350000
+                                                                        02360000
+         B     ERR_ORD            ORDER BY CLAUSE IN ERROR              02370000
+                                                                        02380000
+ORD_FIN  DS    0H                 ORDER BY INDEX DEFINITION COMPLETE    02390000
+                                                                        02400000
+         EJECT                                                          02410000
+**<DOC-ON>*****************************************************         02420000
+*                                                                       02430000
+*   Invoke ISQKYDST to create a row "filtering" index for the           02440000
+*   result set if SELECT DISTINCT was specified.                        02450000
+*                                                                       02460000
+**<DOC-OFF>****************************************************         02470000
+                                                                        02480000
+         LTR   R6,R6              SELECT-DISTINCT SPECIFIED?            02490000
+         BNP   DIST_FIN           DONE IF NOT                           02500000
+                                                                        02510000
+         @CALL ISQKYDST,(SQSEMAL,*COLDEFV,*COLDEFCT,(R4)),             X02520000
+               MF=(E,MFE_LIST)                                          02530000
+                                                                        02540000
+         LTR   R15,R15            COMPLETED WITHOUT ERROR?              02550000
+         BNZ   ERR_DIST           ANALYSIS AND MESSAGES OTHERWISE       02560000
+                                                                        02570000
+*--------------------------------------------------------------         02580000
+*   ACCEPT RETURNED SELECT-DISTINCT NDX DEFINITION                      02590000
+*--------------------------------------------------------------         02600000
+         L     R2,KYNDXCNT        # OF INDECIES POSTED SO FAR           02610000
+         LA    R0,1(,R2)          ACCOUNT FOR THIS ONE                  02620000
+         ST    R0,KYNDXCNT        RETURN INDEX ARRAY LENGTH             02630000
+                                                                        02640000
+         SLL   R2,2               CONVERT INDEX COUNT TO SLOT OFFSET    02650000
+         LA    R2,KYNDXLST(R2)    CONVERT OFFSET TO ADDRESS             02660000
+         ST    R1,0(,R2)          ADD TBKEYDEF PTR TO ARRAY             02670000
+                                                                        02680000
+         AR    R4,R6              TBKEYDEF AREA FOR NEXT INDEX          02690000
+         B     DIST_FIN                                                 02700000
+                                                                        02710000
+DIST_FIN DS    0H                 DISTINCT INDEX DEFINITION COMPLETE    02720000
+                                                                        02730000
+         EJECT                                                          02740000
+***************************************************************         02750000
+*                                                                       02760000
+*   Return KYNDXRET structure and completion status to caller           02770000
+*                                                                       02780000
+***************************************************************         02790000
+                                                                        02800000
+         LA    R15,RC00           INDEX DEFINITIONS CREATED             02810000
+         LA    R1,KYNDXRET        RETURN AS PRESCRIBED                  02820000
+         B     RETURN                                                   02830000
+                                                                        02840000
+RET_NREQ DS    0H                 NO INDEX REQUIREMENTS                 02850000
+         LA    R15,RC04                                                 02860000
+         SR    R1,R1                                                    02870000
+         B     RETURN                                                   02880000
+                                                                        02890000
+ERR_ORD  DS    0H                 ERRORS DETECTED PROCESSING ORDER BY   02900000
+         LA    R15,RC08           R1 <== DESCRIPTIVE MESSAGE ID         02910000
+         B     RETURN                                                   02920000
+                                                                        02930000
+ERR_DIST DS    0H                 ERRORS DETECTED PROCESSING DISTINCT   02940000
+         LA    R15,RC12                                                 02950000
+         SR    R1,R1              NO DESCRIPTIVE INFO AVAIL             02960000
+         B     RETURN                                                   02970000
+                                                                        02980000
+SEV_ENV  DS    0H                 ENVIRONMENT ERROR                     02990000
+         LA    R15,RC16           (NO REFERENCES)                       03000000
+         SR    R1,R1                                                    03010000
+                                                                        03020000
+RETURN   DS    0H                                                       03030000
+         SR    R0,R0              REASON CODES NOT DEFINED              03040000
+                                                                        03050000
+         #EXIT ,                                                        03060000
+                                                                        03070000
+         EJECT                                                          03080000
+***************************************************************         03090000
+*                                                                       03100000
+*   LOCAL READ-ONLY WORKING STORAGE                                     03110000
+*                                                                       03120000
+***************************************************************         03130000
+         LTORG ,                                                        03140000
+                                                                        03150000
+         PRINT NOGEN                                                    03160000
+         ICVT  ,                  ICVT                                  03170000
+         ITASK ,                  ITASK                                 03180000
+         END   ,                                                        03190000

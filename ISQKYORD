@@ -1,0 +1,345 @@
+ISQKYORD TITLE '- BUILD ORDER-BY ROW ORDERING INDEX'                    00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE: ISQKYORD - Build ORDER BY row ordering index                 00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This routine constructs a "row ordering" table index               00080000
+*    definition that directly provides the result set row               00090000
+*    sequence conveyed in an ORDER BY clause.  A DENSE,                 00100000
+*    NONUNIQUE index is built that spans all of the columns             00110000
+*    referenced.                                                        00120000
+*                                                                       00130000
+*    Result set columns may be designated by either name or             00140000
+*    column number.  Regardless of the form used, a result              00150000
+*    set column may be referred to only once in the ORDER BY            00160000
+*    clause.                                                            00170000
+*                                                                       00180000
+*                                                                       00190000
+* ON ENTRY:                                                             00200000
+*                                                                       00210000
+*    R1  contains the address of a parameter list constructed           00220000
+*        as follows:                                                    00230000
+*                                                                       00240000
+*           +00 - address of the SQL semantic summary (SQLSEMAL)        00250000
+*                                                                       00260000
+*           +04 - address of the result set definition in the           00270000
+*                 form of a TBCOLDEF pointer vector as used in          00280000
+*                 a TBCREATE COLLST= operation                          00290000
+*                                                                       00300000
+*           +08 - number of TBCOLDEF vector entries required to         00310000
+*                 represent the result set proper                       00320000
+*                                                                       00330000
+*           +12 - address of a clear TBKEYDEF construction area         00340000
+*                                                                       00350000
+*                                                                       00360000
+* ON EXIT:                                                              00370000
+*                                                                       00380000
+*    R15 contains one of the following return codes                     00390000
+*    R0  contains a reason code, where applicable, or zero              00400000
+*                                                                       00410000
+*        RC00 - the ORDER BY row ordering index definition              00420000
+*               was contstruced witout error                            00430000
+*                                                                       00440000
+*               R1 - contains the TBKEYDEF origin                       00450000
+*                                                                       00460000
+*        RC04 - no ORDER BY clause appears in statement                 00470000
+*                                                                       00480000
+*               R1 - contains zero                                      00490000
+*                                                                       00500000
+*        RC08 - a logical error was detected in the ORDER BY            00510000
+*               clause, or in a relationship between that clause        00520000
+*               and the result set it to which it applies, as           00530000
+*               described by a reason code described below              00540000
+*                                                                       00550000
+*               R1 - addr of failing #CLEX entry or zero                00560000
+*                                                                       00570000
+*               RSN04 - reserved                                        00580000
+*                                                                       00590000
+*               RSN08 - a column named in the ORDER BY clause           00600000
+*                       is not a member of the result set               00610000
+*                                                                       00620000
+*               RSN12 - the ORDER BY clause contains a column           00630000
+*                       reference given as a result set column          00640000
+*                       number that exceeds the number of cols          00650000
+*                       contained in the result set                     00660000
+*                                                                       00670000
+*               RSN16 - the ORDER BY clause contains multiple           00680000
+*                       references to a single column (either           00690000
+*                       redundant or contradictory)                     00700000
+*                                                                       00710000
+**<DOC-OFF>****************************************************         00720000
+                                                                        00730000
+         EJECT                                                          00740000
+***************************************************************         00750000
+*                                                                       00760000
+* MAINTENANCE:                                                          00770000
+*                                                                       00780000
+*    01/27/95 R. Turgeon                                                00790000
+*             Initial version modelled on 1.0C ITIORDER                 00800000
+*                                                                       00810000
+***************************************************************         00820000
+                                                                        00830000
+         EJECT                                                          00840000
+         SQLSEMAL ,          SQL SEMANTIC SUMMARY                       00850000
+                                                                        00860000
+         EJECT                                                          00870000
+         @TBKEYDF ,          TABLE KEY DEFINITION                       00880000
+                                                                        00890000
+         EJECT                                                          00900000
+         @TBCOLDF ,          TABLE COLUMN DEFINITION                    00910000
+                                                                        00920000
+         EJECT                                                          00930000
+         #CLEX    ,          #CLEX INPUT BLOCK                          00940000
+                                                                        00950000
+         EJECT                                                          00960000
+         EQUS  ,                                                        00970000
+                                                                        00980000
+         EJECT                                                          00990000
+ISQKYORD #ENTER PREG=R8,SAVE=NO                                         01000000
+                                                                        01010000
+         USING ITASK,R10          ITASK ADDRESSABILITY                  01020000
+                                                                        01030000
+***************************************************************         01040000
+*                                                                       01050000
+*   Fetch passed parameters, initialize the TBKEYDEF in the             01060000
+*   return area provided by the caller                                  01070000
+*                                                                       01080000
+***************************************************************         01090000
+         L     R7,0(,R8)          ACCEPT SQL SEMANTIC SUMMARY           01100000
+         USING SQSEMAL,R7         LIFE OF FUNCTION ADDRESSABILITY       01110000
+                                                                        01120000
+         L     R5,4(,R8)          R5 <== LOF TBCOLDEF PTR ARRAY ORIGIN  01130000
+         L     R6,8(,R8)          R6 <== LOF TBCOLDEF PTR ARRAY ENTRIES 01140000
+                                                                        01150000
+         L     R9,12(,R8)         TBKEYDEF CONSTRUCTION AREA            01160000
+         USING TBKEYDEF,R9        DEFINES OUR KEYDEF                    01170000
+         MVC   TBKEYNAM,=CL8'ORDERBY'       NAME THE INDEX              01180000
+         MVI   TBKTYPE,$DENSE     ALL ROWS PARTICIPATE                  01190000
+         MVI   TBKTYPE2,$NONUNIQ  UNIQUENESS NOT A REQUIREMENT          01200000
+                                                                        01210000
+**<DOC-ON>*****************************************************         01220000
+*                                                                       01230000
+*   Scan the ORDER BY column reference queue, appending to the          01240000
+*   TBKEYDEF key area as each column reference is accepted.             01250000
+*   The high order bit of the TBCOLDEF array entry is set when          01260000
+*   DESCending order by that column is required.                        01270000
+*                                                                       01280000
+*   If the ORDER BY clause identifies a column by number,               01290000
+*   TBCOLDEF identification depends on whether a SELECT * or            01300000
+*   SELECT <column-list> was requested.  In the former case,            01310000
+*   the base table and result set agree column for column               01320000
+*   allowing us to choose the Nth TBCOLDEF entry.  Otherwise,           01330000
+*   the structure of the underlying base table may differ from          01340000
+*   result set, requiring that we search the <column-list> to           01350000
+*   acquire the corresponding column name.                              01360000
+*                                                                       01370000
+**<DOC-OFF>****************************************************         01380000
+                                                                        01390000
+         ICM   R4,15,SQSAORDC     BEGIN SCAN OF ORDER-BY COL REFS       01400000
+         BZ    WRN_NA             NO REASON FOR REQUEST                 01410000
+         USING SQREFP,R4          STANDARD COLUMN REFERENCE NODE        01420000
+                                                                        01430000
+         LA    R8,TBKEYDEF+TBKEYDFL   ORIGIN OF TBCOLDEF POINTER ARRAY  01440000
+                                                                        01450000
+*--------------------------------------------------------------         01460000
+*   IDENTIFY ORDER-BY TECHNIQUE AND SELECT STATEMENT FORMAT             01470000
+*--------------------------------------------------------------         01480000
+COLNEXT  DS    0H                                                       01490000
+         CLI   SQRORDFL,SQR$ORD0  COLUMN REFERENCE BY NAME?             01500000
+         BE    COLBYNAM           ELSWHERE IF SO                        01510000
+                                                                        01520000
+         SR    R2,R2              FETCH UNSIGNED INT                    01530000
+         ICM   R2,3,SQRCNUM       COLUMN REFERENCE NUMBER               01540000
+         BNP   ERR_NUM            FIRST COLUMN IS COLUMN #1             01550000
+                                                                        01560000
+         ICM   R3,15,SQSASELC     TABLE DEFINED VIA SELECT * ?          01570000
+         BNZ   COLSTSCN           LOCATE NTH TBCOLDEF IF SO             01580000
+                                                                        01590000
+*--------------------------------------------------------------         01600000
+*   RS COLUMN REF BY NUMBER, BASE TABLE IS SELECT *                     01610000
+*--------------------------------------------------------------         01620000
+         BCTR  R2,0               CONVERT COLUMN NUMBER TO SLOT INDEX   01630000
+         SLL   R2,2               CONVERT INDEX TO OFFSET               01640000
+         LA    R1,0(R5,R2)        ASSOCIATED TBCOLDEF POINTER ADDRESS   01650000
+         B     COLFOUND           SET COLDEF IN KEY DEF                 01660000
+                                                                        01670000
+*--------------------------------------------------------------         01680000
+*   RS COLUMN REF BY NUMBER, BASE TABLE IS SELECT <COLUMN-LIST>         01690000
+*--------------------------------------------------------------         01700000
+C        USING SQREFP,R3          PREPARE FOR <COLUMN_LIST> SCAN        01710000
+                                                                        01720000
+COLSTADV DS    0H                                                       01730000
+         ICM   R3,15,C.SQRLINK    ADVANCE TO NEXT ENTRY IN COLUMN LIST  01740000
+         BZ    ERR_NUM            UNEXPECTED END OF LIST                01750000
+                                                                        01760000
+COLSTSCN DS    0H                                                       01770000
+         BCT   R2,COLSTADV        ZERO-RELATIVE COLUMN NUMBER           01780000
+                                                                        01790000
+         L     R1,C.SQRNODE       LOCATE COLUMN REFERENCE NODE          01800000
+         LA    R1,SQCOLNM-SQCOLREF(,R1)  BY NAME                        01810000
+         BAS   R14,MATCHCOL       LOAD ASSOCIATED TBCOLDEF** IN R1      01820000
+         LTR   R15,R15            TEST COMPLETION                       01830000
+         BNZ   ERR_NFND           ERROR IF NOT MATCHED                  01840000
+         B     COLFOUND           SUCCESS OTHERWISE                     01850000
+         DROP  C                  <COLUMN-LIST> SQREFP                  01860000
+                                                                        01870000
+*--------------------------------------------------------------         01880000
+*   RESULT SET COLUMN REFERENCED BY NAME                                01890000
+*--------------------------------------------------------------         01900000
+COLBYNAM DS    0H                                                       01910000
+         L     R1,SQRNODE         LOCATE COLUMN REFERENCE NODE          01920000
+         LA    R1,SQCOLNM-SQCOLREF(,R1)  BY NAME                        01930000
+         BAS   R14,MATCHCOL       LOAD ASSOCIATED TBCOLDEF** IN R1      01940000
+         LTR   R15,R15            SUCESS?                               01950000
+         BNZ   ERR_NFND           ERROR IF NOT                          01960000
+                                                                        01970000
+*--------------------------------------------------------------         01980000
+*   ENSURE COLUMN HAS NOT PREVIOUSLY BEEN REFERENCED                    01990000
+*--------------------------------------------------------------         02000000
+COLFOUND DS    0H                 R1 <== TBCOLDEF PTR ARRAY ENTRY ADDR  02010000
+         L     R3,0(,R1)          EXTRACT BASE TABLE TBCOLDEF PTR       02020000
+         LA    R3,0(,R3)          DISCARD RESIDUAL FLAG                 02030000
+         ST    R3,0(,R8)          INSERT INTO TBKEYDEF COLUMN PTR ARRAY 02040000
+                                                                        02050000
+         LA    R1,TBKEYDEF+TBKEYDFL   BEGIN DUPLICATION TEST SCAN       02060000
+                                                                        02070000
+COLSCAN  DS    0H                 SCAN TBKEYDEF COLUMN PTR ARRAY        02080000
+         L     R15,0(,R1)         ACQUIRE TBCOLDEF ADDRESS              02090000
+         LA    R15,0(,R15)        REMOVE FLAG BIT                       02100000
+         CR    R3,R15             SAME AS MOST RECENT ENTRY             02110000
+         BE    COLFIRST           FOUND IF SO                           02120000
+         LA    R1,4(,R1)          ELSE TRY NEXT PTR                     02130000
+         B     COLSCAN            AGAIN                                 02140000
+                                                                        02150000
+COLFIRST DS    0H                                                       02160000
+         CR    R1,R8              IS GUARANTEED BUT IF ITS NOT THE      02170000
+         BNE   ERR_DUP            ENTRY JUST CREATED, ITS A REREFERENCE 02180000
+                                                                        02190000
+*--------------------------------------------------------------         02200000
+*   TAG TBCOLDEF PTR TO INDICATE ASCENDING/DESCENDING SEQUENCE          02210000
+*--------------------------------------------------------------         02220000
+         CLI   SQRORDER,SQR$DESC  SUBKEY DESCENDING?                    02230000
+         BNE   *+8                FLAG RESET TO INDICATE ASC            02240000
+         OI    0(R8),X'80'        FLAG SET TO INDICATE DESC             02250000
+                                                                        02260000
+*--------------------------------------------------------------         02270000
+*   PROCESS ENTIRE ORDER-BY QUEUE                                       02280000
+*--------------------------------------------------------------         02290000
+         LA    R8,4(,R8)          ADV TO NEXT TBKEYDEF TBCOLDEF PTR     02300000
+         ICM   R4,15,SQRLINK      LOCATE NEXT ORDER BY SQREFP           02310000
+         BNZ   COLNEXT                                                  02320000
+                                                                        02330000
+         L     R0,SQSAORDC+8      NUMBER OF COL REFS IN ORDER-BY CLAUSE 02340000
+         STH   R0,TBKCOUNT        ALL ACCEPTED ORDERING NDX COMPONENTS  02350000
+                                                                        02360000
+         EJECT                                                          02370000
+***************************************************************         02380000
+*                                                                       02390000
+*   RETURN INDEX-DEFINING TBCOLDEF AND/OR COMPLETION STATUS             02400000
+*                                                                       02410000
+***************************************************************         02420000
+         LA    R15,RC00           SUCCESS                               02430000
+         SR    R0,R0              REASON CODE NOT DEFINED               02440000
+         LA    R1,TBKEYDEF        RETURN TBKEYDEF ORIGIN                02450000
+         B     EXIT                                                     02460000
+                                                                        02470000
+WRN_NA   DS    0H                 NO ORDER-BY CLAUSE FOUND IN STATEMENT 02480000
+         LA    R15,RC04                                                 02490000
+         SR    R0,R0              REASON CODE NOT DEFINED               02500000
+         SR    R1,R1                                                    02510000
+         B     EXIT                                                     02520000
+                                                                        02530000
+ERR_NFND DS    0H                 COLUMN NAMED NOT FOUND IN RESULT SET  02540000
+         LA    R0,RSN08                                                 02550000
+         B     ERR_ALL                                                  02560000
+                                                                        02570000
+ERR_NUM  DS    0H                 INVALID COLUMN REFERENCE BY NUMBER    02580000
+         LA    R0,RSN12                                                 02590000
+         B     ERR_ALL                                                  02600000
+                                                                        02610000
+ERR_DUP  DS    0H                 REDUNDANT / CONTRADICTORY COLUMN REF  02620000
+         LA    R0,RSN16                                                 02630000
+         B     ERR_ALL                                                  02640000
+                                                                        02650000
+ERR_ALL  DS    0H                 COMMON ERROR POSTING                  02660000
+         LA    R15,RC08           INDICATE ORDER-BY IN ERROR            02670000
+         L     R1,SQR@C           IDENTIFY QUESTIONABLE #CLEX           02680000
+                                                                        02690000
+*--------------------------------------------------------------         02700000
+*   RETURN TO REQUESTOR                                                 02710000
+*--------------------------------------------------------------         02720000
+EXIT     DS    0H                                                       02730000
+                                                                        02740000
+         #EXIT ,                  RETURN                                02750000
+         DROP  R4                 ORDER-BY CLAUSE SQREFP                02760000
+                                                                        02770000
+         EJECT                                                          02780000
+***************************************************************         02790000
+*                                                                       02800000
+* ROUTINE:  MATCHCOL - Locate TBCOLDEF entry by column name             02810000
+*                                                                       02820000
+* DESCRIPTION:                                                          02830000
+*                                                                       02840000
+*    This routine uses the TBCOLDEF pointer array to locate             02850000
+*    the column definition entry identified by name.                    02860000
+*                                                                       02870000
+*                                                                       02880000
+* ON ENTRY:                                                             02890000
+*                                                                       02900000
+*    R1 - addr of column name                                           02910000
+*                                                                       02920000
+*    R5 - TBCOLDEF pointer array origin        (LOF convention)         02930000
+*    R6 - TBCOLDEF pointer array entry count   (LOF convention)         02940000
+*                                                                       02950000
+*                                                                       02960000
+* ON EXIT:                                                              02970000
+*                                                                       02980000
+*    R15 contains one of the following return codes                     02990000
+*                                                                       03000000
+*        RC00 - TBCOLDEF matched; ptr address returned via R1           03010000
+*        RC04 - TBCOLDEF entry not found                                03020000
+*                                                                       03030000
+***************************************************************         03040000
+MATCHCOL DS    0H                                                       03050000
+         BAKR  R14,0              SAVE MAINLINE REGS                    03060000
+                                                                        03070000
+MATCHNXT DS    0H                                                       03080000
+         L     R2,0(,R5)          CURRENT TBCOLDEF ORIGIN               03090000
+CM       USING TBCOLDEF,R2        UNDYING ADDRESSABILTY                 03100000
+                                                                        03110000
+         CLC   CM.TBCNAME,0(R1)   MATCHING PRIMARY COLUMN NAME?         03120000
+         BE    MATCHHIT           DONE                                  03130000
+         CLC   CM.TBCSNAME,0(R1)  MATCHING SECONDARY COLUMN NAMES?      03140000
+         BE    MATCHHIT           DONE                                  03150000
+         LA    R5,4(,R5)          AGAIN IF NOT                          03160000
+         BCT   R6,MATCHNXT        TRY AGAIN                             03170000
+                                                                        03180000
+*--------------------------------------------------------------         03190000
+*   RETURN TBCOLDEF PTR AND/OR COMPLETION STATUS                        03200000
+*--------------------------------------------------------------         03210000
+         LA    R15,RC04           ERROR, STRUCTURES NOT RETURNED        03220000
+         SR    R1,R1              NO TBCOLDEF RETURNED                  03230000
+         B     MATCHRET           FAIL                                  03240000
+                                                                        03250000
+MATCHHIT DS    0H                                                       03260000
+         LA    R15,RC00           INDICATE SUCCESS                      03270000
+         LR    R1,R5              RETURN MATCHING TBCOLDEF PTR          03280000
+                                                                        03290000
+MATCHRET DS    0H                                                       03300000
+         PR    ,                  RETURN TO CALLER                      03310000
+         DROP  CM                                                       03320000
+                                                                        03330000
+         EJECT                                                          03340000
+***************************************************************         03350000
+*                                                                       03360000
+*   LOCAL READ/ONLY DATA AREAS                                          03370000
+*                                                                       03380000
+***************************************************************         03390000
+         LTORG ,                                                        03400000
+                                                                        03410000
+         PRINT NOGEN                                                    03420000
+         ICVT  ,                                                        03430000
+         ITASK ,                                                        03440000
+         END   ,                                                        03450000

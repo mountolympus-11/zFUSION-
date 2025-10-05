@@ -1,0 +1,495 @@
+ISLUIMGI TITLE '- IMAGE INBOUND FROM VIRTUAL DEVICE'                    00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE:  ISLUIMGI - Image inbound from virtual device                00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This module accepts images inbound from the virtual device         00080000
+*    and coordinates its retention, recording, and presentation         00090000
+*    to the host application via the VTAM imageing interfaces           00100000
+*    provided by the $SLU2 facility.                                    00110000
+*                                                                       00120000
+*    The current or "state1" (S1) image displayed on or                 00130000
+*    in-transit to the virtual device is maintained jointly by          00140000
+*    ISLUIMGI (this routine), ISLUIMGO, and the $SLU2 SLU               00150000
+*    session API.  SESSIMAG.IMGS1 data areas, SEIFSNA, and              00160000
+*    SEIONCE are updated by $SLU2.  SEIONCE flags are transient         00170000
+*    and are cleared by this routine after presentation to the          00180000
+*    vdevice.                                                           00190000
+*                                                                       00200000
+*    When the virtual device is recording-capable (today, a             00210000
+*    workbench resident terminal emulator only), an aged copy           00220000
+*    of the S1 image and states resides in a parallel state0            00230000
+*    (S0) structure maintained solely by this routine.                  00240000
+*                                                                       00250000
+*                                                                       00260000
+* NOTES:                                                                00270000
+*                                                                       00280000
+*    XIMAGE state flags are not accepted from the vdevice. All          00290000
+*    state transitions are managed in the ISLUIMGI, ISLUIMGO            00300000
+*    and $SLU2 APIs.                                                    00310000
+*                                                                       00320000
+*                                                                       00330000
+* ON ENTRY:                                                             00340000
+*                                                                       00350000
+*    R1  contains the address of a parameter list described by          00360000
+*        the SSDATIN parameter list as expanded via SESSERV             00370000
+*        IMAGEIN.                                                       00380000
+*                                                                       00390000
+*                                                                       00400000
+* ON EXIT:                                                              00410000
+*                                                                       00420000
+*    R15 contains one of the following return codes.  The               00430000
+*        caller should treat return codes of RC12 and higher            00440000
+*        as permanent errors.                                           00450000
+*                                                                       00460000
+*        RC00 - input acquired and forwarded                            00470000
+*                                                                       00480000
+*        RC04 - exchange sequence mismatch.  This completion is         00490000
+*               returned if the image packet sequence numbers           00500000
+*               do not agree or if the vdevice makes a request          00510000
+*               that is not consistent with expectations, etc.          00520000
+*                                                                       00530000
+*        RC08 - directionality error. The vdevice provided an           00540000
+*               image packet out of turn. The input is ignored.         00550000
+*                                                                       00560000
+*        RC12 - plist in error or otherwise not processable             00570000
+*                                                                       00580000
+*        RC16 - $SLU2 interfacing error                                 00590000
+*                                                                       00600000
+*        RC20 - invalid SESSIMAG                                        00610000
+*                                                                       00620000
+*        RC24 - partner notification routine cannot access the          00630000
+*               virtual device ($XPBUFR XMIT failure)                   00640000
+*                                                                       00650000
+**<DOC-OFF>****************************************************         00660000
+                                                                        00670000
+         EJECT                                                          00680000
+         #WORK ,                                                        00690000
+                                                                        00700000
+LCLAID   DS    X                  AID / PSEUDO-AID KEY CODE             00710000
+                                                                        00720000
+STATREGS DS    3F                 R15-R1 STATUS AREA                    00730000
+REGSAVE  DS    16F                LOCAL SAVEAREA                        00740000
+                                                                        00750000
+         #ENDWORK ,                                                     00760000
+                                                                        00770000
+         EJECT                                                          00780000
+         SLUHANDL ,               SLU SESSION HANDLE                    00790000
+                                                                        00800000
+         EJECT                                                          00810000
+         SESSIMAG ,               SESSION IMAGING/RECORDING COMM AREA   00820000
+                                                                        00830000
+         EJECT                                                          00840000
+         SESSERV IMAGEIN                                                00850000
+                                                                        00860000
+         EJECT                                                          00870000
+         AIDKEYS ,                3270 AID KEYS                         00880000
+                                                                        00890000
+         EJECT                                                          00900000
+         EQUS ,                                                         00910000
+                                                                        00920000
+         EJECT                                                          00930000
+ISLUIMGI #ENTER PREG=R8                                                 00940000
+                                                                        00950000
+         EJECT ,                                                        00960000
+**<DOC-ON>*****************************************************         00970000
+*                                                                       00980000
+*   Vdevice presenting a new image, cursor position, and AID.           00990000
+*   A 'signal' appears as a special AID key, and unlike a real          01000000
+*   3270 device, all AID keys may be accompanied by data.               01010000
+*                                                                       01020000
+**<DOC-OFF>****************************************************         01030000
+                                                                        01040000
+         USING SSDATIN,R8         PARAMETER LIST                        01050000
+         ICM   R6,15,SSDISLUH     LOCATE SLUHANDL                       01060000
+         BZ    ERR_HNDL           REQUIRED PARAMETER                    01070000
+         USING SLUHANDL,R6        LIFE OF FUNCTION                      01080000
+         ICM   R7,15,SLHSIMAG     TRAVERSE TO SESSIMAG                  01090000
+         BZ    ERR_HNDL           REQUIRED                              01100000
+         USING SEI,R7             LIFE OF FUNCTION                      01110000
+                                                                        01120000
+         L     R1,SSDIAID         LOCATE AID KEY                        01130000
+         MVC   LCLAID,0(R1)       RETAIN LOCAL COPY                     01140000
+                                                                        01150000
+         CLI   LCLAID,AID_SIGNAL  ATTENTION KEY?                        01160000
+         BE    VALIMAGE           DIRECTIONALITY IS IRRELAVENT          01170000
+         TM    SEIFSNA,SEIF_CMD   EVENT FITS OWNERSHIP OF DIRECTION?    01180000
+         BNO   ERR_DIR            ERROR IF NOT                          01190000
+                                                                        01200000
+VALIMAGE DS    0H                                                       01210000
+         ICM   R0,15,SSDISIZE     FETCH SIZE OF INBOUND IMAGE           01220000
+         BZ    VALFIN             NO IMAGE PROVIDED                     01230000
+         BM    ERR_REQ            REQUEST IN ERROR                      01240000
+         C     R0,SEIMGLEN        IMAGE EXCEEDS BOUND MAX?              01250000
+         BH    ERR_REQ            REQUEST IN ERROR IF SO                01260000
+                                                                        01270000
+         L     R2,SSDISEQ#        ACQUIRE SEQUENCE NUMBER               01280000
+         C     R2,SEISEQ#         AGREES WITH OUR IMAGE?                01290000
+         BNE   ERR_SEQ            OUT OF SYNC WITH VDEVICE              01300000
+                                                                        01310000
+VALFIN   DS    0H                                                       01320000
+                                                                        01330000
+         EJECT                                                          01340000
+**<DOC-ON>*****************************************************         01350000
+*                                                                       01360000
+*   Generate a recording entry if recording is in progress.             01370000
+*   The S0 and S1 data areas may both include images and                01380000
+*   state information.  By generating the recording entry               01390000
+*   upon receipt of a vdevice image update, but before                  01400000
+*   accepting that update, we are assurred that the complete            01410000
+*   host appl response (multiple images, state transitions,             01420000
+*   etc.) has been seen.                                                01430000
+*                                                                       01440000
+*   S1 either contains the last image written by the host appl          01450000
+*   to the vdevice, or depicts a clear screen if the appl did           01460000
+*   not present some type of greeting image (ref SEIA_RSP).             01470000
+*   Similarly, S0 either depicts the initial transition from            01480000
+*   USS, or contains the last image sent to the vdevice from            01490000
+*   the host appl.                                                      01500000
+*                                                                       01510000
+*   SEISKSA and the S0 image taken together represent the last          01520000
+*   image presented by the vdevice.  That is, the last image            01530000
+*   sent by the vdevice can be reconstructed from S0 and that           01540000
+*   SKS.                                                                01550000
+*                                                                       01560000
+**<DOC-OFF>****************************************************         01570000
+                                                                        01580000
+         TM    SEIRECFL,SEIR_ACT  RECORDING IN PROGRESS?                01590000
+         BNO   ERECADD            SKIP IF NOT                           01600000
+         TM    SEISTATE,SEIS_CPT  (S0,S1) PREPARED FOR RECORDING?       01610000
+         BNO   ERECADD            SKIP IF NOT (SHOULD NOT OCCUR)        01620000
+                                                                        01630000
+         L     R1,SLHSIMAG        ADDR OF SESSIMAG                      01640000
+         @CALL IRECADD,CTYPE=CVT  POST STABLE STATE                     01650000
+                                                                        01660000
+         NI    SEISTATE,FF-SEIS_CPT   XACT CAPTURED AND INVALIDATED     01670000
+         OI    SEIRECFL,SEIR_INP  VDEVICE INPUT EVENT WHILE RECORDING   01680000
+                                                                        01690000
+ERECADD  DS    0H                                                       01700000
+                                                                        01710000
+         EJECT                                                          01720000
+**<DOC-ON>*****************************************************         01730000
+*                                                                       01740000
+*   The inbound image may be a complete image, or if the                01750000
+*   vdevice is an integrator emulator, it may be an encoded             01760000
+*   image requiring decode via an xor with the last image sent          01770000
+*   to the vdevice.  XORed images may be sent only if a                 01780000
+*   previous image delivery was made to the vdevice and only if         01790000
+*   the last-outbound and current-inbound images have the same          01800000
+*   dimensions.                                                         01810000
+*                                                                       01820000
+**<DOC-OFF>****************************************************         01830000
+                                                                        01840000
+         CLI   LCLAID,AID_CLEAR        INBOUND IMAGE IS CLEAR?          01850000
+         BE    EXOR                    NO IMAGE NEEDED IF SO            01860000
+*FUTURE* CLI   LCLAID,AID_ALT_SYSREQ                                    01870000
+*FUTURE* BE    EXOR                                                     01880000
+                                                                        01890000
+         CLC   SSDIBTYP,=A(SSDIBXOR)   XOR'D IMAGE?                     01900000
+         BNE   EXOR                    ELSE COMPLETE IMAGE EXPECTED     01910000
+         TM    SEIS1ATR,SEIA_RSP       HOST APPL PROVIDED A BASE?       01920000
+         BO    ERR_SEQ                 IF NOT, STRANGE, ASK FOR REXMIT  01930000
+                                                                        01940000
+         CLC   SEIS1ROW,SSDIROWS+2     VERIFY THAT IMAGES ARE SAME SIZE 01950000
+         BNE   ERR_SEQ                 XOR CAN BE APPLIED ONLY TO       01960000
+         CLC   SEIS1COL,SSDICOLS+2     IMAGES OF IDENTICAL SIZE, ELSE   01970000
+         BNE   ERR_SEQ                 INVALID REQUEST                  01980000
+                                                                        01990000
+*--------------------------------------------------------------         02000000
+*   XOR last-outbound onto current-inbound yielding true image          02010000
+*--------------------------------------------------------------         02020000
+                                                                        02030000
+         L     R2,SEIS1IMG        BASE STATE IMAGE                      02040000
+         L     R3,SEIS1SIZ        SIZE OF IMAGE                         02050000
+         L     R4,SSDIBUFR        ORIGIN OF XOR DELTAS                  02060000
+         LA    R1,256             INSTRUCTION CAPACITY                  02070000
+                                                                        02080000
+XORTOP   DS    0H                                                       02090000
+         CR    R3,R1              LENGTH OUTSTANDING VS CAPACITY        02100000
+         BL    XORLAST            PARTIAL OPERATION REQ                 02110000
+         XC    0(256,R4),0(R2)    APPLY DELTA TO INPUT                  02120000
+         AR    R2,R1              PREP FOR NEXT PASS                    02130000
+         AR    R4,R1                                                    02140000
+         SR    R3,R1                                                    02150000
+         B     XORTOP                                                   02160000
+                                                                        02170000
+XORLAST  DS    0H                                                       02180000
+         LTR   R3,R3              MORE TO DO?                           02190000
+         BNP   EXOR               DONE IF NOT                           02200000
+         BCTR  R3,0               PREPARE FOR EX                        02210000
+         EX    R3,XOREX           APPLY DELTA                           02220000
+         B     EXOR               DONE                                  02230000
+                                                                        02240000
+XOREX    XC    0(*-*,R4),0(R2)    EX OBJECT                             02250000
+                                                                        02260000
+EXOR     DS    0H                                                       02270000
+                                                                        02280000
+         EJECT                                                          02290000
+**<DOC-ON>*****************************************************         02300000
+*                                                                       02310000
+*   Acquire and post state changes resulting from receipt of            02320000
+*   inbound data.                                                       02330000
+*                                                                       02340000
+*   If a recording is active, the current S1 is demoted (aged)          02350000
+*   to S0.  That image is the last image delivered to the               02360000
+*   vdevice.  The new image then becomes the current, or S1,            02370000
+*   image.  The stimulus (host panel) / response (vdevice               02380000
+*   input) pair can then be examined by IRECDIFF. The resultant         02390000
+*   stored keystroke sequence (SKS), if any, is parked in               02400000
+*   SESSIMAG in prepration for composing the next recording             02410000
+*   entry.  After the SKS is generated, S1 may be discarded or          02420000
+*   overwritten by the host response.                                   02430000
+*                                                                       02440000
+**<DOC-OFF>****************************************************         02450000
+                                                                        02460000
+         XC    SEISUSO#,SEISUSO#  RESET APPL IMAGE UPDATE COUNT         02470000
+         NI    SEISTATE,FF-SEIS_FUS-SEIS_USO                            02480000
+         MVI   SEIDIR,SEID_IN     DATA MOVING VDEVICE->APPL             02490000
+                                                                        02500000
+*--------------------------------------------------------------         02510000
+*   age S1 to S0 if recording to prep for SKS generation                02520000
+*--------------------------------------------------------------         02530000
+                                                                        02540000
+         TM    SEIRECFL,SEIR_EMU  SESSION IS RECORDING-CAPABLE?         02550000
+         BNO   ESTATE0            BYPASS S1->S0 PRESERVATION IF NOT     02560000
+                                                                        02570000
+         ICM   R0,15,SEIS0IMG     S0 IMAGE BUFFER ALLOCATED?            02580000
+         BNZ   EINITS0            ONWARD IF SO                          02590000
+                                                                        02600000
+         $GETSTOR *SEIMGLEN       ALLOC ONE-SIZE-FITS-ALL BUFR          02610000
+         ST    R1,SEIS0IMG                                              02620000
+                                                                        02630000
+EINITS0  DS    0H                                                       02640000
+         L     R3,SEIS0IMG        PRESERVE S0 IMAGE BUFFER ADDR         02650000
+         MVC   SEIS0(SEIS0LN),SEIS1    AGE S1 STATE TO S0               02660000
+         ST    R3,SEIS1IMG             SWAP CURRENT IMAGE BUFFER        02670000
+                                                                        02680000
+ESTATE0  DS    0H                 S1 IMAGE IS NOW MEANINGLESS           02690000
+                                                                        02700000
+*--------------------------------------------------------------         02710000
+*   vdevice provides a "clear screen" event                             02720000
+*--------------------------------------------------------------         02730000
+                                                                        02740000
+         NI    SEIS1ATR,FF-SEIA_CLR-SEIA_UNF                            02750000
+         MVC   SEIAID,LCLAID      ACCEPT AID                            02760000
+                                                                        02770000
+*FUTURE* CLI   SEIAID,AID_ALT_SYSREQ  REVERTING TO PRIMARY?             02780000
+*FUTURE* BE    CLRIMG1            CONTENT IS UNMISTAKABLE IF SO         02790000
+         CLI   SEIAID,AID_CLEAR   CLEAR KEY?                            02800000
+         BNE   DATAIN             IMAGE PROVIDED OTHERWISE              02810000
+                                                                        02820000
+CLRIMG1  DS    0H                                                       02830000
+         XC    SEISCSR,SEISCSR    CURSOR IN UPPER LEFT HAND CORNER      02840000
+         MVC   SEIS1ROW,SEIPROWS  PRIMARY ROWS                          02850000
+         MVC   SEIS1COL,SEIPCOLS  PRIMARY COLS                          02860000
+         MVC   SEIS1SIZ,SEIPRISZ  ROWS * COLS                           02870000
+                                                                        02880000
+         L     R0,SEIS1IMG        S1 IMAGE BUFFER                       02890000
+         L     R1,SEIS1SIZ        S1 IMAGE BUFFER LENGTH                02900000
+         SR    R15,R15            ZERO FILL                             02910000
+         MVCL  R0,R14                                                   02920000
+         B     CLRIMAGE           IMAGE IS CLEAR                        02930000
+                                                                        02940000
+*--------------------------------------------------------------         02950000
+*   vdevice provided an image which may be "clear"                      02960000
+*--------------------------------------------------------------         02970000
+                                                                        02980000
+DATAIN   DS    0H                                                       02990000
+         MVC   SEISCSR,SSDICSRP        ACCEPT NEW CURSOR POSITION       03000000
+         MVC   SEIS1ROW,SSDIROWS+2     ROW COUNT                        03010000
+         MVC   SEIS1COL,SSDICOLS+2     COL COUNT                        03020000
+         MVC   SEIS1SIZ,SSDISIZE       IMAGE SIZE (ROWS*COLS)           03030000
+                                                                        03040000
+         L     R0,SEIS1IMG        DESTINATION                           03050000
+         L     R1,SEIS1SIZ        SIZE OF NEW IMAGE                     03060000
+         L     R14,SSDIBUFR       INBOUND IMAGE BUFFER                  03070000
+         LR    R15,R1             SOURCE LEN = TARGET LEN               03080000
+         MVCL  R0,R14             IMAGE COPY                            03090000
+         ICM   R1,15,SEIS1FLV     IMAGE VECTOR PRESENT?                 03100000
+         BZ    CLRTEST            CLEAR TEST REQUIRED IF NOT            03110000
+         ICM   R0,3,0(R1)         NON-ZERO FIELD COUNT?                 03120000
+         BNZ   ECLEAR             CANNOT BE CLEAR IF SO                 03130000
+                                                                        03140000
+CLRTEST  DS    0H                                                       03150000
+         OI    SEIS1ATR,SEIA_UNF  IMAGE IS NOT FORMATTED                03160000
+         L     R0,SEIS1IMG        IMAGE ORIGIN                          03170000
+         L     R1,SEIS1SIZ        IMAGE SIZE                            03180000
+         SR    R15,R15            PAD COMPARE ONLY                      03190000
+         CLCL  R0,R14             IMAGE ZEROED MANUALLY?                03200000
+         BNE   ECLEAR             CONTAINS SOME TEXT OTHERWISE          03210000
+                                                                        03220000
+*--------------------------------------------------------------         03230000
+*   clear image is ascribed special status                              03240000
+*--------------------------------------------------------------         03250000
+                                                                        03260000
+CLRIMAGE DS    0H                                                       03270000
+         OI    SEIS1ATR,SEIA_CLR  INDICATE CLEAR IMAGE                  03280000
+         OI    SEIS1ATR,SEIA_UNF  IMAGE IS NOT FORMATTED                03290000
+                                                                        03300000
+ECLEAR   DS    0H                                                       03310000
+                                                                        03320000
+*--------------------------------------------------------------         03330000
+*   if the image is unformatted, reinit the field vector                03340000
+*--------------------------------------------------------------         03350000
+                                                                        03360000
+         TM    SEIS1ATR,SEIA_UNF  UNFORMATTED IMAGE?                    03370000
+         BNO   ERESETS1           DONE HERE IF NOT                      03380000
+         ICM   R1,15,SEIS1FLV     FIELD VECTOR                          03390000
+         BZ    ERESETS1           SKIP IF NOT YET CREATED               03400000
+         L     R0,SEIS1SIZ        HWORD COUNT = 0 / END OF IMAGE        03410000
+         ST    R0,0(,R1)          REINIT THE FIELD VECTOR               03420000
+                                                                        03430000
+ERESETS1 DS    0H                                                       03440000
+                                                                        03450000
+*--------------------------------------------------------------         03460000
+*   generate difference sks if recording is active                      03470000
+*--------------------------------------------------------------         03480000
+                                                                        03490000
+         TM    SEIRECFL,SEIR_ACT  RECORDING ACTIVE                      03500000
+         BNO   ERECDIFF           SKIP IF NOT                           03510000
+                                                                        03520000
+         LA    R1,SESSIMAG        IMAGE/STATE DEFINITIONS               03530000
+         @CALL IRECDIFF,CTYPE=CVT GENERATE TRANSITION SCRIPT            03540000
+         ST    R1,SEISKSA         SAVE FOR SUBSEQUENT NAV ENTRY         03550000
+                                                                        03560000
+ERECDIFF DS    0H                                                       03570000
+                                                                        03580000
+         EJECT                                                          03590000
+***************************************************************         03600000
+*                                                                       03610000
+*   Session imaging intfce - forward AID/image or ATTN to PLU           03620000
+*                                                                       03630000
+***************************************************************         03640000
+                                                                        03650000
+V3270    DS    0H                                                       03660000
+         MVC   SEISIAID,SEIAID    PRESERVE VDEVICE AID CODE             03670000
+         MVC   SEISICSR,SEISCSR   PRESERVE VDEVICE CURSOR POSITION      03680000
+                                                                        03690000
+         CLI   SEIAID,AID_SIGNAL  ATTENTION KEY?                        03700000
+         BE    V3270ATN           SKIP IF SO                            03710000
+                                                                        03720000
+         $SLU2 TO_THE_PLU,        PASS IMAGE FORWARD TO APPL           X03730000
+               SLUHANDL=SLUHANDL, SLU SESSION HANDLE                   X03740000
+               READCMD=#3270RM    READ-MODIFIED, I PRESUME              03750000
+                                                                        03760000
+         B     *+4(R15)           ANALYZE COMPLETION STATUS             03770000
+         B     NORMRET               RC00 - NORMAL                      03780000
+         B     NORMRET               RC04 - INPUT REJECT / PROTOCOL     03790000
+         B     ERR_3270              RC08 - SEND FAILED                 03800000
+         B     ERR_3270              RC12 - RECEIVE FAILED              03810000
+                                                                        03820000
+*--------------------------------------------------------------         03830000
+*   vdevice signal (attention key)                                      03840000
+*--------------------------------------------------------------         03850000
+                                                                        03860000
+V3270ATN DS    0H                                                       03870000
+         $SLU2 SIGNAL_THE_PLU,    SIGNAL                               X03880000
+               SLUHANDL=SLUHANDL, SLU SESSION HANDLE                   X03890000
+               ERRET=ERR_3270                                           03900000
+                                                                        03910000
+         B     *+4(R15)           ANALYZE COMPLETION STATUS             03920000
+         B     NORMRET               RC00 - NORMAL                      03930000
+         B     NORMRET               RC04 - INPUT REJECT / PROTOCOL     03940000
+         B     ERR_3270              RC08 - SEND FAILED                 03950000
+         B     ERR_3270              RC12 - RECEIVE FAILED              03960000
+                                                                        03970000
+         EJECT                                                          03980000
+***************************************************************         03990000
+*                                                                       04000000
+*   Post normal / abnormal completion status.  Then, invoke the         04010000
+*   appropriate epilog as defined in the request plist.                 04020000
+*                                                                       04030000
+***************************************************************         04040000
+                                                                        04050000
+NORMRET  DS    0H                 NORMAL COMPLETION                     04060000
+         LA    R15,RC00           REQUEST COMPLETE                      04070000
+         SR    R0,R0              REASON CODES NOT DEFINED              04080000
+         B     EXITEPLG           DONE                                  04090000
+                                                                        04100000
+ERR_SEQ  DS    0H                 EXCHANGE SEQUENCE MISMATCH            04110000
+         LA    R15,RC04           SEE NOTES IN MODULE PROLOG            04120000
+         SR    R0,R0              FOR RECOVERY SCENARIOS                04130000
+         B     EXITEPLG           DONE                                  04140000
+                                                                        04150000
+ERR_DIR  DS    0H                 INBOUND IMAGE                         04160000
+         LA    R15,RC08           DIRECTIONALITY VIOLATION              04170000
+         SR    R0,R0              NO REASON CODES DEFINED               04180000
+         B     EXITEPLG           DONE                                  04190000
+                                                                        04200000
+ERR_REQ  DS    0H                 REQUEST PLIST IN ERROR                04210000
+         LA    R15,RC12           PROGRAMMING ERROR LIKELY              04220000
+         SR    R0,R0              REASON CODES NOT DEFINED              04230000
+         B     EXITEPLG           DONE                                  04240000
+                                                                        04250000
+ERR_3270 DS    0H                 IMAGING ERROR                         04260000
+         LR    R0,R15             REASON CODE IS SERVICE FAILURE CODE   04270000
+         LA    R15,RC16                                                 04280000
+         B     EXITEPLG                                                 04290000
+                                                                        04300000
+ERR_HNDL DS    0H                 MISSING OR INVALID HANDLE / PTR       04310000
+         LA    R15,RC20           PROGRAMMING ERROR                     04320000
+         SR    R0,R0              REASON CODES NOT DEFINED              04330000
+         B     EXITEPLG                                                 04340000
+                                                                        04350000
+**<DOC-ON>*****************************************************         04360000
+*                                                                       04370000
+*   Identify and invoke appropriate completion exit routine.            04380000
+*                                                                       04390000
+*   A completion exit may be taken for "successful completion"          04400000
+*   or "unsuccessful completion".  The return code provided             04410000
+*   from either becomes the completion code for this function.          04420000
+*   exit routines must provide return codes consistent with             04430000
+*   those defined in the prolog above.  Specifically, return            04440000
+*   codes greater than or equal to RC12 are considered                  04450000
+*   permanent errors.                                                   04460000
+*                                                                       04470000
+**<DOC-OFF>****************************************************         04480000
+                                                                        04490000
+EXITEPLG DS    0H                                                       04500000
+         STM   R15,R1,STATREGS    PRESERVE COMPLETION STATUS            04510000
+         LA    R1,MFE_LIST        PREPARE FOR COMPLETION EXIT CALL      04520000
+         XC    0(4*10,R1),0(R1)   INITIALIZE PLIST                      04530000
+         ST    R6,0(,R1)             +00 - SLUHANDL                     04540000
+         ST    R15,4(,R1)            +04 - RETCODE                      04550000
+         ST    R0,8(,R1)             +08 - RSNCODE                      04560000
+                                                                        04570000
+         LTR   R15,R15            SUCCESSFUL COMPLETION?                04580000
+         BNZ   *+8                SKIP IF NOT                           04590000
+         L     R3,SSDIXOK         SELECT 'DATA ACCEPTED' EXIT           04600000
+         LTR   R15,R15            SUCCESSFUL COMPLETION?                04610000
+         BZ    *+8                SKIP IF SO                            04620000
+         L     R3,SSDIXERR        SELECT 'DATA REJECTED' EXIT           04630000
+                                                                        04640000
+         LTR   R15,R3             COMPLETION EXIT ROUTINE DEFINED?      04650000
+         BZ    RETURN             DONE IF NOT                           04660000
+         BASR  R14,R15            INVOKE DESIGNATED EXIT                04670000
+         ST    R15,STATREGS       UPDATE RETURN CODE ACCORDINGLY        04680000
+                                                                        04690000
+*--------------------------------------------------------------         04700000
+*   return completion status to requestor                               04710000
+*--------------------------------------------------------------         04720000
+                                                                        04730000
+RETURN   DS    0H                                                       04740000
+         LM    R15,R1,STATREGS    RESTORE COMPLETION STATUS             04750000
+                                                                        04760000
+         #EXIT ,                                                        04770000
+                                                                        04780000
+         EJECT                                                          04790000
+***************************************************************         04800000
+*                                                                       04810000
+*   Local read-only data areas                                          04820000
+*                                                                       04830000
+***************************************************************         04840000
+                                                                        04850000
+         LTORG ,                                                        04860000
+                                                                        04870000
+         PRINT NOGEN                                                    04880000
+         ICVT  ,                                                        04890000
+         IVTAMCVT ,                                                     04900000
+         ITASK ,                                                        04910000
+                                                                        04920000
+         ISTDBIND ,                                                     04930000
+         ISESS ,                                                        04940000
+         END   ,                                                        04950000

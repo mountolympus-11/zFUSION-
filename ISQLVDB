@@ -1,0 +1,2123 @@
+ISQLVDB  TITLE '- PROCESS VDB DIRECTED SQL REQUEST'                     00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE: ISQLVDB - Process VDB directed SQL request                   00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This routine prepares for the execution of a VDB directed          00080000
+*    SQL statement.  First the navigational parameter block, or         00090000
+*    $NAVPARM, is built linking the VDB table columns to their          00100000
+*    associated SYSCOLUMN and SYSVARIABLE rows as well as to            00110000
+*    its column reference summary (SQCOLREF) resident in the            00120000
+*    semantic summary.                                                  00130000
+*                                                                       00140000
+*    When table services are required either to collect data            00150000
+*    for return (all SELECT statements) or are needed to                00160000
+*    evaluate search arguments (table select, today) the                00170000
+*    appropriate TBCOLDEFs (TBCREATE column definition blocks)          00180000
+*    are also generated at this time.  However, the TBCREATE is         00190000
+*    only done here for SELECT statements - those which must            00200000
+*    return a table.                                                    00210000
+*                                                                       00220000
+*    Finally, control is passed to INAVCNTL to begin or continue        00230000
+*    navigation planning, assume control of the virtual sessions        00240000
+*    needed to drive the request, collection of data, etc.              00250000
+*                                                                       00260000
+*                                                                       00270000
+* NOTES:                                                                00280000
+*                                                                       00290000
+*    Result set applies to table returned by select and to the          00300000
+*    base table used as a table-select operation search aid.            00310000
+*                                                                       00320000
+*                                                                       00330000
+* ON ENTRY:                                                             00340000
+*                                                                       00350000
+*    R1 - address of the query content summary (QCS)                    00360000
+*    R0 - address of a 1024 SQL executor workarea                       00370000
+*                                                                       00380000
+*                                                                       00390000
+* ON EXIT:                                                              00400000
+*                                                                       00410000
+*    R15 contains one of the following return codes                     00420000
+*                                                                       00430000
+*        RC00 - normal completion                                       00440000
+*                                                                       00450000
+*        RC04 -                                                         00460000
+*                                                                       00470000
+*        RC08 -                                                         00480000
+*                                                                       00490000
+*        RC12 -                                                         00500000
+*                                                                       00510000
+**<DOC-OFF>****************************************************         00520000
+                                                                        00530000
+         EJECT                                                          00540000
+***************************************************************         00550000
+*                                                                       00560000
+*  MAINTENANCE:                                                         00570000
+*                                                                       00580000
+*    11/08/94  Su-fen Wu          Par# 153670                    153670 00590000
+*          1)  Implement NULL in a WHERE Clause for only input   153670 00600000
+*              variables, error message SQL144 is added          153670 00610000
+*              for assigning NULL to a output variable           153670 00620000
+*          2)  Reset IXR$NONE flag to reflect no default value   153670 00630000
+*              is assigned for the column.                       153670 00640000
+*          3)  Need to flag for both cases of $NULL and $BLNK    153670 00650000
+*              to indicate the default value has been assigned.  153670 00660000
+*          4)  Change DOC to reflect RC04 and RC16 from ASSGNVAL 153670 00670000
+*          5)  Do not check the length for NULL value in CLVLEN  153670 00680000
+*                                                                       00690000
+*    12/16/94  R. Turgeon      PAR# 157382                       157382 00700000
+*              Replaced STGSERV storage management interface     157382 00710000
+*              from prototype with STGGET, eliminating the       157382 00720000
+*              limitations imposed by fixed length working       157382 00730000
+*              storage areas.                                    157382 00740000
+*                                                                       00750000
+*    05/10/95  R. Turgeon      Rel 2.0.0 - Table select                 00760000
+*              $NAVPARM column/variable entry ordering by appl,         00770000
+*              screen, and region to simplify data normalization        00780000
+*              tests distributed between SQL (preplan) and NAV          00790000
+*              (postplan) logic.                                        00800000
+*                                                                231496 00810000
+*    01/06/96  R. Turgeon      Rel 2.1 - PAR# 231496             231496 00820000
+*              Significantly restructured to allow VDB column /  231496 00830000
+*              variable usage (input or output) determination    231496 00840000
+*              to be deferred to this routine (from ISQLDRV).    231496 00850000
+*                                                                       00860000
+***************************************************************         00870000
+                                                                        00880000
+         EJECT                                                          00890000
+         QCS   ,             QUERY CONTENT SUMMARY                      00900000
+                                                                        00910000
+         EJECT                                                          00920000
+         $NAVPARM ,          EXEC ROW                                   00930000
+                                                                        00940000
+         EJECT                                                          00950000
+         $ATTRIB ,           3270 ATTRIBUTE DATA TYPE STRUCTURE         00960000
+                                                                        00970000
+         EJECT                                                          00980000
+         SQLSEMAL ,          SQL SEMANTIC SUMMARY                       00990000
+                                                                        01000000
+         EJECT                                                          01010000
+         VDBLOADP  ,         VDB DEFINITION                             01020000
+                                                                        01030000
+         EJECT                                                          01040000
+         TBSERVIS CREATE                                                01050000
+                                                                        01060000
+         EJECT                                                          01070000
+         ICATALOG COLUMN,VARIABLE                                       01080000
+                                                                        01090000
+         EJECT                                                          01100000
+         EQUS  ,                                                        01110000
+                                                                        01120000
+         EJECT                                                          01130000
+         $SAF  DSECT=YES                                                01140000
+                                                                        01150000
+         EJECT                                                          01160000
+         $MSGDFT PREFIX=ICTPID,COMPID='SQL',TABLE=*#MSGS,              X01170000
+               DEST=$IMSGQ,                                            X01180000
+               MSGQA=QCSEMSGQ,STGQH=*QCSQHMSG,                         X01190000
+               PRINT=NOGEN,MF=(U,@MSG_MFL)                              01200000
+                                                                        01210000
+         EJECT                                                          01220000
+WORKAREA #WORK LENGTH=1024                                              01230000
+                                                                        01240000
+VALUESRC DS    X             FLAG SUMMARIZING SOURCE OF VARIABLE VALUE  01250000
+RSVD     DS    XL3           RESERVED                                   01260000
+@SYSTAB  DS    A             ADDR OF VDB SYSTABLE ROW                   01270000
+                                                                        01280000
+STATREGS DS    0F,0F,0F      RETURN INFORMATION                         01290000
+RETCODE  DS    F                RETURN CODE                             01300000
+RSNCODE  DS    F                REASON CODE                             01310000
+INFCODE  DS    F                INFO   CODE                             01320000
+                                                                        01330000
+COLCOUNT DS    F             NUMBER OF COLUMNS / TBCOLDEFS              01340000
+COLDA    DS    A             TBCOLDEF CONSTRUCTION AREA                 01350000
+COLDNXT  DS    A             TBCOLDEF NEXT AVAIL ENTRY                  01360000
+NAVP     DS    A             $NAVPARM PLIST ORIGIN                      01370000
+NAVPNXT  DS    A             $NAVPARM COL/VAR ENTRY AREA                01380000
+                                                                        01390000
+OFFSET   DS    F             OFFSET OF VAR IN TABLE ROW.  AFTER ALL     01400000
+*                            TBCOLDEFS ARE CONSTRUCTED, THIS FIELD      01410000
+*                            CONTAINS THE TOTAL SIZE OF A TABLE ROW     01420000
+                                                                        01430000
+BASE     DS    A             BASE ADDRESS USED TO TRAVERSE VDBLOAD      01440000
+*                            STRUCTURE JOINING SYSCOLS TO SYSVARS       01450000
+                                                                        01460000
+*--------------------------------------------------------------         01470000
+*   NULLSCAN routine working storage and error return area              01480000
+*--------------------------------------------------------------         01490000
+                                                                        01500000
+NTCNEXT  DS    A             FREE ENTRY IN COLUMN NAME ARRAY            01510000
+                                                                        01520000
+NTCNAMES DS    0C            COLUMN NAME ARRAY                          01530000
+NTCN1    DS    CL(L'SCOLNAME)                                           01540000
+NTCN2    DS    CL(L'SCOLNAME)                                           01550000
+NTCN3    DS    CL(L'SCOLNAME)                                           01560000
+NTCN4    DS    CL(L'SCOLNAME)                                           01570000
+NTCN5    DS    CL(L'SCOLNAME)                                           01580000
+NTCN6    DS    CL(L'SCOLNAME)                                           01590000
+NTCN7    DS    CL(L'SCOLNAME)                                           01600000
+NTCN8    DS    CL(L'SCOLNAME)                                           01610000
+NTCNAMEF EQU   *             COLUMN NAME ARRAY END                      01620000
+NTCNAMEL EQU   *-NTCNAMES    COLUMN NAME ARRAY LENGTH                   01630000
+                                                                        01640000
+         VNRMDIAG DSECT=NO   NORMALIZATION STATUS RETURN AREA           01650000
+                                                                        01660000
+*--------------------------------------------------------------         01670000
+*   Bulk data areas                                                     01680000
+*--------------------------------------------------------------         01690000
+                                                                        01700000
+REGSAVE  DS    16F           LOCAL SUBROUTINE SAVEAREA                  01710000
+REGSAVEX DS    16F           LOCAL SUBROUTINE SAVEAREA                  01720000
+                                                                        01730000
+@SAF_MFL $SAF  MF=(L,*)      $SAF REQUEST LIST                          01740000
+@MSG_MFL $MSG  MF=L,FIELDS=(,,,,,,,,,,,,)                               01750000
+                                                                        01760000
+WRKAREA  DS    0F            ALIGN                                      01770000
+WRKLARGE DS    XL(1024-(*-WORKAREA))                                    01780000
+                                                                        01790000
+WORKLEN  #ENDWORK                                                       01800000
+                                                                        01810000
+         EJECT                                                          01820000
+ISQLVDB  #ENTER BASE=(R12,R9),PREG=R8,WAPASS=YES                        01830000
+                                                                        01840000
+         USING ITASK,R10                                                01850000
+                                                                        01860000
+         EJECT                                                          01870000
+**<DOC-ON>*****************************************************         01880000
+*                                                                       01890000
+*   General Initialization - allocate a working storage area            01900000
+*   large enough to contain the TBCOLDEFs that will be used             01910000
+*   to formulate the TBCREATE request for the result set and            01920000
+*   for the $NAVPARM block that serves as the principle input           01930000
+*   to the session navigation component.                                01940000
+*                                                                       01950000
+*   A single ITASK owned storage area is acquired and                   01960000
+*   partitioned.  Upon normal completion this area is freed.            01970000
+*   However, the QCS resource manager established by the driver         01980000
+*   is responsible for cleanup in the event of an ABEND.                01990000
+*                                                                       02000000
+**<DOC-OFF>****************************************************         02010000
+                                                                        02020000
+         USING QCS,R8             LIFE OF FUNCTION                      02030000
+                                                                        02040000
+         L     R7,QCSSSMRY        SEMANTIC SUMMARY BLOCK                02050000
+         USING SQSEMAL,R7         LIFE OF FUNCTION                      02060000
+                                                                        02070000
+         $MSG  MF=(I,@MSG_MFL)    MESSAGE REQUEST INITIALIZATION        02080000
+                                                                        02090000
+*--------------------------------------------------------------         02100000
+*   General initialization                                              02110000
+*--------------------------------------------------------------         02120000
+                                                                        02130000
+         L     R15,QCSAVDBL       VIRTUAL DATABASE DEFINITION           02140000
+         USING VDBLRET,R15                                              02150000
+                                                                        02160000
+         MVC   BASE,LVDBAVAR      USED TO RESOLVE SYSCOL->SYSVAR PTRS   02170000
+         MVC   @SYSTAB,LVDBSYST   RETAIN PTR TO SYSTABLES ROW           02180000
+                                                                        02190000
+         LH    R2,LVDB#COL        NUMBER OF COLUMNS IN VDB TABLE        02200000
+         MH    R2,=AL2(TBCOLDFL)  SPACE REQUIRED FOR TBCOLDEFS          02210000
+         LH    R3,LVDB#COL        NUMBER OF COLUMNS IN VDB TABLE        02220000
+         MH    R3,=AL2(IXRCDLEN)  SPACE REQUIRED FOR $NAVPARM COLS/VARS 02230000
+         LA    R3,IXRCOLDF-$NAVPARM(,R3)  $NAVPARM (IXR) HEADER ALSO    02240000
+         LA    R4,0(R2,R3)        TOTAL SIZE OF SINGLE WORKAREA         02250000
+                                                                        02260000
+         $GETSTOR (R4),OWNER=ITASK,COND=YES   ACQUIRE WORKAREA          02270000
+         BNZ   ERR_STG                                                  02280000
+                                                                        02290000
+         ST    R1,QCSWORKA        WORKAREA ORIGIN                       02300000
+         ST    R4,QCSWORKL        WORKAREA LENGTH                       02310000
+         DROP  R15                VDBLRET                               02320000
+                                                                        02330000
+*--------------------------------------------------------------         02340000
+*   Partition the storage area - TBCOLDEFs followed by $NAVPARM         02350000
+*--------------------------------------------------------------         02360000
+                                                                        02370000
+         ST    R1,COLDA           TBCOLDEF TABLE ORIGIN                 02380000
+         ST    R1,COLDNXT         TBCOLDEF TABLE NEXT ENTRY ADDR        02390000
+         AR    R1,R2              BYPASS SPACE RESERVED FOR TBCOLDEFS   02400000
+         ST    R1,NAVP            FOLLOWED IMMEDIATELY BY $NAVPARM      02410000
+                                                                        02420000
+         EJECT                                                          02430000
+**<DOC-ON>*****************************************************         02440000
+*                                                                       02450000
+*   Determine table access type and perform the appropriate             02460000
+*   table access validation.  A SELECT statement constitutes a          02470000
+*   a "read" access to the target table(s). INSERT, UPDATE, and         02480000
+*   DELETE accesses are all considered "writes".                        02490000
+*                                                                       02500000
+**<DOC-OFF>****************************************************         02510000
+                                                                        02520000
+         LA    R0,ISAFA$RD        PRESUME READ ACCESS                   02530000
+         CLI   QCSQUERY,QCSQ_SEL  SELECT STATEMENT?                     02540000
+         BE    *+8                PRESUMPTION CORRECT                   02550000
+         LA    R0,ISAFA$WT        ALL OTHER ACCESS ARE MODIFICATIONS    02560000
+                                                                        02570000
+         L     R15,QCSAVDBL       VDB LOAD PARM/RETURN STRUCTURE        02580000
+         USING VDBLRET,R15        STRUCTURE FORMAT                      02590000
+                                                                        02600000
+         LA    R1,LVDBTABL        R1 <== TABLE NAME AS PARM             02610000
+         BAS   R14,SECTEST        WRITE PRIVILEGE CHECKING              02620000
+                                                                        02630000
+         LTR   R15,R15            CHECK RC                              02640000
+         BNZ   ERR_SECU           NOT PRIVILEGED FOR INSERT             02650000
+         DROP  R15                VDBLRET                               02660000
+                                                                        02670000
+***************************************************************         02680000
+*                                                                       02690000
+*   Basic data length validations                                       02700000
+*                                                                       02710000
+***************************************************************         02720000
+                                                                        02730000
+         BAS   R14,CLVLEN         VALIDATE WHERE-CLAUSE COLUMN REFS     02740000
+         BNZ   ERR_COLEN          SOME ANOMALLY                         02750000
+                                                                        02760000
+         EJECT                                                          02770000
+**<DOC-ON>*****************************************************         02780000
+*                                                                       02790000
+*   Common build of run time request block - all stmt types             02800000
+*                                                                       02810000
+*   The NAVPARM block header and column / variable entry                02820000
+*   section is now built.  There is one entry for each VDB              02830000
+*   column / variable combination. After BNVPNTRY is called,            02840000
+*   the entries only associate columns to variables and                 02850000
+*   indicate the high level use of the column/variable as               02860000
+*   either input or output based on the variable type and               02870000
+*   column type overrides.  Once this minimal initialization is         02880000
+*   complete, refinements are posted by subsequent DML-type             02890000
+*   dependent logic.                                                    02900000
+*                                                                       02910000
+**<DOC-OFF>****************************************************         02920000
+                                                                        02930000
+         L     R6,NAVP            NAVPARM ORIGIN                        02940000
+         USING $NAVPARM,R6        NAVPARM FORMAT                        02950000
+         LA    R0,IXRCOLDF-$NAVPARM   OFFSET TO FIRST COL/VAR ENTRY     02960000
+         ST    R0,IXREPOFF        SAVE FOR SERVICES, SIMPLIFY EXPAND    02970000
+         AR    R0,R6              ORIGIN OF COLUMN/VARIABLE SECTION     02980000
+         ST    R0,NAVPNXT         POST FIRST COL/VAR ENTRY LOCATION     02990000
+                                                                        03000000
+         MVC   IXR@TDEF,@SYSTAB   INSERT SYSTABLES ROW ADDRESS          03010000
+         MVC   IXRSQLRQ,QCSQUERY  INSERT QUERY TYPE CODE (I,U,S,D)      03020000
+         MVC   IXRFLAG2,QCSEFLG2  PLAN GENERATION FLAGS, ETC.           03030000
+         MVC   IXRIUSER,QCSIUSER  IUSER BLOCK                           03040000
+         MVC   IXRPSBA,QCSEPSB    PREPARED STATMENT BLOCK OR 0          03050000
+         MVC   IXRRSF,QCSRSF      RESULT SET REQUIREMENTS SUMMARY       03060000
+                                                                        03070000
+         ST    R8,IXRRCVPL        ADDR OF QCS DIRECTING RSRC MGMT       03080000
+         LA    R0,QCSUSECT        ADDR OF QCS USE COUNT                 03090000
+         ST    R0,IXRRCVUS        COMMUNICATED TO NAVIGATION PROCESS    03100000
+                                                                        03110000
+         L     R15,QCSIPROJ       IPROJ BLOCK                           03120000
+         ST    R15,IXRIPROJ                                             03130000
+         LA    R15,PRJEXNAV-IPROJ(R15)  IPROJ NAVIGATION SEGMENT        03140000
+         ST    R15,IXRPRJEX                                             03150000
+                                                                        03160000
+***************************************************************         03170000
+*                                                                       03180000
+*   Build the NAVPARM column/variable entry section                     03190000
+*                                                                       03200000
+***************************************************************         03210000
+                                                                        03220000
+         L     R5,QCSAVDBL        VDB DEFINITION                        03230000
+         USING VDBLRET,R5         GENERATE SYSCOL LOOP PARAMETERS       03240000
+         LH    R4,LVDB#COL        # COLUMNS                             03250000
+         LH    R3,LVDBLCOL        COLUMN WIDTH                          03260000
+         L     R5,LVDBACOL        FIRST COLUMN                          03270000
+         USING SYSCOLS,R5         REUSE REG                             03280000
+                                                                        03290000
+*--------------------------------------------------------------         03300000
+*   Construct next $NAVPARM entry from SYSCOL/SYSVAR pairs              03310000
+*--------------------------------------------------------------         03320000
+                                                                        03330000
+BLDNXT   DS    0H                 ACQUIRE NEXT COLUMN                   03340000
+         LA    R2,SCOLVEXE        FOREIGN KEY TO ASSOCIATED SYSVAR      03350000
+         USING SKEYVAR,R2         SYSVARIABLE FORMAT                    03360000
+         TM    SKVARNAM,BF        VARIABLE DEFINED FOR THIS COLUMN      03370000
+         BZ    BLDADV             SKIP IF NOT, DOES NOT PARTICIPATE     03380000
+                                                                        03390000
+         LA    R1,SYSCOLS         R1  <== SYSCOLUMN ENTRY               03400000
+         SR    R0,R0              PREPARE FOR INSERT                    03410000
+         ICM   R0,3,SKVARSC#      OFFSET TO SYSVAR                      03420000
+         BZ    BLDADV             SKIP IT NOT, DOES NOT PARTICIPATE     03430000
+         AL    R0,BASE            R0  <== SYSVARIABLE ENTRY             03440000
+                                                                        03450000
+         BAS   R14,BNVPNTRY       ANNEX TO NAVPARM                      03460000
+                                                                        03470000
+         LH    R1,IXRNVARS        UPDATE # OF COLUMN/VARIABLE ENTRIES   03480000
+         LA    R1,1(,R1)          ... ACTUALLY ACCEPTED IN NAVPARM      03490000
+         STH   R1,IXRNVARS                                              03500000
+                                                                        03510000
+BLDADV   DS    0H                                                       03520000
+         AR    R5,R3              ADVANCE TO NEXT COLUMN                03530000
+         BCT   R4,BLDNXT          PROCESS ALL COLUMNS                   03540000
+         DROP  R5,R2              SYSCOLS, SKEYVAR                      03550000
+                                                                        03560000
+***************************************************************         03570000
+*                                                                       03580000
+*   Merge data extracted from the state transition network into         03590000
+*   the NAVPARM entries.  This includes the addresses of the            03600000
+*   associated STN entries, region tree entries, and region             03610000
+*   residence information, etc.  Preplan normalization tests            03620000
+*   are performed once region information is posted.                    03630000
+*                                                                       03640000
+***************************************************************         03650000
+                                                                        03660000
+         LR    R1,R6              R1 <== NAVPARM                        03670000
+         @CALL ISQXRSTN           RETRIEVE STN ADDRESS FOR VARS         03680000
+                                                                        03690000
+         LTR   R15,R15            NORMAL COMPLETION?                    03700000
+         BNZ   ERR_XSTN           ERROR OTHERWISE                       03710000
+                                                                        03720000
+*--------------------------------------------------------------         03730000
+*   Variable normalization validations                                  03740000
+*--------------------------------------------------------------         03750000
+                                                                        03760000
+         LA    R0,VNRMDIAG        R0 <== DIAGNOSTIC RETURN AREA         03770000
+         LR    R1,R6              R1 <== NAVPARM                        03780000
+         @CALL ISQVNORM           ENSURE VARS CAN BE NORMALIZED         03790000
+                                                                        03800000
+         LTR   R15,R15            PASSES TEST?                          03810000
+         BNZ   ERR_NORM           NORMALIZATION NOT POSSIBLE            03820000
+                                                                        03830000
+***************************************************************         03840000
+*                                                                       03850000
+*   Final determination of column/variable USAGE (input or              03860000
+*   output.  Additionally, acquire values for input column              03870000
+*   variables.                                                          03880000
+*                                                                       03890000
+***************************************************************         03900000
+                                                                        03910000
+         LR    R1,R6              R1 <== NAVPARM                        03920000
+         BAS   R14,SNVPNTRY       IDENTIFY MEMBERS OF RESULT SET        03930000
+                                                                        03940000
+         EJECT                                                          03950000
+***************************************************************         03960000
+*                                                                       03970000
+*   Begin SQLPrepare() / SQLExecDirect() validation                     03980000
+*                                                                       03990000
+*   The following group of validations need only be done when           04000000
+*   a statement is presented by SQLPrepare() or SQLExecDirect().        04010000
+*   The validations persist over all SQLExecute() calls of a            04020000
+*   previously prepared statement.                                      04030000
+*                                                                       04040000
+***************************************************************         04050000
+                                                                        04060000
+         CLI   QCSCLI,QCSC_EXE    SQLEXECUTE() OF A PREPARED STATEMENT? 04070000
+         BE    VPREPFIN           VALIDATIONS NOT REPEATED IF SO        04080000
+                                                                        04090000
+***************************************************************         04100000
+*                                                                       04110000
+*   Ensure that all input column/variables that are required            04120000
+*   to have values declared in the SQL statement do.                    04130000
+*                                                                       04140000
+***************************************************************         04150000
+                                                                        04160000
+         TM    QCSEFLG2,QCS2_NXE  EXECUTION SUPPRESSED?                 04170000
+         BNO   VNULL              VALIDATIONS REQUIRED IF NOT           04180000
+         TM    QCSEFLG2,QCS2_PLN+QCS2_PDE   PLAN VIEW REQUEST?          04190000
+         BNZ   VNULLFIN           SKIP VALIDATIONS IF SO                04200000
+                                                                        04210000
+VNULL    DS    0H                                                       04220000
+         L     R0,QCSAVDBL        R0 <== VIRTUAL DATABASE DEFINITION    04230000
+         BAS   R14,NULLSCAN       VALIDATE USE OF NULL VALUES           04240000
+         BNZ   ERR_NULL           ERROR ENCOUNTERED                     04250000
+                                                                        04260000
+VNULLFIN DS    0H                                                       04270000
+                                                                        04280000
+         EJECT                                                          04290000
+***************************************************************         04300000
+*                                                                       04310000
+*   Depending on the format of the SQL INSERT statement                 04320000
+*   provided, values may be syntactically required for columns          04330000
+*   that are not input-capable.  The value NULL indicates that          04340000
+*   no update to the corresponding column variable is intended.         04350000
+*   The null string ('') has the same affect for character              04360000
+*   valued columns.                                                     04370000
+*                                                                       04380000
+***************************************************************         04390000
+                                                                        04400000
+         ICM   R5,15,SQSAINSC     COLUMN VALUE ASSIGNMENT PREDICATES    04410000
+         BZ    INSVFIN            NOT AN INSERT WITHOUT COLS / VALS     04420000
+         USING SBPTERM,R5         PREDICATE FORMAT                      04430000
+                                                                        04440000
+INSVTOP  DS    0H                                                       04450000
+         LH    R0,SBPLVAL         VALUE LENGTH                          04460000
+         CH    R0,=AL2(L'$NULL$)  IDENTICAL TO THAT OF NULL TOKEN?      04470000
+         BNE   INSVERF            SKIP IF NOT                           04480000
+         L     R15,SBPAVAL        LOCATE TOKEN TEXT                     04490000
+         CLC   $NULL$,0(R15)      NULL TOKEN?                           04500000
+         BNE   INSVERF            SKIP IF NOT                           04510000
+                                                                        04520000
+         XC    SBPLVAL,SBPLVAL    REPLACE WITH TRUE NULL                04530000
+         XC    SBPAVAL,SBPAVAL    REPRESENTED BY NULL LENGTH AND PTR    04540000
+                                                                        04550000
+INSVERF  DS    0H                 NULL STRINGS FOR OUTPUT VARS ONLY     04560000
+         LA    R1,SBPTERM         PREDICATE IS ERROR HANDLER PARM       04570000
+         ICM   R0,3,SBPLVAL       NULL STRING ASSIGNMENT?               04580000
+         BZ    INSVNEXT           ALWAYS PERMITTED                      04590000
+                                                                        04600000
+         L     R4,SBPACOL         LOCATE CORR COLUMN SUMMARY            04610000
+         USING SQCOLREF,R4        EXPLICITLY REFERENCED COLUMNS         04620000
+         TM    SQCCVSMY,SQCCV$I   INPUT CAPABLE COLUMN/VARIABLE?        04630000
+         BNO   ERR_INS1           CANT ASSIGN VALUES OTHERWISE          04640000
+                                                                        04650000
+INSVNEXT DS    0H                 PROCESS NEXT ASSIGNMENT               04660000
+         ICM   R5,15,SBPLINK      ADVANCE TO NEXT NODE                  04670000
+         BNZ   INSVTOP            NULL VALIDATION                       04680000
+         DROP  R4,R5              SQCOLREF, SBPTERM                     04690000
+                                                                        04700000
+INSVFIN  DS    0H                                                       04710000
+                                                                        04720000
+         EJECT                                                          04730000
+***************************************************************         04740000
+*                                                                       04750000
+*   Column/variable usage (input or output) has been posted in          04760000
+*   each column reference summary node (SQCOLREF).  If any              04770000
+*   column flagged as a member of the SQL UPDATE SET clause is          04780000
+*   not input capable, the request is failed.                           04790000
+*                                                                       04800000
+***************************************************************         04810000
+                                                                        04820000
+         CLI   QCSQUERY,QCSQ_UPD  SQL UPDATE STATEMENT?                 04830000
+         BNE   UPDVFIN            DONE IF NOT                           04840000
+                                                                        04850000
+         L     R2,SQSACOLS        LIST OF ALL REFERENCED COLUMNS        04860000
+         USING SQCOLREF,R2                                              04870000
+                                                                        04880000
+UPDVNEXT DS    0H                                                       04890000
+         L     R1,SQCOL@C         COLUMN CLEX FOR DIAGNOSTIC USE        04900000
+         TM    SQCFLAGS,SQCF$SET  COLUMN APPEARS IN SET CLAUSE?         04910000
+         BNO   UPDVADV            SKIP IF NOT                           04920000
+         TM    SQCCVSMY,SQCCV$I   INPUT VARIABLE?                       04930000
+         BNO   ERR_USET           ASSIGNMENT CANNOT OCCUR OTHERWISE     04940000
+                                                                        04950000
+UPDVADV  DS    0H                                                       04960000
+         ICM   R2,15,SQCOLINK     ADVANCE TO NEXT COLUMN                04970000
+         BNZ   UPDVNEXT                                                 04980000
+         DROP  R2                 SQCOLREF                              04990000
+                                                                        05000000
+UPDVFIN  DS    0H                                                       05010000
+                                                                        05020000
+         EJECT                                                          05030000
+***************************************************************         05040000
+*                                                                       05050000
+*   Ensure no disjunctive references are made to input column           05060000
+*   variables.  Input variables must assume a single value.             05070000
+*   Otherwise valid queries such as that given below have no            05080000
+*   unambiguous interpretation when CUSTID and CUSTNAME are             05090000
+*   both input variables:                                               05100000
+*                                                                       05110000
+*   SELECT * FROM CUST WHERE CUSTID = 123 OR CUSTNAME = 'Sam'           05120000
+*                                                                       05130000
+***************************************************************         05140000
+                                                                        05150000
+         ICM   R0,15,SQSITREE     ITREE CONSTRUCTED                     05160000
+         BZ    DISJIVAR           SKIP IF NOT                           05170000
+                                                                        05180000
+         @CALL ISQINVAR,(*SQSITREE),                                   X05190000
+               MF=(E,MFE_LIST)    EVALUATE VARIABLE USAGE               05200000
+                                                                        05210000
+         LTR   R15,R15            NORMAL COMPLETION?                    05220000
+         BNZ   ERR_IOR            VIOLATION IF NOT                      05230000
+                                                                        05240000
+DISJIVAR DS    0H                                                       05250000
+                                                                        05260000
+***************************************************************         05270000
+*                                                                       05280000
+*   End SQLPrepare() / SQLExecDirect() validation                       05290000
+*                                                                       05300000
+***************************************************************         05310000
+                                                                        05320000
+VPREPFIN DS    0H                                                       05330000
+                                                                        05340000
+         EJECT                                                          05350000
+**<DOC-ON>*****************************************************         05360000
+*                                                                       05370000
+*   Ensure that SARG predicates only assign (via =) to input            05380000
+*   variables.  When a column reference in a search argument            05390000
+*   corresponds to an input variable, its value must be                 05400000
+*   unambiguously identified. Additionally, an input column may         05410000
+*   appear only once in the argument since it cannot assume             05420000
+*   multiple values.                                                    05430000
+*                                                                       05440000
+*   All input value assignment "predicates" (col = value) are           05450000
+*   marked CATEGORICALLY TRUE simplifying the application of            05460000
+*   search arguments during subsequent VDB table add and/or             05470000
+*   retrieval.  References to input columns, i.e. those backed          05480000
+*   by input variables, are not allowed in any other predicate          05490000
+*   formats.                                                            05500000
+*                                                                       05510000
+*   Because host variables bound to output column variables may         05520000
+*   be withdrawn by providing SQL_NULL_DATA at runtime, making          05530000
+*   them CATEGORICALLY TRUE, the prediciates must be reexamined         05540000
+*   on every execution even though most of the validation is            05550000
+*   redundant after the initial SQLPrepare().                           05560000
+*                                                                       05570000
+*   Once all of the SARG validations and conversions are                05580000
+*   complete, ITRESARG is invoked convert the SARG to the               05590000
+*   native table services format.                                       05600000
+*                                                                       05610000
+**<DOC-OFF>****************************************************         05620000
+                                                                        05630000
+         ICM   R5,15,SQSEXTRE     SCAN SEARCH ARGUMENT                  05640000
+         BZ    VALSARGF           NO SARG                               05650000
+                                                                        05660000
+P        USING PREDENT,R5         SARG NODE - COMMON PFX                05670000
+B        USING SBPTERM,R5         BASIC PREDICATE FORMAT                05680000
+                                                                        05690000
+VALSARG  DS    0H                                                       05700000
+         CLI   P.PREDTYPE,PRED$CON    BOOLEAN CONNECTOR?                05710000
+         BE    VALPNEXT           NOT A COLUMN REF                      05720000
+                                                                        05730000
+*--------------------------------------------------------------         05740000
+*   determine usage of column variable, elsewhere if output             05750000
+*--------------------------------------------------------------         05760000
+                                                                        05770000
+         ICM   R4,15,B.SBPACOL    LOCATE REFERENCED COLUMN              05780000
+         BZ    VALPNEXT           (NOT EXPECTED)                        05790000
+         USING SQCOLREF,R4        COLUMN SUMMARY                        05800000
+                                                                        05810000
+         TM    SQCCVSMY,SQCCV$O   OUTPUT USAGE?                         05820000
+         BO    VUSE_OUT           ONWARD                                05830000
+                                                                        05840000
+         LA    R1,B.SBPTERM       AVAIL FOR ERR_ ROUTINES               05850000
+                                                                        05860000
+*--------------------------------------------------------------         05870000
+*   ensure input cols/vars are instantiated only once                   05880000
+*--------------------------------------------------------------         05890000
+                                                                        05900000
+         CLC   SQCUCNTB,=H'1'     SINGLE REFERENCE IN SARG?             05910000
+         BH    ERR_IVRF           TOO MANY REFERENCES OTHERWISE         05920000
+                                                                        05930000
+*--------------------------------------------------------------         05940000
+*   ensure input column vars provide unambiguous value (via =)          05950000
+*--------------------------------------------------------------         05960000
+                                                                        05970000
+         CLI   P.PREDTYPE,PRED$BPE    ALLOW BASIC-PREDICATE             05980000
+         BNE   ERR_IVAR                                                 05990000
+         CLI   B.SBPCOMP,SBPC$EQ  EQUALITY (=) IS ALLOWED               06000000
+         BNE   ERR_IVAR           BUT NOTHING ELSE IS AN ASSIGNMENT     06010000
+         MVI   B.SBPTTV,SBPT$T    INPUT VALUE ASSIGNMENTS ...           06020000
+         B     VALPNEXT           ARE TAUTOLOGIES                       06030000
+                                                                        06040000
+*--------------------------------------------------------------         06050000
+*   output column vars bound to NULL are categorically true             06060000
+*--------------------------------------------------------------         06070000
+                                                                        06080000
+VUSE_OUT DS    0H                                                       06090000
+         MVI   B.SBPTTV,0         TRUTH VALUE UNKNOWN                   06100000
+         TM    B.SBPVTYPE,SBPV$DFT   OUTPUT COL/VAR EXPLICITLY NULLED?  06110000
+         BNO   VALPNEXT           SKIP IF NOT                           06120000
+         MVI   B.SBPTTV,SBPT$T    PREDICATE ALWAYS TRUE IF SO           06130000
+                                                                        06140000
+*--------------------------------------------------------------         06150000
+*   traverse all predicates via the unordered chain                     06160000
+*--------------------------------------------------------------         06170000
+                                                                        06180000
+VALPNEXT DS    0H                                                       06190000
+         ICM   R5,15,P.PREDLINK   ADVANCE TO NEXT PREDICATE             06200000
+         BNZ   VALSARG            INSPECT ALL PREDICATES                06210000
+         DROP  R4,B,P             SQCOLREF, SBPTERM, PREDENT            06220000
+                                                                        06230000
+*--------------------------------------------------------------         06240000
+*   traverse all predicates via the unordered chain                     06250000
+*--------------------------------------------------------------         06260000
+                                                                        06270000
+         @CALL ITRESARG,(*SQSITREE,QCSGPSTG),                          X06280000
+               MF=(E,MFE_LIST)    CONVERT SEARCH ARGUMENT               06290000
+                                                                        06300000
+         LTR   R15,R15            NORMAL COMPLETION?                    06310000
+         BNZ   ERR_STG            STORAGE FAILURE                       06320000
+                                                                        06330000
+         ST    R1,QCSSITRE        RETAIN SARG IN TABLE SERVICES FORMAT  06340000
+                                                                        06350000
+VALSARGF DS    0H                 ALL COLREFS ARE IMPLICIT              06360000
+         EJECT                                                          06370000
+***************************************************************         06380000
+*                                                                       06390000
+*   At this point the properties of the column/variable pair            06400000
+*   have been posted in the NAVPARM entry. Now, for each column         06410000
+*   that is a member of the SELECT result set or is used                06420000
+*   internally to process table-select search arguments, a              06430000
+*   TBCOLDEF entry is constructed in preparation for subsequent         06440000
+*   TBCREATE.                                                           06450000
+*                                                                       06460000
+***************************************************************         06470000
+                                                                        06480000
+         LR    R1,R6              R1 <== NAVPARM                        06490000
+         BAS   R14,BTBCOLS        TBCOLDEFS FOR RESULT SET MEMBERS      06500000
+                                                                        06510000
+         ST    R0,QCSROBFL        RETAIN TBSERV SOURCE ROW SIZE RQMT    06520000
+         MVC   IXRTBCDA,COLDA     TBCOLDEF ARRAY ORIGIN                 06530000
+         MVC   IXRTBCDC,COLCOUNT+2  COLDEF ARRAY ENTRIES                06540000
+                                                                        06550000
+         EJECT                                                          06560000
+***************************************************************         06570000
+*                                                                       06580000
+*   If the SQL statement type produces a result set, build the          06590000
+*   result set table now to flesh out index errors, etc. before         06600000
+*   navigation is begun.  This also ensures that a table,               06610000
+*   possibly empty, will be returned for our caller.                    06620000
+*                                                                       06630000
+***************************************************************         06640000
+                                                                        06650000
+         TM    QCSRSF,QCSR_REQ    RESULT SET TABLE REQUIRED?            06660000
+         BNO   NORESSET           NOT CREATED HERE OTHERWISE            06670000
+                                                                        06680000
+         LR    R1,R6              R1 <== NAVPARM                        06690000
+         @CALL IRUNRSCR,CTYPE=CVT                                       06700000
+                                                                        06710000
+         LTR   R15,R15            RESULT SET COMPLETED WITHOUT ERROR?   06720000
+         BNZ   POSTSTAT           ELSE IMMEDIATE RETURN WITH DIAGS      06730000
+                                                                        06740000
+NORESSET DS    0H                                                       06750000
+                                                                        06760000
+***************************************************************         06770000
+*                                                                       06780000
+*   Prior to invoking the runtime, the $NAVPARM column/variable         06790000
+*   entries are ordered in (application, screen(set), region)           06800000
+*   sequence to simplify subsequent $NAVPARM entry scans.               06810000
+*                                                                       06820000
+***************************************************************         06830000
+                                                                        06840000
+         LH    R2,IXRNVARS        NUMBER OF COL/VAR ENTRIES             06850000
+                                                                        06860000
+         @CALL IGENQSRT,(IXRCOLDF,(R2),IXRCDLEN,=V(INAVPORD)),         X06870000
+               CTYPE=STD,                                              X06880000
+               MF=(E,MFE_LIST)                                          06890000
+                                                                        06900000
+         EJECT                                                          06910000
+***************************************************************         06920000
+*                                                                       06930000
+*   Execute the request                                                 06940000
+*                                                                       06950000
+***************************************************************         06960000
+                                                                        06970000
+         LA    R0,QCSEMSGQ        SQL EXECUTION MSG Q ANCHOR ADDR       06980000
+         ST    R0,IXRMSGQ         MADE AVAILABLE TO EXECUTOR            06990000
+         MVC   IXRQHMSG,QCSQHMSG  STGMGR Q HDR OWNING THE MSG QUEUE     07000000
+                                                                        07010000
+         LR    R1,R6              R1 <== $NAVPARM                       07020000
+         @CALL INAVCNTL,CTYPE=CVT                                       07030000
+                                                                        07040000
+         STM   R15,R1,STATREGS    PRESERVE COMPLETION STATUS            07050000
+                                                                        07060000
+*--------------------------------------------------------------         07070000
+*   Analyze navigation driver completion status                         07080000
+*--------------------------------------------------------------         07090000
+                                                                        07100000
+         OC    QCSERC,QCSERC      DETAILED QUERY FAILURE INFO POSTED?   07110000
+         BNZ   POSTSTAT           RETAIN POINT OF FAILURE INFO          07120000
+                                                                        07130000
+         ST    R15,QCSERC                                               07140000
+         ST    R15,IXRETCOD                                             07150000
+         ST    R0,QCSERSN                                               07160000
+         ST    R0,IXRSNCOD                                              07170000
+                                                                        07180000
+*--------------------------------------------------------------         07190000
+*   determine request completion                                        07200000
+*--------------------------------------------------------------         07210000
+                                                                        07220000
+         LTR   R15,R15            EXECUTION ERROR?                      07230000
+         BNZ   ERR_RUN            OUTRIGHT FAILURE                      07240000
+                                                                        07250000
+         LR    R14,R0             ANALYZE SUCCESS QUALIFIER             07260000
+         B     *+4(R14)           PROVIDED AS EXECUTOR REASON CODE      07270000
+         B     POSTSTAT              RSN00 - NORMAL COMPLETION          07280000
+         B     ERR_RUN               RSN04 - EXCEPTION STATE (ERROR)    07290000
+         B     SARGFAIL              RSN08 - SARG SELECTION FAILURE     07300000
+                                                                        07310000
+SARGFAIL DS    0H                                                       07320000
+         MVC   QCSESUPR,=A(100)   STD SQL NOTIFICATION                  07330000
+         B     POSTSTAT           DONE                                  07340000
+         DROP  R6                 $NAVPARM                              07350000
+                                                                        07360000
+         EJECT                                                          07370000
+***************************************************************         07380000
+*                                                                       07390000
+*   Abnormal request completions                                        07400000
+*                                                                       07410000
+***************************************************************         07420000
+                                                                        07430000
+*--------------------------------------------------------------         07440000
+*   Multiple references to an input column/variable                     07450000
+*--------------------------------------------------------------         07460000
+                                                                        07470000
+ERR_IVRF DS    0H                 SBPTERM PROVIDED                      07480000
+         MVC   QCSECLEX,SBPCOL@C-SBPTERM(R1)                            07490000
+                                                                        07500000
+         SQLSTAT ERC_IVRF                                               07510000
+                                                                        07520000
+         B     POSTSTAT                                                 07530000
+                                                                        07540000
+*--------------------------------------------------------------         07550000
+*   Input column/variable used in an illegal context                    07560000
+*--------------------------------------------------------------         07570000
+                                                                        07580000
+ERR_IVAR DS    0H                 SBPTERM PROVIDED                      07590000
+         MVC   QCSECLEX,SBPCOL@C-SBPTERM(R1)                            07600000
+                                                                        07610000
+         SQLSTAT ERC_IVAR                                               07620000
+                                                                        07630000
+         B     POSTSTAT                                                 07640000
+                                                                        07650000
+*--------------------------------------------------------------         07660000
+*   Input column/variables appear in a disjunction                      07670000
+*--------------------------------------------------------------         07680000
+                                                                        07690000
+ERR_IOR  DS    0H                                                       07700000
+         ST    R1,QCSECLEX        IDENTIFY OFFENDING #CLEX              07710000
+                                                                        07720000
+         SQLSTAT ERC_IVOR                                               07730000
+                                                                        07740000
+         B     POSTSTAT           PREPARE FOR UPDATE SQL RESPONSE BLK   07750000
+                                                                        07760000
+*--------------------------------------------------------------         07770000
+*   Output column/variable appears in SET clause                        07780000
+*--------------------------------------------------------------         07790000
+                                                                        07800000
+ERR_USET DS    0H                                                       07810000
+         ST    R1,QCSECLEX        RETURN CLEX ENTRY IF AVAILABLE        07820000
+                                                                        07830000
+         SQLSTAT ERC_USET                                               07840000
+                                                                        07850000
+         B     POSTSTAT                                                 07860000
+                                                                        07870000
+*--------------------------------------------------------------         07880000
+*   Runtime encountered execution failure                               07890000
+*--------------------------------------------------------------         07900000
+                                                                        07910000
+ERR_RUN  DS    0H                                                       07920000
+         C     R15,=A(RC44)       STORAGE FAILURE?                      07930000
+         BE    ERR_STG                                                  07940000
+                                                                        07950000
+         LR    R2,R15                                                   07960000
+         L     R1,NAVP            R1 <== $NAVPARM CONTAINS DIAGNOSTICS  07970000
+         BAS   R14,$DOCFAIL       CONSTRUCT DIAGNOSTIC MSG              07980000
+                                                                        07990000
+         SQLSTAT ERC_RUN          SQL EXECUTION FAILURE                 08000000
+                                                                        08010000
+         B     POSTSTAT                                                 08020000
+                                                                        08030000
+*--------------------------------------------------------------         08040000
+*   Insert statement failures                                           08050000
+*--------------------------------------------------------------         08060000
+                                                                        08070000
+ERR_INS1 DS    0H                 INVALID COLUMN USAGE                  08080000
+         USING SBPTERM,R1         PREDICATE FOUND IN ERROR              08090000
+         ICM   R2,15,SBPCOL@C     COLUMN CLEX AVAILABLE?                08100000
+         BNZ   *+8                FLAG IT IF SO                         08110000
+         L     R2,SBPVAL@C        ELSE FLAG ASSOCIATED VALUE            08120000
+         ST    R2,QCSECLEX        TAG FOR FEEDBACK                      08130000
+         DROP  R1                 SBPTERM                               08140000
+                                                                        08150000
+         SQLSTAT ERC_INUL                                               08160000
+                                                                        08170000
+         B     POSTSTAT                                                 08180000
+                                                                        08190000
+*--------------------------------------------------------------         08200000
+*   Column length exceeds VDB definition                                08210000
+*--------------------------------------------------------------         08220000
+                                                                        08230000
+ERR_COLEN DS   0H                  COLUMN VALUE LENGTH EXCEEDS VDB DEF  08240000
+         MVC   QCSECLEX,SBPVAL@C-SBPTERM(R1)                            08250000
+                                                                        08260000
+         SQLSTAT ERC_CLEN                                               08270000
+                                                                        08280000
+         B     POSTSTAT                                                 08290000
+                                                                        08300000
+*--------------------------------------------------------------         08310000
+*   Error merging navigational info into $NAVPARM entries               08320000
+*--------------------------------------------------------------         08330000
+                                                                        08340000
+ERR_XSTN DS    0H                 SCREEN ADDRESS CANNOT BE EXTRACTED    08350000
+         LR    R2,R15             PRESERVE ORIGINAL FAILURE RC          08360000
+         BAS   R14,$DOCXSTN       DOCUMENT NAVIGATION INTERFACE ERROR   08370000
+                                                                        08380000
+         SQLSTAT ERC_XSTN,INFO=(R2)                                     08390000
+                                                                        08400000
+         B     POSTSTAT                                                 08410000
+                                                                        08420000
+*--------------------------------------------------------------         08430000
+*   Normalization error                                                 08440000
+*--------------------------------------------------------------         08450000
+                                                                        08460000
+ERR_NORM DS    0H                 REPEATING GROUPS CANNOT BE NORMALIZED 08470000
+         LR    R2,R15             PRESERVE ORIGINAL FAILURE RC          08480000
+         BAS   R14,$DOCNORM       DOCUMENT NORMALIZATION ERROR (R2,R3)  08490000
+                                                                        08500000
+         SQLSTAT ERC_NORM,INFO=(R2)                                     08510000
+                                                                        08520000
+         B     POSTSTAT                                                 08530000
+                                                                        08540000
+*--------------------------------------------------------------         08550000
+*  input or non-null variable omitted from SQL statement                08560000
+*--------------------------------------------------------------         08570000
+                                                                        08580000
+ERR_NULL DS    0H                 COLUMN NAME MUST BE PROVIDED          08590000
+         $MSG  177,                                                    X08600000
+               FIELDS=(NTCN1,NTCN2,NTCN3,NTCN4,NTCN5,NTCN6,NTCN7,NTCN8) 08610000
+                                                                        08620000
+         SQLSTAT ERC_NULL                                               08630000
+                                                                        08640000
+         B     POSTSTAT                                                 08650000
+                                                                        08660000
+*--------------------------------------------------------------         08670000
+*   Table access not authorized                                         08680000
+*--------------------------------------------------------------         08690000
+                                                                        08700000
+ERR_SECU DS    0H                 ACCESS NOT AUTHORIZED                 08710000
+         SQLSTAT ERC_SECU                                               08720000
+                                                                        08730000
+         B     POSTSTAT                                                 08740000
+                                                                        08750000
+*--------------------------------------------------------------         08760000
+*   Storage management failure                                          08770000
+*--------------------------------------------------------------         08780000
+                                                                        08790000
+ERR_STG  DS    0H                 INSUFFICIENT STORAGE                  08800000
+         SQLIDCMP COMPONENT='STORAGE MGMT',INFOCODE=(R15)               08810000
+                                                                        08820000
+         SQLSTAT ERC_STG                                                08830000
+                                                                        08840000
+         B     POSTSTAT                                                 08850000
+                                                                        08860000
+         EJECT                                                          08870000
+***************************************************************         08880000
+*                                                                       08890000
+*   Cleanup and exit.  Even though all of the cleanup done here         08900000
+*   would eventually be performed by IRMXSQLW, we release as            08910000
+*   much as possible now.  There can still be a long way to             08920000
+*   go before the SQL process begins delivery.                          08930000
+*                                                                       08940000
+***************************************************************         08950000
+                                                                        08960000
+POSTSTAT DS    0H                 POST COMPLETION STATUS                08970000
+         ICM   R2,15,QCSROBFR     ROW COLLECTOR BUFFER ALLOC?           08980000
+         BNP   NOROWBF            SKIP IF NOT OR LOCAL STG USED         08990000
+                                                                        09000000
+         $RETSTOR (R2),OWNER=ITASK     RELEASE ROW BUFFER               09010000
+                                                                        09020000
+         XC    QCSROBFR,QCSROBFR                                        09030000
+         XC    QCSROBFL,QCSROBFL                                        09040000
+                                                                        09050000
+NOROWBF  DS    0H                                                       09060000
+                                                                        09070000
+*--------------------------------------------------------------         09080000
+*   Release TBCOLDEF / $NAVPARM area                                    09090000
+*--------------------------------------------------------------         09100000
+                                                                        09110000
+         $RETSTOR *QCSWORKA,OWNER=ITASK  RELEASE TBCOLDEF/$NAVPARM AREA 09120000
+                                                                        09130000
+         XC    QCSWORKA,QCSWORKA  CLEAR WORKAREA ADDRESS                09140000
+         XC    QCSWORKL,QCSWORKL  CLEAR WORKAREA LENGTH                 09150000
+                                                                        09160000
+*--------------------------------------------------------------         09170000
+*   Return to caller                                                    09180000
+*--------------------------------------------------------------         09190000
+                                                                        09200000
+RETX     DS    0H                                                       09210000
+         L     R15,QCSERC         RESTORE COMPLETION STATUS             09220000
+         L     R0,QCSERSN                                               09230000
+         L     R1,QCSEINFO                                              09240000
+                                                                        09250000
+         #EXIT ,                                                        09260000
+                                                                        09270000
+         EJECT                                                          09280000
+**<DOC-ON>*****************************************************  231496 09290000
+*                                                                231496 09300000
+* ROUTINE: BNVPNTRY - Build column/variable NAVPARM entry        231496 09310000
+*                                                                231496 09320000
+* DESCRIPTION:                                                   231496 09330000
+*                                                                231496 09340000
+*    This routine is responsible for constructing a $NAVPARM     231496 09350000
+*    entry associating a SQL table column to its backing         231496 09360000
+*    SYSCOLUMN and SYSVARIABLE entries, as well as the           231496 09370000
+*    appropriate node in the SQL column reference summary.       231496 09380000
+*    Additionally, a preliminary determination of usage (input   231496 09390000
+*    or output) is made based on the variable type and use, and  231496 09400000
+*    any column overrides.                                       231496 09410000
+*                                                                231496 09420000
+*                                                                231496 09430000
+* ON ENTRY:                                                      231496 09440000
+*                                                                231496 09450000
+*    R0  - addr of SYSVARIABLE entry                             231496 09460000
+*    R1  - addr of SYSCOLUMN   entry                             231496 09470000
+*                                                                231496 09480000
+*                                                                231496 09490000
+* ON EXIT:                                                       231496 09500000
+*                                                                231496 09510000
+*    R15 contains one of the following return codes              231496 09520000
+*                                                                231496 09530000
+*        RC00 - normal completion                                231496 09540000
+*                                                                231496 09550000
+**<DOC-OFF>****************************************************  231496 09560000
+                                                                        09570000
+BNVPNTRY DS    0H                                                       09580000
+         STM   R0,R15,REGSAVE     PRESERVE MAINLINE REGS                09590000
+                                                                        09600000
+         LR    R4,R1                                                    09610000
+         USING SYSCOLS,R4         SYSCOLUMNS                            09620000
+                                                                        09630000
+         LR    R5,R0                                                    09640000
+         USING SVARSECT,R5        SYSVARIABLES                          09650000
+                                                                        09660000
+         L     R6,NAVPNXT                                               09670000
+         USING IXRCOLDF,R6        COL DEFINITION                        09680000
+                                                                        09690000
+         LA    R0,IXRCOLDF+IXRCDLEN                                     09700000
+         ST    R0,NAVPNXT         UPDATE NEXT ENTRY PTR                 09710000
+                                                                        09720000
+*--------------------------------------------------------------         09730000
+*   Common column attributes, SYSVARIABLE and SYSCOLUMN links           09740000
+*--------------------------------------------------------------         09750000
+                                                                        09760000
+         ST    R4,IXR@SCOL        SYSCOLUMN ADDRESS                     09770000
+         ST    R5,IXR@RVAR        SYSVARIABLE ADDRESS                   09780000
+                                                                        09790000
+         MVC   IXRSCRN#,SVARSCR#  COPY SCREEN NUMBER                    09800000
+         MVC   IXRSCRNM,SVARSNAM  COPY SCREEN NAME                      09810000
+                                                                        09820000
+         LH    R2,QCSSCUSE        COLUMN USAGE BY DML STMT TYPE         09830000
+         LA    R2,SCOLUSE(R2)     OFFSET INTO DML TYPE ARRAY            09840000
+         MVC   IXRSTAT2,0(R2)     SCOLUSE BYTE IMAGE RETAINED           09850000
+                                                                        09860000
+*--------------------------------------------------------------         09870000
+*   Attach SQL column reference summary node to entry                   09880000
+*--------------------------------------------------------------         09890000
+                                                                        09900000
+         ICM   R2,15,SQSACOLS     ALL REFERENECED COLUMNS               09910000
+         BZ    BNVPCFIN           JUST TOO STRANGE                      09920000
+         USING SQCOLREF,R2        COLUMN REFERENCE SUMMARY NODES        09930000
+                                                                        09940000
+BNVPCREF DS    0H                 SCAN FOR MATCHING SQCOLREF            09950000
+         CLC   SQCOLNM,SCOLNAME   APPROP COLREF LOCATED?                09960000
+         BE    BNVPCLNK           MATCHED IF SO                         09970000
+         ICM   R2,15,SQCOLINK     ELSE ADVANCE TO NEXT COLREF           09980000
+         BNZ   BNVPCREF           AGAIN                                 09990000
+         B     BNVPCFIN                                                 10000000
+                                                                        10010000
+BNVPCLNK DS    0H                 IMPLICIT OR EXPLICIT SQL STMT REF     10020000
+         ST    R2,IXR@CREF        RETAIN PTR TO COLUMN REFERENCE SMRY   10030000
+         DROP  R2                 SQCOLREF                              10040000
+                                                                        10050000
+BNVPCFIN DS    0H                                                       10060000
+                                                                        10070000
+*--------------------------------------------------------------         10080000
+*   Preliminary determination of column/variable usage                  10090000
+*--------------------------------------------------------------         10100000
+                                                                        10110000
+         CLI   SVARUTYP,SVAR$ATT  ATTRIBUTE VARIABLE?                   10120000
+         BE    BNVPUFIN           OUTPUT ONLY                           10130000
+                                                                        10140000
+         CLI   SVARUTYP,SVAR$OUT  OUTPUT VARIABLE?                      10150000
+         BE    BNVPUFIN           NO COLUMN OVERRIDE ACCEPTED           10160000
+                                                                        10170000
+         TM    IXRSTAT2,SCU$OUT   INPUT VAR COL OVERRIDE TO OUT?        10180000
+         BO    BNVPUFIN           HANDLE AS OUTPUT IF SO                10190000
+                                                                        10200000
+         OI    IXRSTAT1,IXRS1INP  ELIGIBLE FOR INPUT                    10210000
+                                                                        10220000
+BNVPUFIN DS    0H                                                       10230000
+                                                                        10240000
+*--------------------------------------------------------------         10250000
+*   Return completed NAVPARM entry (IXRCOLDF) to caller                 10260000
+*--------------------------------------------------------------         10270000
+                                                                        10280000
+         LA    R1,IXRCOLDF        R1 <== RETURN COLUMN/VARIABLE ENTRY   10290000
+                                                                        10300000
+         LM    R2,R14,REGSAVE+8   RESTORE MAINLINE REGS                 10310000
+         LA    R15,RC00           INDICATE SUCCESS                      10320000
+         BR    R14                RETURN                                10330000
+         DROP  R6,R5,R4           IXRCOLDF, SVARSECT, SYSCOLS           10340000
+                                                                        10350000
+         EJECT                                                          10360000
+**<DOC-ON>*****************************************************  231496 10370000
+*                                                                231496 10380000
+* ROUTINE: SNVPNTRY - Post process column/variable entries       231496 10390000
+*                                                                231496 10400000
+* DESCRIPTION:                                                   231496 10410000
+*                                                                231496 10420000
+*    This routine is used to determine the usage (input or       231496 10430000
+*    output) of each of the column variables represented in the  231496 10440000
+*    NAVPARM and to acquire the appropriate values for those     231496 10450000
+*    that have input usage.                                      231496 10460000
+*                                                                231496 10470000
+*                                                                231496 10480000
+* ON ENTRY:                                                      231496 10490000
+*                                                                231496 10500000
+*    R1  - addr of NAVPARM                                       231496 10510000
+*                                                                231496 10520000
+*                                                                231496 10530000
+* ON EXIT:                                                       231496 10540000
+*                                                                231496 10550000
+*    R15 contains one of the following return codes              231496 10560000
+*                                                                231496 10570000
+*        RC00 - normal completion                                231496 10580000
+*                                                                231496 10590000
+**<DOC-OFF>****************************************************  231496 10600000
+                                                                        10610000
+SNVPNTRY DS    0H                                                       10620000
+         STM   R0,R15,REGSAVE     PRESERVE MAINLINE REGS                10630000
+                                                                        10640000
+         LR    R6,R1              LOCATE NAVPARM ORIGIN                 10650000
+         USING $NAVPARM,R6        HEADER FORMAT                         10660000
+         LH    R3,IXRNVARS        NUMBER OF COLUMN / VARIABLE ENTRIES   10670000
+         LA    R6,IXRCOLDF        SWITCH TO ENTRY ADDRESSABILITY        10680000
+         USING IXRCOLDF,R6        READY FOR ENTRY SCAN                  10690000
+                                                                        10700000
+*--------------------------------------------------------------         10710000
+*   Determine if column representation required in base table           10720000
+*--------------------------------------------------------------         10730000
+                                                                        10740000
+SNVPNEXT DS    0H                                                       10750000
+         L     R5,IXR@RVAR        SYSVARIABLES ENTRY                    10760000
+         USING SVARSECT,R5                                              10770000
+                                                                        10780000
+         L     R4,IXR@SCOL        SYSCOLUMNS ENTRY                      10790000
+         USING SYSCOLS,R4                                               10800000
+                                                                        10810000
+         EJECT                                                          10820000
+**<DOC-ON>*****************************************************         10830000
+*                                                                       10840000
+*   Acquire values for input column/variables                           10850000
+*                                                                       10860000
+*   VDB input columns, those that are associated with input             10870000
+*   column variables, may acquire values from one of three              10880000
+*   sources in the following priority sequeuce:                         10890000
+*                                                                       10900000
+*      1. The WHERE clause for searched UPDATE, searched                10910000
+*         DELETE, or SELECT, or alternatively, the VALUES               10920000
+*         clause of an INSERT.  Note that this value may change         10930000
+*         on each issuance of a SQLExecute() of a prepared              10940000
+*         statement.                                                    10950000
+*                                                                       10960000
+*      2. The DEFAULT VALUE associated with the VDB column              10970000
+*         definition, if any                                            10980000
+*                                                                       10990000
+*      3. The DEFAULT VALUE associated with the variable                11000000
+*         definition, if any                                            11010000
+*                                                                       11020000
+*   The following logic identifies input column/variables, then         11030000
+*   acquiring an appropriate value by examining the sources             11040000
+*   listed above in reverse order, retaining the highest                11050000
+*   priority value acquired in the process.                             11060000
+*                                                                       11070000
+**<DOC-OFF>****************************************************         11080000
+                                                                        11090000
+         TM    IXRSTAT1,IXRS1INP INPUT COLUMN/VARIABLE?                 11100000
+         BNO   SNVPADV           DONE HERE IF NOT                       11110000
+                                                                        11120000
+         MVI   VALUESRC,0        CLEAR VALUE SOURCE FLAG                11130000
+                                                                        11140000
+***************************************************************         11150000
+*                                                                       11160000
+*   (3) Default value extracted from variable definition                11170000
+*                                                                       11180000
+***************************************************************         11190000
+                                                                        11200000
+         TM    SVARUSE,SVU$NONE   DEFAULT VALUE OMITTED?                11210000
+         BO    SNVVARX                                                  11220000
+         TM    SVARUSE,SVU$NULL   DEFAULT VALUE IS NULL STRING?         11230000
+         BO    SNVVAR_N                                                 11240000
+         TM    SVARUSE,SVU$BLNK   DEFAULT VALUE IS BLANK STRING?        11250000
+         BO    SNVVAR_B                                                 11260000
+         B     SNVVAR_T           OTHERWISE, DEFAULT IS TEXT            11270000
+                                                                        11280000
+*--------------------------------------------------------------         11290000
+*   Default value is NULL                                               11300000
+*--------------------------------------------------------------         11310000
+                                                                        11320000
+SNVVAR_N DS    0H                 DEFAULT IS NULL                       11330000
+         XC    IXRVARLN,IXRVARLN                                        11340000
+         B     SNVVAROK                                                 11350000
+                                                                        11360000
+*--------------------------------------------------------------         11370000
+*   Default value is blank                                              11380000
+*--------------------------------------------------------------         11390000
+                                                                        11400000
+SNVVAR_B DS    0H                 DEFAULT IS BLANK               153670 11410000
+         MVC   IXRVARLN,SVARLEN                                  153670 11420000
+         MVC   IXRVARS@,=X'80000000'                             153670 11430000
+         B     SNVVAROK                                          153670 11440000
+                                                                        11450000
+*--------------------------------------------------------------         11460000
+*   Default value text, if posted                                       11470000
+*--------------------------------------------------------------         11480000
+                                                                        11490000
+SNVVAR_T DS    0H                 DEFAULT IS STORED STRING              11500000
+         ICM   R15,15,SVARDVAL    FORMAT IS AL2(LEN),C'STRING'          11510000
+         BZ    SNVVARX            NOT POSTED                            11520000
+         MVC   IXRVARLN,0(R15)    DEFAULT VALUE LENGTH                  11530000
+         LA    R1,2(,R15) DEFAULT VALUE ADDRESS                         11540000
+         ST    R1,IXRVARS@                                              11550000
+                                                                        11560000
+SNVVAROK DS    0H                 INDICATE DEFAULT VALUE AVAILABLE      11570000
+         MVI   VALUESRC,IXRS1DFT                                        11580000
+                                                                        11590000
+SNVVARX  DS    0H                                                       11600000
+                                                                        11610000
+***************************************************************         11620000
+*                                                                       11630000
+*   (2) Default value extracted from VDB column definition              11640000
+*                                                                       11650000
+***************************************************************         11660000
+                                                                        11670000
+         TM    IXRSTAT2,SCU$NONE  COLUMN DEFAULT RETRACTED?             11680000
+         BO    SNVCOL_R                                                 11690000
+         TM    IXRSTAT2,SCU$NULL  COLUMN DEFAULT IS NULL?               11700000
+         BO    SNVCOL_N                                                 11710000
+         TM    IXRSTAT2,SCU$BLNK  COLUMN DEFAULT IS BLANK?              11720000
+         BO    SNVCOL_B                                                 11730000
+         B     SNVCOL_T                                                 11740000
+                                                                        11750000
+*--------------------------------------------------------------         11760000
+*   Default value provided by variable is retracted                     11770000
+*--------------------------------------------------------------         11780000
+                                                                        11790000
+SNVCOL_R DS    0H                 DEFAULT RETRACTED                     11800000
+         MVI   VALUESRC,0         NO DEFAULTS AVAILABLE                 11810000
+         XC    IXRVARLN,IXRVARLN                                        11820000
+         XC    IXRVARS@,IXRVARS@                                        11830000
+         B     SNVCOLX                                                  11840000
+                                                                        11850000
+*--------------------------------------------------------------         11860000
+*   Default value is NULL                                               11870000
+*--------------------------------------------------------------         11880000
+                                                                        11890000
+SNVCOL_N DS    0H                 DEFAULT IS NULL                       11900000
+         XC    IXRVARLN,IXRVARLN                                        11910000
+         XC    IXRVARS@,IXRVARS@                                        11920000
+         B     SNVCOLOK                                                 11930000
+                                                                        11940000
+*--------------------------------------------------------------         11950000
+*   Default value is blank                                              11960000
+*--------------------------------------------------------------         11970000
+                                                                        11980000
+SNVCOL_B DS    0H                 DEFAULT IS BLANK               153670 11990000
+         MVC   IXRVARLN,SVARLEN                                  153670 12000000
+         MVC   IXRVARS@,=X'80000000'                             153670 12010000
+                                                                        12020000
+         LH    R0,SCOLLEN                                        153670 12030000
+         LTR   R0,R0                                             153670 12040000
+         BZ    *+8                                               153670 12050000
+         STH   R0,IXRVARLN                                       153670 12060000
+         B     SNVCOLOK                                                 12070000
+                                                                        12080000
+*--------------------------------------------------------------         12090000
+*   Default value text, if any                                          12100000
+*--------------------------------------------------------------         12110000
+                                                                        12120000
+SNVCOL_T DS    0H                                                       12130000
+         ICM   R0,15,SCOLDFLT     DFT, IF PROVIDED, IS STORED STRING    12140000
+         BZ    SNVCOLX            NOT POSTED                            12150000
+         STH   R0,IXRVARLN                                              12160000
+         MVC   IXRVARS@,SCOLDFLT+4                                      12170000
+                                                                        12180000
+SNVCOLOK DS    0H                 INDICATE DEFAULT VALUE AVAILABLE      12190000
+         MVI   VALUESRC,IXRS1DVD                                        12200000
+                                                                        12210000
+SNVCOLX  DS    0H                                                       12220000
+                                                                        12230000
+***************************************************************         12240000
+*                                                                       12250000
+*   (1) Value from SQL WHERE (SEL,UPD,DEL) or VALUES (INS) clause       12260000
+*                                                                       12270000
+***************************************************************         12280000
+                                                                        12290000
+         ICM   R15,15,SQSEXTRE    ACQUIRE COLUMN VALUE FROM VALUES()    12300000
+         BZ    SNVSQLIN           CANT HAVE BOTH VALUES() AND WHERE     12310000
+         LA    R0,SQSEXTRE        R0 <== SARG ANCHOR                    12320000
+         B     SNVSQLGO                                                 12330000
+                                                                        12340000
+SNVSQLIN DS    0H                 ACQUIRE COLUMN VALUE FROM SARG        12350000
+         ICM   R15,15,SQSAINSC    VALUES CLAUSE PROVIDED?               12360000
+         BZ    SNVSQLNA           ONWARD IF NOT, NO DATA SOURCE         12370000
+         LA    R0,SQSAINSC        R0 <== VALUES LIST ANCHOR             12380000
+                                                                        12390000
+SNVSQLGO DS    0H                 ACQUIRE COLUMN VALUE                  12400000
+         LA    R1,SCOLNAME        R1 <== COLUMN NAME                    12410000
+                                                                        12420000
+         @CALL ISQLIVFC,CTYPE=STD                                       12430000
+                                                                        12440000
+         LTR   R15,R15            VALUE ACQUIRED?                       12450000
+         BNZ   SNVSQLNA           DONE HERE IF NOT                      12460000
+                                                                        12470000
+         STH   R0,IXRVARLN                                              12480000
+         ST    R1,IXRVARS@                                              12490000
+                                                                        12500000
+         MVI   VALUESRC,IXRS1SQL  VALUE SOURCE IS SARG-LIKE             12510000
+                                                                        12520000
+SNVSQLNA DS    0H                                                       12530000
+                                                                        12540000
+**<DOC-ON>*****************************************************         12550000
+*                                                                       12560000
+*   Variable replacement values provided in the SET clause of           12570000
+*   an UPDATE are now examined.  If a column appears in both            12580000
+*   the SET clause and the SARG, it is initially considered an          12590000
+*   output variable and is changed to input only after the              12600000
+*   ouput value has been scraped.                                       12610000
+*                                                                       12620000
+**<DOC-OFF>****************************************************         12630000
+                                                                        12640000
+         ICM   R15,15,SQSASETS    SET CLAUSE PROVIDED?                  12650000
+         BZ    SNVPSET            ONWARD IF NOT                         12660000
+                                                                        12670000
+         TM    IXRSTAT1,IXRS1RPT  SCALAR (NONREPEATING) COLVAR?         12680000
+         BNO   SNVPUFIN           INPUT FROM EITHER SET OR SARG OK      12690000
+         NI    IXRSTAT1,FF-IXRS1INP           REPLACEMENT POSTED LATER  12700000
+         NI    VALUESRC,FF-IXRS1DFT-IXRS1DVD  NO DEFAULTS ACCEPTED      12710000
+                                                                        12720000
+SNVPUFIN DS    0H                                                       12730000
+         LA    R0,SQSASETS        R0 <== SET LIST ANCHOR                12740000
+         LA    R1,SCOLNAME        R1 <== COLUMN NAME                    12750000
+                                                                        12760000
+         @CALL ISQLIVFC,CTYPE=STD                                       12770000
+                                                                        12780000
+         LTR   R15,R15            VALUE ACQUIRED?                       12790000
+         BNZ   SNVPSET            DONE HERE IF NOT                      12800000
+                                                                        12810000
+         STH   R0,IXRVSRLN        VALUE ACQUIRED FROM SET CLAUSE        12820000
+         ST    R1,IXRVSRS@                                              12830000
+                                                                        12840000
+         OI    IXRSTAT0,IXRS0REP  REPLACEMENT VALUE PROVIDED            12850000
+                                                                        12860000
+SNVPSET  DS    0H                                                       12870000
+                                                                        12880000
+***************************************************************         12890000
+*                                                                       12900000
+*   Indicate whether an initial value was acquired for an input         12910000
+*   column/variable.                                                    12920000
+*                                                                       12930000
+***************************************************************         12940000
+                                                                        12950000
+         OC    IXRSTAT1,VALUESRC        SET FLAG                        12960000
+                                                                        12970000
+         NI    IXRSTAT2,FF-IXR$NONE                              153670 12980000
+         TM    IXRSTAT1,IXRS1DFT+IXRS1DVD+IXRS1SQL                      12990000
+         BNZ   *+8                                                      13000000
+         OI    IXRSTAT2,IXR$NONE                                        13010000
+                                                                        13020000
+**<DOC-ON>*****************************************************         13030000
+*                                                                       13040000
+*   SQLPrepare() and SQLExecDirect() only                               13050000
+*                                                                       13060000
+*   If the source request is anything other than a SQLExecute(),        13070000
+*   column/variable USAGE (input or output) has not yet been            13080000
+*   reflected in the semantic summary.  The USAGE can modify            13090000
+*   the interpretation of SARG basic predicates later.                  13100000
+*                                                                       13110000
+**<DOC-OFF>****************************************************         13120000
+                                                                        13130000
+SNVPADV  DS    0H                 ADVANCE TO NEXT NAVPARM ENTRY         13140000
+         CLI   QCSCLI,QCSC_EXE    SQLExecute() OF A PREPARED STATEMENT? 13150000
+         BE    SNVSEMAL           NOT REPEATED IF SO                    13160000
+                                                                        13170000
+         ICM   R2,15,IXR@CREF     SQL COLUMN SUMMARY NODE               13180000
+         BZ    SNVSEMAL           ALL COLUMN REFERENCES ARE IMPLICIT    13190000
+         USING SQCOLREF,R2        GENERIC COLUMN REFERENCE              13200000
+                                                                        13210000
+         MVI   SQCCVSMY,SQCCV$O   ASSUME OUTPUT USAGE, AT LEAST         13220000
+         TM    IXRSTAT1,IXRS1INP  INPUT VALUE?                          13230000
+         BNO   *+8                SKIP IF NOT                           13240000
+         MVI   SQCCVSMY,SQCCV$I   INPUT USAGE AT LEAST                  13250000
+                                                                        13260000
+         TM    IXRSTAT0,IXRS0REP  REPLACEMENT VALUE VIA UPDATE SET      13270000
+         BNO   *+8                SKIP IF NOT                           13280000
+         OI    SQCCVSMY,SQCCV$I   INPUT USAGE AT LEAST                  13290000
+         DROP  R2                 SQCOLREF                              13300000
+                                                                        13310000
+SNVSEMAL DS    0H                                                       13320000
+                                                                        13330000
+*--------------------------------------------------------------         13340000
+*   Advance to next NAVPARM entry, terminate when complete              13350000
+*--------------------------------------------------------------         13360000
+                                                                        13370000
+         LA    R6,IXRCOLDF+IXRCDLEN                                     13380000
+         BCT   R3,SNVPNEXT                                              13390000
+                                                                        13400000
+         LM    R0,R14,REGSAVE     RESTORE MAINLINE REGS                 13410000
+         LA    R15,RC00           INDICATE SUCCESS                      13420000
+         BR    R14                RETURN                                13430000
+         DROP  R6,R5,R4           IXRCOLDF, SVARSECT, SYSCOLS           13440000
+                                                                        13450000
+         EJECT                                                          13460000
+**<DOC-ON>*****************************************************  231496 13470000
+*                                                                231496 13480000
+* ROUTINE: BTBCOLS - Build TBCOLDEFs for result set members      231496 13490000
+*                                                                231496 13500000
+* DESCRIPTION:                                                   231496 13510000
+*                                                                231496 13520000
+*    NAVPARM column/variable entries that must be backed in a    231496 13530000
+*    table definition are identified.  A table will always be    231496 13540000
+*    required for the SELECT statement result set, but other     231496 13550000
+*    navigation models (table select) also require intermediate  231496 13560000
+*    tables.  A TBCOLDEF entry is built for each eligible        231496 13570000
+*    column/variable.                                            231496 13580000
+*                                                                231496 13590000
+*                                                                231496 13600000
+* ON ENTRY:                                                      231496 13610000
+*                                                                231496 13620000
+*    R1  - the address of NAVPARM                                231496 13630000
+*                                                                231496 13640000
+*                                                                231496 13650000
+* ON EXIT:                                                       231496 13660000
+*                                                                231496 13670000
+*    R15 - RC00                                                  231496 13680000
+*                                                                231496 13690000
+*    R0  - the minimum length of a table services source row     231496 13700000
+*          buffer required to insert or retrieve from the        231496 13710000
+*          TBCOLDEF entries generated                            231496 13720000
+*                                                                231496 13730000
+**<DOC-OFF>****************************************************  231496 13740000
+                                                                        13750000
+BTBCOLS  DS    0H                                                       13760000
+         STM   R0,R15,REGSAVE     PRESERVE MAINLINE REGS                13770000
+                                                                        13780000
+         LR    R6,R1              LOCATE NAVPARM ORIGIN                 13790000
+         USING $NAVPARM,R6        HEADER FORMAT                         13800000
+         LH    R3,IXRNVARS        NUMBER OF COLUMN / VARIABLE ENTRIES   13810000
+         LA    R6,IXRCOLDF        SWITCH TO ENTRY ADDRESSABILITY        13820000
+         USING IXRCOLDF,R6        READY FOR ENTRY SCAN                  13830000
+                                                                        13840000
+*--------------------------------------------------------------         13850000
+*   TBCOLDEFs for result set members only, acquire workarea             13860000
+*--------------------------------------------------------------         13870000
+                                                                        13880000
+BTBCNEXT DS    0H                                                       13890000
+         L     R1,IXR@CREF        R1 <== COLUMN REFERENCE SUMMARY       13900000
+         BAS   R14,QSELCOL        DETERMINE RESULT SET MEMBERSHIP       13910000
+                                                                        13920000
+         LTR   R15,R15            INCLUDE IN RESULT SET / BASE TABLE?   13930000
+         BZ    BTBCADV            SKIP IF NOT                           13940000
+         OI    IXRSTAT1,IXRS1SEL  INDICATE TABLE MEMBERSHIP             13950000
+                                                                        13960000
+         L     R15,COLDNXT        LOCATION FOR TBCOLDEF ENTRY           13970000
+         ST    R15,IXR@CDEF       ATTACH TO NAVPARM ENTRY               13980000
+         USING TBCOLDEF,R15       TABLE SERVICES COLUMN DEF             13990000
+         LA    R0,TBCOLEND        NEXT COLDEF CONSTRUCTION AREA         14000000
+         ST    R0,COLDNXT         SAVE FOR SUBSEQUENT CALLERS           14010000
+                                                                        14020000
+         L     R14,COLCOUNT       NUMBER OF TABLE COLUMNS               14030000
+         LA    R14,1(,R14)        ACCOUNT FOR NEW ENTRY                 14040000
+         ST    R14,COLCOUNT       SAVE UPDATED VALUE                    14050000
+                                                                        14060000
+*--------------------------------------------------------------         14070000
+*   Format the TBCOLDEF entry                                           14080000
+*--------------------------------------------------------------         14090000
+                                                                        14100000
+         L     R4,IXR@SCOL        SYSCOLUMNS ENTRY                      14110000
+         USING SYSCOLS,R4                                               14120000
+                                                                        14130000
+         L     R5,IXR@RVAR        SYSVARIABLES ENTRY                    14140000
+         USING SVARSECT,R5                                              14150000
+                                                                        14160000
+         MVC   TBCNAME,SCOLNAME   COPY COLUMN NAME                      14170000
+                                                                        14180000
+         SR    R0,R0              PREPARE FOR INSERT                    14190000
+         IC    R0,SCOLTYPE        FETCH VDB COLUMN DATATYPE             14200000
+         STCM  R0,3,TBCUSER1      RETAIN DATA TYPE EXTENSION INFO       14210000
+                                                                        14220000
+         CLI   SCOLNULL,FALSE     COLUMN ACCEPTS NULL VALUE?            14230000
+         BE    BTBCNULL                                                 14240000
+         OI    IXRSTAT1,IXRS1NUL                                        14250000
+         OI    TBCATTRS,$ATNULL                                         14260000
+                                                                        14270000
+BTBCNULL DS    0H                                                       14280000
+                                                                        14290000
+*--------------------------------------------------------------         14300000
+*   Column length is influenced by col/var data type                    14310000
+*--------------------------------------------------------------         14320000
+                                                                        14330000
+         LH    R0,SVARLEN         VARIABLE VALUE LENGTH                 14340000
+         ST    R0,TBCLENG         SERVES AS DEFAULT COLUMN LENGTH       14350000
+         LH    R0,SCOLLEN         ACTUAL COLUMN VALUE LENGTH            14360000
+         LTR   R0,R0              DECLARED?                             14370000
+         BZ    *+8                SKIP IF NOT                           14380000
+         ST    R0,TBCLENG         STORE HIGHER PRIO COLUMN LENGTH       14390000
+                                                                        14400000
+         LA    R0,ATTRBLEN        ASSUME ATTRIBUTE VARIABLE             14410000
+         CLI   SVARUTYP,SVAR$ATT  ASSUMPTION IS CORRECT?                14420000
+         BE    BTBCPOST           SPECIAL LENGTH IF SO                  14430000
+                                                                        14440000
+         CLI   SCOLTYPE,SC$CHAR   CHARACTER DATA TYPE?                  14450000
+         BE    BTBCCOFF           SKIP IF SO                            14460000
+                                                                        14470000
+         LA    R0,4               ALL INTEGERS ARE FOUR BYTES LONG      14480000
+                                                                        14490000
+BTBCPOST DS    0H                 FORCE COLUMN LENGTH                   14500000
+         ST    R0,TBCLENG         TO VALUE PROVIDED IN R0               14510000
+                                                                        14520000
+BTBCCOFF DS    0H                                                       14530000
+         L     R0,OFFSET          FREE AREA IN TABLE ROW                14540000
+         ST    R0,TBCDISPL        ASSOCIATE WITH THIS COLUMN            14550000
+         AL    R0,TBCLENG         RESET FOR SUBSEQUENT USERS            14560000
+         ST    R0,OFFSET                                                14570000
+                                                                        14580000
+*--------------------------------------------------------------         14590000
+*   Data type                                                           14600000
+*--------------------------------------------------------------         14610000
+                                                                        14620000
+         MVI   TBCDTYPE,$CHAR     ASSUME CHAR TYPE                      14630000
+                                                                        14640000
+         CLI   SVARUTYP,SVAR$ATT  ATTRIBUTE VARIABLE?                   14650000
+         BNE   *+12               SKIP IF NOT                           14660000
+         OI    IXRSTAT2,IXR$ATT   ATTRIBUTE BYTE                        14670000
+         B     BTBCADV                                                  14680000
+                                                                        14690000
+         CLI   SCOLTYPE,SC$CHAR                                         14700000
+         BE    BTBCADV                                                  14710000
+                                                                        14720000
+         MVI   TBCDTYPE,$NUMBR    NUMERIC TYPE                          14730000
+         MVI   IXRNTYPE,$NUMBR                                          14740000
+         MVI   TBCNTYPE,$NTINT    INTEGER                               14750000
+         DROP  R5,R4              SVARSECT,SYSCOLS                      14760000
+                                                                        14770000
+*--------------------------------------------------------------         14780000
+*   Advance to next NAVPARM entry, terminate when complete              14790000
+*--------------------------------------------------------------         14800000
+                                                                        14810000
+BTBCADV  DS    0H                 ADVANCE TO NEXT NAVPARM ENTRY         14820000
+         LA    R6,IXRCOLDF+IXRCDLEN                                     14830000
+         BCT   R3,BTBCNEXT                                              14840000
+                                                                        14850000
+         L     R0,OFFSET          R0 <== SIZE OF ROW BUFFER REQUIRED    14860000
+                                                                        14870000
+         LM    R1,R14,REGSAVE+4   restore regs                          14880000
+         LA    R15,RC00           success                               14890000
+         BR    R14                                                      14900000
+         DROP  R6                 IXRCOLDF                              14910000
+                                                                        14920000
+         EJECT                                                          14930000
+***************************************************************         14940000
+*                                                                       14950000
+* ROUTINE: QSELCOL - Identify potential members of result set           14960000
+*                                                                       14970000
+* DESCRIPTION:                                                          14980000
+*                                                                       14990000
+*    This routine is used to determine if the column identified         15000000
+*    by a SYSCOLUMNS entry is a member of the SQL result set            15010000
+*    (container table) or must participate in any intermediate          15020000
+*    navigational table.                                                15030000
+*                                                                       15040000
+*                                                                       15050000
+* METHOD:                                                               15060000
+*                                                                       15070000
+*    1) If the statement is of the form 'SELECT * ...' all              15080000
+*       columns are members of the result set, otherwise                15090000
+*                                                                       15100000
+*    2) If the statement if of the form 'SELECT <column-list>'          15110000
+*       the named columns are members of the result set, else           15120000
+*                                                                       15130000
+*    3) If the column appears in a search argument and has output       15140000
+*       usage, it is a member of the container table.                   15150000
+*                                                                       15160000
+*                                                                       15170000
+* NOTES:                                                                15180000
+*                                                                       15190000
+*    Heavily used, not all regs are saved/restored                      15200000
+*                                                                       15210000
+*                                                                       15220000
+* ON ENTRY:                                                             15230000
+*                                                                       15240000
+*    R1  SQCOLREF column reference summary node or zero if N/A          15250000
+*                                                                       15260000
+*                                                                       15270000
+* ON EXIT:                                                              15280000
+*                                                                       15290000
+*    R15 contains TRUE (nonzero) or FALSE (zero)                        15300000
+*                                                                       15310000
+***************************************************************         15320000
+                                                                        15330000
+QSELCOL  DS    0H                                                       15340000
+         STM   R0,R4,REGSAVEX           SAVE MODIFIABLE REGS            15350000
+                                                                        15360000
+*--------------------------------------------------------------         15370000
+*   Determine if column is explicitly SELECTed                          15380000
+*--------------------------------------------------------------         15390000
+                                                                        15400000
+         CLI   QCSQUERY,QCSQ_SEL        SELECT STATEMENT?               15410000
+         BNE   QSCNOSEL                                                 15420000
+                                                                        15430000
+         ICM   R0,15,SQSASELC           COLUMN LIST PROVIDED?           15440000
+         BZ    QSC_INC                  ALL COLUMNS SELECTED IF NOT     15450000
+                                                                        15460000
+*--------------------------------------------------------------         15470000
+*   Determine if column use in predicate forces membership              15480000
+*--------------------------------------------------------------         15490000
+                                                                        15500000
+QSCNOSEL DS    0H                                                       15510000
+         LTR   R1,R1                    COLREF PROVIDED?                15520000
+         BZ    QSC_EXC                  EXCLUDE IF NOT                  15530000
+C        USING SQCOLREF,R1              COLUMN REFERENCE SUMMARY NODE   15540000
+                                                                        15550000
+         TM    C.SQCFLAGS,SQCF$SEL      EXPLICITLY SELECTED COLUMN?     15560000
+         BO    QSC_INC                  RESULT SET MEMBER IF SO         15570000
+                                                                        15580000
+         TM    C.SQCFLAGS,SQCF$SA       MEMBER OF SEARCH ARGUMENT?      15590000
+         BNO   QSC_EXC                  EXCLUDE IF NOT                  15600000
+                                                                        15610000
+         TM    C.SQCCVSMY,SQCCV$O       OUTPUT USAGE?                   15620000
+         BO    QSC_INC                  EXCLUDE IF NOT                  15630000
+                                                                        15640000
+*--------------------------------------------------------------         15650000
+*   Return membership indicator (true/false) to requester               15660000
+*--------------------------------------------------------------         15670000
+                                                                        15680000
+QSC_EXC  DS    0H                       COLUMN EXCLUDED FROM TABLE      15690000
+         LA    R15,FALSE                                                15700000
+         B     QSCRET                                                   15710000
+                                                                        15720000
+QSC_INC  DS    0H                       COLUMN INCLUDED IN TABLE        15730000
+         LA    R15,TRUE                                                 15740000
+                                                                        15750000
+QSCRET   DS    0H                                                       15760000
+         LM    R0,R4,REGSAVEX           RESTORE MODIFIED REGS           15770000
+         BR    R14                      RETURN                          15780000
+         DROP  C                        SYSCOLs                         15790000
+                                                                        15800000
+         EJECT                                                          15810000
+***************************************************************         15820000
+*                                                                       15830000
+* ROUTINE: SECTEST - Validate access to named VDB table                 15840000
+*                                                                       15850000
+* ON ENTRY:                                                             15860000
+*                                                                       15870000
+*    R1 - entity name is CL16 table name                                15880000
+*    R0 - $SAF-ready resource access type code                          15890000
+*                                                                       15900000
+* ON RETURN:                                                            15910000
+*                                                                       15920000
+*    R15 contains one of the following return codes                     15930000
+*                                                                       15940000
+*        RC00     - access allowed                                      15950000
+*        >= RC08  - access denied (as presented by $SAF)                15960000
+*                                                                       15970000
+***************************************************************         15980000
+                                                                        15990000
+SECTEST  DS    0H                                                       16000000
+         STM   R0,R15,REGSAVE     PRESERVE MAINLINE REGS                16010000
+                                                                        16020000
+         LR    R2,R1              TABLE NAME                            16030000
+         LR    R3,R0              ACCESS TYPE CODE                      16040000
+                                                                        16050000
+         XC    WRKLARGE($MSBPFXL),WRKLARGE                              16060000
+                                                                        16070000
+         $SAF  RESCHK,            AUTH CHECK                           X16080000
+               CLASS='TABLE',     PROJECT ACCESS                       X16090000
+               ENTITY=((R2),16),                                       X16100000
+               ACCESS=(R3),                                            X16110000
+               MSGAREA=WRKLARGE,                                       X16120000
+               MSGLEN=L'WRKLARGE,                                      X16130000
+               MF=(E,@SAF_MFL)                                          16140000
+                                                                        16150000
+         ST    R15,FWORD          PASS THRU SEC VIOS                    16160000
+         C     R15,=A(RC04)       VIOLATION LIKELY?                     16170000
+         BNH   SECNORM            DONE IF SO                            16180000
+                                                                        16190000
+         $ENQMSG WRKLARGE,*QCSEMSGQ,QH=*QCSQHMSG                        16200000
+         B     SECEXIT                                                  16210000
+                                                                        16220000
+SECNORM  DS    0H                                                       16230000
+         MVC   FWORD,=A(RC00)     INDICATE SUCCESS                      16240000
+         B     SECEXIT            DONE                                  16250000
+                                                                        16260000
+SECEXIT  DS    0H                                                       16270000
+         LM    R2,R14,REGSAVE+8   RESTORE MAINLINE REGS                 16280000
+         ICM   R15,15,FWORD       REFLECT COMPLETION STATUS VIA CC      16290000
+         BR    R14                RETURN                                16300000
+                                                                        16310000
+         EJECT                                                          16320000
+***************************************************************         16330000
+*                                                                       16340000
+* ROUTINE: NULLSCAN                                                     16350000
+*                                                                       16360000
+* DESCRIPTION:                                                          16370000
+*                                                                       16380000
+*    This routine is used to detect input variables defined as          16390000
+*    require values (that is, are non-null) that have not been          16400000
+*    provided values in the SQL statement.                              16410000
+*                                                                       16420000
+*                                                                       16430000
+* ON ENTRY:                                                             16440000
+*                                                                       16450000
+*    R1 - addr of $NAVPARM origin                                       16460000
+*                                                                       16470000
+*                                                                       16480000
+* ON RETURN:                                                            16490000
+*                                                                       16500000
+*    R15 contains one of the following return codes                     16510000
+*                                                                       16520000
+*        RC00 - no NULL violations encountered                          16530000
+*                                                                       16540000
+*        RC04 - at least one column that requires a value from          16550000
+*               SQL statement did not acquire one                       16560000
+*                                                                       16570000
+***************************************************************         16580000
+                                                                        16590000
+NULLSCAN DS    0H                                                       16600000
+         STM   R0,R15,REGSAVE     PRESERVE MAINLINE REGS                16610000
+                                                                        16620000
+         USING $NAVPARM,R1        NAVPARM BASE                          16630000
+         LH    R3,IXRNVARS        NUMBER OF COLUMN/VARIABLE ENTRIes     16640000
+         LA    R6,IXRCOLDF        ORIGIN OF COLUMN/VARIABLE ENTRIes     16650000
+         USING IXRCOLDF,R6        CHOKE UP ON THE ADDRESSABILITY        16660000
+         DROP  R1                 $NAVPARM                              16670000
+                                                                        16680000
+         XC    FWORD,FWORD        RETCODE                               16690000
+                                                                        16700000
+         LA    R0,NTCNAMES        VIOLATIONS - COLUMN NAME LIST         16710000
+         ST    R0,NTCNEXT                                               16720000
+                                                                        16730000
+*--------------------------------------------------------------         16740000
+*   Examine use of all input column variables                           16750000
+*--------------------------------------------------------------         16760000
+                                                                        16770000
+NULNXT   DS    0H                                                       16780000
+         TM    IXRSTAT1,IXRS1INP  INPUT USAGE PERSISTS?                 16790000
+         BNO   NULADV             SKIP IF NOT (PREVIOUSLY RESOLVEd...)  16800000
+                                                                        16810000
+         L     R5,IXR@SCOL        ASSOCIATED SYSCOLUMNS ENTRY           16820000
+         USING SYSCOLS,R5         COLUMN ATTRIBUTES                     16830000
+         CLI   SCOLNULL,FALSE     NULL ALLOWED FOR COLUMN VARIABLE?     16840000
+         BNE   NULADV             NEXT COLUMN IF SO                     16850000
+                                                                        16860000
+         ICM   R2,15,IXR@CREF     COLUMN REFERENCE ATTACHED?            16870000
+         BZ    NULERROR           ERROR IF NOT                          16880000
+                                                                        16890000
+         TM    SQCFLAGS-SQCOLREF(R2),SQCF$SET+SQCF$VAL+SQCF$SA          16900000
+         BNZ   NULADV             ON TO THE NEXT COLUMN IF REFFED       16910000
+                                                                        16920000
+*--------------------------------------------------------------         16930000
+*   Column usage error, retain column name if space remains             16940000
+*--------------------------------------------------------------         16950000
+                                                                        16960000
+NULERROR DS    0H                                                       16970000
+         L     R15,NTCNEXT        NEXT AVAILABLE NAME SLOT              16980000
+         LA    R14,NTCNAMEF       END OF NAME ARRAY                     16990000
+         CR    R15,R14            SPACE REMAINS?                        17000000
+         BNL   NULADV             SKIP IF NOT                           17010000
+                                                                        17020000
+         MVC   0(L'SCOLNAME,R15),SCOLNAME                               17030000
+         LA    R15,L'SCOLNAME(,R15)                                     17040000
+         ST    R15,NTCNEXT        SAVE LOCATION OF FREE SLOT            17050000
+                                                                        17060000
+         MVC   FWORD,=A(RC04)     RETAIN ERROR INDICATION               17070000
+                                                                        17080000
+*--------------------------------------------------------------         17090000
+*   Advance to next column, process all entries                         17100000
+*--------------------------------------------------------------         17110000
+                                                                        17120000
+NULADV   DS    0H                                                       17130000
+         LA    R6,IXRCOLDF+IXRCDLEN  ADVANCE TO NEXT COLUMN             17140000
+         BCT   R3,NULNXT          PROCESS ALL COLUMNS                   17150000
+                                                                        17160000
+         LM    R1,R14,REGSAVE+4   RESTORE MAINLINE REGS                 17170000
+         ICM   R15,15,FWORD       REFLECT COMPLETION STATUS VIA CC      17180000
+         BR    R14                RETURN                                17190000
+         DROP  R5,R6              SYSCOLS, IXRCOLDF                     17200000
+                                                                        17210000
+         EJECT                                                          17220000
+***************************************************************         17230000
+*                                                                       17240000
+* ROUTINE: CLVLEN                                                       17250000
+*                                                                       17260000
+* DESCRIPTION:                                                          17270000
+*                                                                       17280000
+*    This routine is used to validate the column value length           17290000
+*    appearing in the SQL statement. The column value can               17300000
+*    be used in different context depending on the SQL query            17310000
+*    type.                                                              17320000
+*                                                                       17330000
+*    For the following SQL statement types, the column reference        17340000
+*    list address(es) is provided as an array.                          17350000
+*                                                                       17360000
+*    1. SELECT - SQSEXTRE   WHERE clause SARG node list                 17370000
+*                                                                       17380000
+*    2. INSERT - SQSAINSC   VALUES clause                               17390000
+*                                                                       17400000
+*    3. UPDATE - SQSASETS   SET clause                                  17410000
+*                SQSEXTRE   WHERE clause SARG node list                 17420000
+*                                                                       17430000
+*    4. DELETE - SQSEXTRE   WHERE clause SARG node list                 17440000
+*                                                                       17450000
+*                                                                       17460000
+* ON RETURN:                                                            17470000
+*                                                                       17480000
+*    R15 contains one of the following return codes                     17490000
+*                                                                       17500000
+*        RC00 - column value length is within the valid range           17510000
+*        RC04 - column value length exceeds VDB definition              17520000
+*                                                                       17530000
+***************************************************************         17540000
+                                                                        17550000
+CLVLEN   DS    0H                                                       17560000
+         STM   R0,R15,REGSAVE     PRESERVE MAINLINE REGS                17570000
+                                                                        17580000
+         USING SVARSECT,R5        SYSVARIABLE                           17590000
+         USING SYSCOLS,R3         SYSCOLUMN                             17600000
+         USING SQCOLREF,R4                                              17610000
+PFX      USING PREDENT,R2         PREDICATE LIST NODE - COMMON PFX      17620000
+BPT      USING SBPTERM,R2         BASIC PREDICATE FORMAT                17630000
+                                                                        17640000
+         LA    R0,ASSGNSRC-4      PREPARE FOR SOURCE TERM SCAN          17650000
+         ST    R0,FWORD           SAVE VALUE SOURCE LIST HEAD OFFSET    17660000
+                                                                        17670000
+*---------------------------------------------------------------        17680000
+*   Search all column value sources until first match                   17690000
+*---------------------------------------------------------------        17700000
+                                                                        17710000
+CLVADV   DS    0H                 ADVANCE TO NEXT VALUE LIST            17720000
+         L     R15,FWORD          CRP IN LIST HEAD OFFSET LIST          17730000
+         LA    R15,4(,R15)        ADVANCE TO NEXT ENTRY                 17740000
+         ST    R15,FWORD          RETAIN CRP FOR NEXT PASS              17750000
+         ICM   R14,15,0(R15)      END OF CANDIDATES?                    17760000
+         BZ    CLVFIN             SEARCH FAILS IF SO                    17770000
+                                                                        17780000
+         AL    R14,QCSSSMRY       LOCATE LIST HDR IN SEMANTIC SUMMARY   17790000
+         ICM   R2,15,0(R14)       ANY COLUMN/VALUE ENTRIES QUEUED?      17800000
+         BZ    CLVADV             TRY OTHER VALUE SOURCES IF NOT        17810000
+                                                                        17820000
+CLVLOOP  DS    0H                                                       17830000
+         CLI   PFX.PREDTYPE,PRED$BPE  BASIC PREDICATE?                  17840000
+         BE    CLVBP                  YES, COMPARE                      17850000
+         CLI   PFX.PREDTYPE,PRED$LIK  LIKE PREDICATE?                   17860000
+         BE    CLVBP                  YES, COMPARE                      17870000
+         CLI   PFX.PREDTYPE,PRED$SET  VALUE FROM SET CLAUSE?            17880000
+         BE    CLVBP                  YES, COMPARE                      17890000
+         B     CLVBPNXT                                                 17900000
+                                                                        17910000
+CLVBP    DS    0H                                                       17920000
+         TM    BPT.SBPVTYPE,SBPV$DFT                                    17930000
+         BO    CLVBPNXT           EXPLICIT NULL                         17940000
+                                                                        17950000
+         ICM   R4,15,BPT.SBPACOL  COLUMN REFERENCE                      17960000
+         BZ    CLVBPNXT                                                 17970000
+         ICM   R3,15,SQCSYSC      SYSCOLUMN ENTRY ADDR                  17980000
+         BZ    CLVBPNXT                                                 17990000
+                                                                        18000000
+         CLI   SCOLTYPE,SC$CHAR   COLUMN IS IN CHAR FORMAT?             18010000
+         BNE   CLVBPNXT                                                 18020000
+                                                                        18030000
+*---------------------------------------------------------              18040000
+*   Character datatypes, length test                                    18050000
+*---------------------------------------------------------              18060000
+                                                                        18070000
+         LH    R0,BPT.SBPLVAL     VALUE LENGTH                          18080000
+         ICM   R5,15,SQCSYSV      SVARSECT                              18090000
+         BZ    CLVBPNXT                                                 18100000
+                                                                        18110000
+         LA    R7,ATTRBLEN        ASSUME ATTRIBUTE VARIABLE             18120000
+         CLI   SVARUTYP,SVAR$ATT  ATTRIBUTE VARIABLE?                   18130000
+         BE    CLVCOMP                                                  18140000
+                                                                        18150000
+         LH    R7,SCOLLEN         RETRIEVE THE COLUMN LENGTH            18160000
+         LTR   R7,R7                                                    18170000
+         BNZ   CLVCOMP                                                  18180000
+         LH    R7,SVARLEN         GET VARIABLE LENGTH                   18190000
+         B     CLVCOMP                                                  18200000
+                                                                        18210000
+CLVCOMP  DS    0H                                                       18220000
+         CR    R0,R7                                                    18230000
+         BH    CLVMPERR           COLUMN VALUE LENGTH EXCEEDS DEF       18240000
+                                                                        18250000
+CLVBPNXT DS    0H                                                       18260000
+         ICM   R2,15,BPT.SBPLINK  ADVANCE TO NEXT NODE                  18270000
+         BNZ   CLVLOOP                                                  18280000
+         B     CLVADV                                                   18290000
+                                                                        18300000
+*--------------------------------------------------------------         18310000
+*   Return completion status to caller                                  18320000
+*--------------------------------------------------------------         18330000
+                                                                        18340000
+CLVFIN   DS    0H                                                       18350000
+         SR    R15,R15            SET NORMAL COMPLETION CODE            18360000
+         B     CLVEXIT                                                  18370000
+                                                                        18380000
+CLVMPERR DS    0H                                                       18390000
+         LR    R1,R2              SBPTERM FOR CLEX INFO                 18400000
+         LA    R15,RC04                                                 18410000
+                                                                        18420000
+CLVEXIT  DS    0H                                                       18430000
+         LM    R2,R14,REGSAVE+8   RESTORE MAINLINE REGS                 18440000
+         LTR   R15,R15            REFLECT COMPLETION STATUS VIA CC      18450000
+         BR    R14                RETURN                                18460000
+         DROP  R3,R4,R5                                                 18470000
+         DROP  PFX,BPT                                                  18480000
+                                                                        18490000
+         EJECT                                                          18500000
+***************************************************************         18510000
+*                                                                       18520000
+* ROUTINE: $DOCXSTN - Document navigational info access error           18530000
+*                                                                       18540000
+* DESCRIPTION:                                                          18550000
+*                                                                       18560000
+*    This routine is used to generate diagnostics in the form           18570000
+*    of message lines for error return codes from ISQXRSTN, the         18580000
+*    $NAVPARM entry completion routine.                                 18590000
+*                                                                       18600000
+*                                                                       18610000
+* ON ENTRY:                                                             18620000
+*                                                                       18630000
+*    R15 - ISQXRSTN service routine return code                         18640000
+*    R0  - reason code                                                  18650000
+*    R1  - $NAVPARM entry (IXRCOLDF) address                            18660000
+*                                                                       18670000
+***************************************************************         18680000
+                                                                        18690000
+$DOCXSTN DS    0H                                                       18700000
+         STM   R0,R15,REGSAVE     PRESERVE MAINLINE REGS                18710000
+         STM   R15,R0,DWORD       SERVICE ROUTINE RETCODE, RSNCODE      18720000
+                                                                        18730000
+         LR    R6,R1              NAVPARM ENTRY ADDRESS                 18740000
+         USING IXRCOLDF,R6        FAILING COLUMN/VARIABLE ENTRY         18750000
+                                                                        18760000
+         L     R5,IXR@SCOL        TABLE COLUMN DEFINITION               18770000
+         USING SYSCOLS,R5                                               18780000
+                                                                        18790000
+         L     R3,IXR@RVAR        LOCATE SYSVARIABLE                    18800000
+         USING SVARSECT,R3        ADDRESS DIAGNOSTIC COMPONENT FIELDS   18810000
+                                                                        18820000
+*--------------------------------------------------------------         18830000
+*   Generic failure msg identifying the column and variable             18840000
+*--------------------------------------------------------------         18850000
+                                                                        18860000
+         $MSG  179,FIELDS=(SCOLNAME,SVARNAME,(DWORD+0,4),(DWORD+4,4))   18870000
+                                                                        18880000
+*--------------------------------------------------------------         18890000
+*   Further qualify point of failure                                    18900000
+*--------------------------------------------------------------         18910000
+                                                                        18920000
+         L     R2,DWORD+0         REFRESH SERVICE RTN RETCODE           18930000
+         B     *+4(R2)            IDENTIFY POINT OF FAILURE             18940000
+         B     DXRET                 RC00 - DONE                        18950000
+         B     DXSTN                 RC04 - CANT LOCATE STN             18960000
+         B     DXSSET                RC08 - CANT LOCATE SSET RGN TREE   18970000
+         B     DXRGN                 RC12 - CANT LOCATE REGION ENTRY    18980000
+                                                                        18990000
+DXSTN    DS    0H                 UNABLE TO LOCATE STN                  19000000
+         LA    R2,157             SELECT APPROP MESSAGE NUMBER          19010000
+         LA    R4,IXRSCRNM        INCLUDE SCREEN (SET) NAME IN TEXT     19020000
+         LA    R7,L'IXRSCRNM      LENGTH OF SCREEN NAME                 19030000
+         B     DXQUALFY                                                 19040000
+                                                                        19050000
+DXSSET   DS    0H                 UNABLE TO ACCESS SCREEN (SET) RGN NET 19060000
+         LA    R2,156             SELECT APPROP MESSAGE NUMBER          19070000
+         LA    R4,IXRSCRNM        INCLUDE SCREEN (SET) NAME IN TEXT     19080000
+         LA    R7,L'IXRSCRNM      LENGTH OF SCREEN NAME                 19090000
+         B     DXQUALFY                                                 19100000
+                                                                        19110000
+DXRGN    DS    0H                 NAMED REGION IS NOT DEFINED           19120000
+         LA    R2,153             SELECT APPROP MESSAGE NUMBER          19130000
+         LA    R4,SVAREGN         INCLUDE REGION NAME IN TEXT           19140000
+         LA    R7,L'SVAREGN       LENGTH OF VARIABLE'S REGION NAME      19150000
+                                                                        19160000
+DXQUALFY DS    0H                 GENERATE DETAIL MESSAGE               19170000
+         $MSG  (R2),FIELDS=(((R4),(R7)))                                19180000
+                                                                        19190000
+*--------------------------------------------------------------         19200000
+*   Return to mainline                                                  19210000
+*--------------------------------------------------------------         19220000
+                                                                        19230000
+DXRET    DS    0H                                                       19240000
+         LM    R0,R14,REGSAVE     RESTORE MAINLINE REGS                 19250000
+         BR    R14                RETURN                                19260000
+         DROP  R3,R5,R6           SYSVARIABLE, SYSCOLUMN, IXRCOLDF      19270000
+                                                                        19280000
+         EJECT                                                          19290000
+***************************************************************         19300000
+*                                                                       19310000
+* ROUTINE: $DOCFAIL - Construct execution failure msgs                  19320000
+*                                                                       19330000
+* ON ENTRY:                                                             19340000
+*                                                                       19350000
+*    R1 - address of $NAVPARM                                           19360000
+*                                                                       19370000
+* ON EXIT:                                                              19380000
+*                                                                       19390000
+*    R0 - dimension (count) of msg array                                19400000
+*    R1 - address of msg array origin                                   19410000
+*                                                                       19420000
+***************************************************************         19430000
+                                                                        19440000
+$DOCFAIL DS    0H                                                       19450000
+         STM   R0,R15,REGSAVE                                           19460000
+         LR    R6,R1              NAVPARM CONTAINS DIAGNOSTIC INFO      19470000
+         USING $NAVPARM,R6                                              19480000
+                                                                        19490000
+*--------------------------------------------------------------         19500000
+*   General completion status includes retc and rsnc                    19510000
+*--------------------------------------------------------------         19520000
+                                                                        19530000
+         $MSG  901,               BUILD MESSAGE TEXT IN BUFFER         +19540000
+               FIELDS=(IXRETCOD,IXRSNCOD)                               19550000
+                                                                        19560000
+*--------------------------------------------------------------         19570000
+*   Diagnostics may identify a particular column/variable pair          19580000
+*--------------------------------------------------------------         19590000
+                                                                        19600000
+         ICM   R6,15,IXR@FALV     IDENTIFY FAILING VARIABLE             19610000
+         BZ    $DOCFXIT           NO VARIABLE IDENTIFIED                19620000
+         USING IXRCOLDF,R6        FAILING SYSCOL/SYSVAR                 19630000
+                                                                        19640000
+         $MSG  902,               BUILD MESSAGE TEXT IN BUFFER         +19650000
+               FIELDS=(IXRCDRET,IXRCDRSN)                               19660000
+                                                                        19670000
+         LA    R1,IXRCOLDF        R1 <== COLUMN / VAR ENTRY ORIGIN      19680000
+         BAS   R14,$$DOCVAR       DOCUMENT THE COLUMN, ETC.             19690000
+         DROP  R6                 $NAVPARM                              19700000
+                                                                        19710000
+*--------------------------------------------------------------         19720000
+*   Return to caller                                                    19730000
+*--------------------------------------------------------------         19740000
+                                                                        19750000
+$DOCFXIT DS    0H                                                       19760000
+         SR    R15,R15                                                  19770000
+         LM    R0,R14,REGSAVE                                           19780000
+         BR    R14                                                      19790000
+                                                                        19800000
+         EJECT                                                          19810000
+***************************************************************         19820000
+*                                                                       19830000
+* ROUTINE:  $DOCNORM - Document data normalization error                19840000
+*                                                                       19850000
+* DESCRIPTION:                                                          19860000
+*                                                                       19870000
+*    This routine is used to generate diagnostics in the                19880000
+*    form of message lines for error return codes from ISQVNORM,        19890000
+*    the preplan data normalization verification routine.               19900000
+*                                                                       19910000
+*                                                                       19920000
+* ON ENTRY:                                                             19930000
+*                                                                       19940000
+*    R15 - ISQVNORM return code                                         19950000
+*                                                                       19960000
+*    The VNRMDIAG diagnostic workarea is addressable                    19970000
+*                                                                       19980000
+***************************************************************         19990000
+                                                                        20000000
+$DOCNORM DS    0H                                                       20010000
+         STM   R0,R15,REGSAVE     PRESERVE CALLERS REGS                 20020000
+         ST    R15,FWORD          RETAIN RC VALUE                       20030000
+                                                                        20040000
+         CH    R15,=AL2(RC12)     RC KNOWN?                             20050000
+         BNH   *+6                ONWARD IF SO                          20060000
+         SR    R15,R15            SUBSTITUTE 'UNKNOWN' MSG              20070000
+         L     R2,VNEDETL(R15)    LOCATE ENTRY LENGTH/PTR               20080000
+                                                                        20090000
+         $MSG  (R2)               BUILD MESSAGE TEXT IN BUFFER          20100000
+                                                                        20110000
+*--------------------------------------------------------------         20120000
+*   Detailed diagnostics for normalization errors                       20130000
+*--------------------------------------------------------------         20140000
+                                                                        20150000
+         CLC   FWORD,=A(RC12)     DATA NORMALIZATION ERROR?             20160000
+         BNE   DNFNORM            DONE IF NOT                           20170000
+                                                                        20180000
+         $MSG  158,FIELDS=((*VNRSCRN1,L'IXRSCRNM),                     X20190000
+               (*VNRRGNM1,L'IXRSCRNM),                                 X20200000
+               (*VNRRGNM2,L'IXRSCRNM))                                  20210000
+                                                                        20220000
+DNFNORM  DS    0H                                                       20230000
+                                                                        20240000
+*--------------------------------------------------------------         20250000
+*   Return to caller                                                    20260000
+*--------------------------------------------------------------         20270000
+                                                                        20280000
+         LM    R0,R15,REGSAVE                                           20290000
+         BR    R14                                                      20300000
+                                                                        20310000
+*--------------------------------------------------------------         20320000
+*   ISQVNORM return code / message code relationships                   20330000
+*--------------------------------------------------------------         20340000
+                                                                        20350000
+VNEDETL  DC    F'151'                    RCXX - UNKNOWN RETURN CODE     20360000
+         DC    F'152'                    RC04 - INVALID NAVPARM         20370000
+         DC    F'154'                    RC08 - RGN NESTING EXCEEDS LIM 20380000
+         DC    F'155'                    RC12 - IMPLICIT JOIN           20390000
+                                                                        20400000
+         EJECT                                                          20410000
+***************************************************************         20420000
+*                                                                       20430000
+* ROUTINE:  $$DOCVAR - Generate variable detail block                   20440000
+*                                                                       20450000
+* ON ENTRY:                                                             20460000
+*                                                                       20470000
+*    R1 - $NAVPARM column/variable entry address                        20480000
+*                                                                       20490000
+* ON EXIT:                                                              20500000
+*                                                                       20510000
+*    N/A                                                                20520000
+*                                                                       20530000
+***************************************************************         20540000
+                                                                        20550000
+$$DOCVAR DS    0H                                                       20560000
+         STM   R0,R15,REGSAVEX    SAVE MAINLINE REGS                    20570000
+         LR    R6,R1              NAVPARM VAR ENTRY ORIGIN              20580000
+         USING IXRCOLDF,R6        ENTRY ADDRESSABILITY                  20590000
+                                                                        20600000
+         LM    R4,R5,=A($UNDEF$,L'$UNDEF$)                              20610000
+         ICM   R1,15,IXR@CDEF     SYSCOLUMN DEFINITION                  20620000
+         BZ    DVCOL              NOT FOUND                             20630000
+         LA    R4,TBCNAME-TBCOLDEF(R1)                                  20640000
+         LA    R5,L'TBCNAME                                             20650000
+                                                                        20660000
+DVCOL    DS    0H                                                       20670000
+         $MSG  953,FIELDS=(((R4),(R5)))  COLUMN NAME                    20680000
+                                                                        20690000
+         $MSG  954,FIELDS=(IXRSCRNM)     SCREEN NAME                    20700000
+                                                                        20710000
+         LM    R4,R5,=A($UNDEF$,L'$UNDEF$)                              20720000
+         ICM   R1,15,IXR@RVAR     LOCATE SYSVARIABLE                    20730000
+         BZ    DVRGN              NOT FOUND                             20740000
+         TM    SVAREGN-SVARSECT(R1),BF                                  20750000
+         BZ    DVRGN                                                    20760000
+         LA    R4,SVAREGN-SVARSECT(R1)                                  20770000
+         LA    R5,L'SVAREGN                                             20780000
+                                                                        20790000
+DVRGN    DS    0H                                                       20800000
+         $MSG  955,FIELDS=(((R4),(R5)))  REGION NAME                    20810000
+                                                                        20820000
+         LM    R4,R5,=A($UNDEF$,L'$UNDEF$)                              20830000
+         ICM   R1,15,IXR@RVAR     LOCATE SYSVARIABLE                    20840000
+         BZ    DVVAR              NOT FOUND                             20850000
+         LA    R4,SVARNAME-SVARSECT(R1)                                 20860000
+         LA    R5,L'SVARNAME                                            20870000
+                                                                        20880000
+DVVAR    DS    0H                                                       20890000
+         $MSG  956,FIELDS=(((R4),(R5)))  VARIABLE NAME                  20900000
+                                                                        20910000
+         LM    R0,R15,REGSAVEX                                          20920000
+         BR    R14                                                      20930000
+         DROP  R6                                                       20940000
+                                                                        20950000
+         EJECT                                                          20960000
+***************************************************************         20970000
+*                                                                       20980000
+*   Local read-only working storage                                     20990000
+*                                                                       21000000
+***************************************************************         21010000
+                                                                        21020000
+ASSGNSRC DS    0F                                                       21030000
+         DC    A(SQSAINSC-SQSEMAL)   VALUES CLAUSE        (INS)         21040000
+         DC    A(SQSASETS-SQSEMAL)   SET CLAUSE           (UPD)         21050000
+         DC    A(SQSEXTRE-SQSEMAL)   WHERE CLAUSE (SEL,UPD,DEL)         21060000
+         DC    A(0)                  END OF LIST                        21070000
+                                                                        21080000
+         DS    0F                                                       21090000
+$NULL$   DC    C'NULL'                                                  21100000
+$UNDEF$  DC    C'*undefined*'                                           21110000
+                                                                        21120000
+         LTORG ,                                                        21130000
+                                                                        21140000
+         EJECT                                                          21150000
+         SQLCODES ,                                                     21160000
+                                                                        21170000
+         EJECT                                                          21180000
+         PRINT NOGEN                                                    21190000
+         ICVT ,                                                         21200000
+         ITASK ,                                                        21210000
+         IPROJ ,                                                        21220000
+         END   ,                                                        21230000

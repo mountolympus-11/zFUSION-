@@ -1,0 +1,190 @@
+ISAFUADD TITLE '- Add Userid to active user entity structure'           00010000
+**<DOC-ON>******************************************************        00020000
+*                                                                       00030000
+* ROUTINE:  ISAFUADD - Add Userid to active user entity structure       00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This routine will update the active user entity structure          00080000
+*    on new logon requests.   If Multi-logons are not allowed,          00090000
+*    an attempt is made to retrieve an existing entity entry            00100000
+*    for this userid.  If entity entry is found,  allow access          00110000
+*    only if access from same LU. The user entity structure             00120000
+*    must be updated under control of the dispatcher lock.              00130000
+*                                                                       00140000
+*                                                                       00150000
+* Entry:  R1 contains the address of the parameter list                 00160000
+*            as follows:                                                00170000
+*                                                                       00180000
+*            +0 A(IUSER)     - Address of IUser block                   00190000
+*            +4 A(MsgBuffer) - Address of message buffer                00200000
+*            +8 Msgbuff len  - Length  of message buffer                00210000
+*                                                                       00220000
+* Exit:   Upon completion of the security request,  R15 will            00230000
+*         contain one of the following return codes:                    00240000
+*                                                                       00250000
+*             RC00 - Entity Add successful                              00260000
+*                                                                       00270000
+*             RC08 - Entity Add Failed                                  00280000
+*                                                                       00290000
+*             RC12 - Lock obtain Failed                                 00300000
+*                                                                       00310000
+**<DOC-OFF>*****************************************************        00320000
+                                                                        00330000
+****************************************************************        00340000
+*                                                                       00350000
+* MAINTENANCE:                                                          00360000
+*                                                                       00370000
+*   07/27/94  R. Colmone      Par# 133649                               00380000
+*      Initial Version                                                  00390000
+*                                                                       00400000
+****************************************************************        00410000
+                                                                        00420000
+         EJECT ,                                                        00430000
+         $ENTITY DSECT=YES        ENTITY SERVICE PLIST                  00440000
+                                                                        00450000
+         EJECT ,                                                        00460000
+         EQUS  ,                  GENERAL EQUATES                       00470000
+                                                                        00480000
+         EJECT ,                                                        00490000
+         #WORK ,                  READ/WRITE WORKAREA                   00500000
+WRK256   DS    XL256              GENERAL WORKAREA                      00510000
+MSGBUFFA DS    A                  ADDRESS OF MESSAGE BUFFER             00520000
+MSGBUFFL DS    F                  LENGTHH OF MESSAGE BUFFER             00530000
+                                                                        00540000
+FLAGS    DS    X                  FLAGS                                 00550000
+$LOCKED  EQU   X'80'                DISP LOCK ACQUIRED                  00560000
+                                                                        00570000
+         USRENTUD DSECT=NO        USER ENTITY USER DATA                 00580000
+                                                                        00590000
+$ENT_MFL $ENTITY MF=L             Entity Plist                          00600000
+                                                                        00610000
+         #ENDWORK ,               END OF WORKAREA                       00620000
+                                                                        00630000
+         $MSGDFT PREFIX=ICTPID,COMPID='SAF',TABLE=*#MSGS,              +00640000
+               PRINT=NOGEN,MF=(E,WRK256)                                00650000
+                                                                        00660000
+         EJECT ,                                                        00670000
+ISAFUADD #ENTER BASE=R12,PREG=R8                                        00680000
+                                                                        00690000
+         USING ITASK,R10          ITASK ADDRESSABILITY                  00700000
+         L     R9,TSKPCBC         PROCESS MODE                          00710000
+         USING IPCB,R9            IPCB  ADDRESSABILITY                  00720000
+                                                                        00730000
+*---------------------------------------------------------------        00740000
+*  Obtain passed parameters                                             00750000
+*---------------------------------------------------------------        00760000
+         LM    R5,R7,0(R8)        ADDRESS OF IUSER                      00770000
+         USING IUSER,R5           IUSER ADDRESSABILITY                  00780000
+                                                                        00790000
+         ST    R6,MSGBUFFA        SAVE MESSAGE BUFFER ADDRESS           00800000
+         ST    R7,MSGBUFFL        SAVE MESSAGE BUFFER LENGTH            00810000
+                                                                        00820000
+*---------------------------------------------------------------        00830000
+*  Obtain dispatcher lock                                               00840000
+*---------------------------------------------------------------        00850000
+         $SER  OBTAIN,DISP        OBTAIN DISPATCHER LOCK                00860000
+         B     *+4(R15)           BRANCH ON RETURN CODE                 00870000
+         B     LOCK_ACQ           LOCK ACQUIRED                         00880000
+         B     LOCK_OWN           LOCK ALREADY OWNED                    00890000
+         B     ERR_LOCK           ERROR ACQUIRING LOCK                  00900000
+                                                                        00910000
+LOCK_ACQ DS    0H                                                       00920000
+         OI    FLAGS,$LOCKED      DISP LOCK ACQUIRED                    00930000
+                                                                        00940000
+LOCK_OWN DS    0H                                                       00950000
+                                                                        00960000
+*---------------------------------------------------------------        00970000
+*  IF MULTIPLE LOGONS NOT ALLOWED,  LOCATE ENTITY ENTRY FOR USER        00980000
+*  AND DETERMINE IF LOGON IS FROM ANOTHER TASK.                         00990000
+*---------------------------------------------------------------        01000000
+         TM    ICTSTAT4,ICT4$MLG  MULTIPLE LOGONS ALLOWED               01010000
+         BO    ADD_ENT            YES, CONTINUE WITH ENTITY ADD         01020000
+                                                                        01030000
+         $ENTITY EXTR,            LOCATE USER ID                       +01040000
+               ANCHOR=ICTUSERE,                                        +01050000
+               ENTITY=(USRNAME,L'USRNAME),                             +01060000
+               USERDATA=USRENTUD,                                      +01070000
+               MF=(E,$ENT_MFL)                                          01080000
+         BNZ   ADD_ENT            NOT FOUND, CONTINUE W/ ADD            01090000
+                                                                        01100000
+         L     R2,UUDITASK        ADDRESS OF ITASK FOR USER             01110000
+X        USING ITASK,R2           TEMP ADDRESSABILITY                   01120000
+                                                                        01130000
+         CLC   TSKNAME,X.TSKNAME  LOGON FROM SAME TASK                  01140000
+         BE    ADD_ENT            YES,  CONTINUE WITH LOGON             01150000
+                                                                        01160000
+         $MSG  003,               ISSUE ALREADY LOGGED ON MESSAGE      +01170000
+               FIELDS=(USRNAME,X.TSKNAME),                             +01180000
+               MSGID=NO,                                               +01190000
+               DEST=$BUFFER,                                           +01200000
+               BUFR=*MSGBUFFA,                                         +01210000
+               BUFL=*MSGBUFFL                                           01220000
+                                                                        01230000
+         LA    R3,RC08            SET ERROR RETURN CONDITION            01240000
+         B     REL_LOCK           RELEASE DISP LOCK                     01250000
+                                                                        01260000
+         DROP  X                  ITASK                                 01270000
+                                                                        01280000
+*---------------------------------------------------------------        01290000
+*  Construct Entity Userdata and Add user entity                        01300000
+*---------------------------------------------------------------        01310000
+ADD_ENT  DS    0H                                                       01320000
+         ST    R10,UUDITASK       ADDRESS OF ITASK                      01330000
+         ST    R5,UUDIUSER        ADDRESS OF IUSER                      01340000
+         MVC   UUDUPROC,PCBNAME   ADDRESS OF USER PCB                   01350000
+                                                                        01360000
+         $ENTITY ADD,             ADD USERID TO ENTITY                 +01370000
+               ANCHOR=ICTUSERE,                                        +01380000
+               ENTITY=(USRNAME,L'USRNAME),                             +01390000
+               TOKEN=USRUETKN,                                         +01400000
+               USERDATA=USRENTUD,                                      +01410000
+               MF=(E,$ENT_MFL)                                          01420000
+                                                                        01430000
+         LR    R3,R15             SAVE RETURN CODE                      01440000
+                                                                        01450000
+*---------------------------------------------------------------        01460000
+*  Release lock if previously obtained                                  01470000
+*---------------------------------------------------------------        01480000
+REL_LOCK DS    0H                                                       01490000
+         TM    FLAGS,$LOCKED      LOCK ACQUIRED                         01500000
+         BZ    RETURN             NO, RETURN                            01510000
+                                                                        01520000
+         $SER  RELEASE,DISP       RELEASE DISP LOCK                     01530000
+                                                                        01540000
+RETURN   DS    0H                                                       01550000
+         LTR   R15,R3             ENTITY SUCCESSFULL?                   01560000
+         BZ    RET_EXIT           YES, RETURN                           01570000
+         B     ERR_ENT            NO,  ENTITY ERROR                     01580000
+                                                                        01590000
+*---------------------------------------------------------------        01600000
+*   ERROR ROUTINES                                                      01610000
+*---------------------------------------------------------------        01620000
+ERR_LOCK DS    0H                                                       01630000
+         LA    R15,RC12           LOCK ERROR                            01640000
+         B     RET_EXIT                                                 01650000
+                                                                        01660000
+ERR_ENT  DS    0H                                                       01670000
+         LA    R15,RC08           ENTITY ERROR                          01680000
+         B     RET_EXIT                                                 01690000
+                                                                        01700000
+RET_EXIT DS    0H                                                       01710000
+         #EXIT ,                  RETURN                                01720000
+                                                                        01730000
+         EJECT ,                                                        01740000
+****************************************************************        01750000
+*                                                                       01760000
+*  CONSTANTS, LITERALS, AND MAPPINGS                                    01770000
+*                                                                       01780000
+****************************************************************        01790000
+                                                                        01800000
+         LTORG ,                                                        01810000
+                                                                        01820000
+         PRINT NOGEN                                                    01830000
+         ICVT  ,                                                        01840000
+         ITASK ,                                                        01850000
+         IPCB  ,                                                        01860000
+         IUSER ,                                                        01870000
+         PRINT GEN                                                      01880000
+                                                                        01890000
+         END   ,                                                        01900000

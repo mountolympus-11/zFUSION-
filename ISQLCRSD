@@ -1,0 +1,414 @@
+ISQLCRSD TITLE '- CREATE SQL SELECT RESULT SET'                         00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE: ISQLCRSD - Create SQL result set definition                  00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This routine accepts a SQL semantic summary (SQLSEMAL)             00080000
+*    defining a SQL SELECT operation, and a description of one          00090000
+*    or more base tables referenced in the query in TBCOLDEF            00100000
+*    ptr array format. It generates a "result set definition" -         00110000
+*    a TBCOLDEF pointer array defining the result set suitable          00120000
+*    for use in a subsequent TBCREATE operation.                        00130000
+*                                                                       00140000
+*    The result set definition (RSD) describes only the column          00150000
+*    content of the result set.  It does not include index (key)        00160000
+*    information, etc.                                                  00170000
+*                                                                       00180000
+*    If the SQL request is of the form "SELECT * FROM <table>"          00190000
+*    the base table description provided can itself serve as            00200000
+*    the result set definition.  This condition is indicated by         00210000
+*    return code - no additional storage is allocated.                  00220000
+*                                                                       00230000
+*    Otherwise, the RSD is created in a storage area acquired           00240000
+*    via $GETSTOR assigning storage ownerwhip as designated by          00250000
+*    the caller who is also responsible for freeing the area.           00260000
+*    (This can be done immediately after a successful TBCREATE,         00270000
+*    if desired.)  The RSC consists of a TBCOLDEF pointer array         00280000
+*    and associated TBCOLDEF entries.                                   00290000
+*                                                                       00300000
+*                                                                       00310000
+* NOTES:                                                                00320000
+*                                                                       00330000
+*    - prototype                                                        00340000
+*                                                                       00350000
+*    - only one table now considered                                    00360000
+*                                                                       00370000
+*    - simple column reference only                                     00380000
+*                                                                       00390000
+*    - consider inclusion of atomic column in result set                00400000
+*      appendage for any column referenced in a column exp              00410000
+*                                                                       00420000
+*                                                                       00430000
+* ON ENTRY:                                                             00440000
+*                                                                       00450000
+*    R1  contains the address of a request/response block               00460000
+*        described by the CRSDP mapping                                 00470000
+*                                                                       00480000
+*                                                                       00490000
+* ON EXIT:                                                              00500000
+*                                                                       00510000
+*    R15 contains one of the following return codes.                    00520000
+*    R0  contains a reason code where applicable or zero.               00530000
+*                                                                       00540000
+*        RC00 - A result set description consisting of a                00550000
+*               TBCOLDEF pointer array and corresponding                00560000
+*               entries has been generated in $GETSTOR                  00570000
+*               storage. Caller assumes $RETSTOR obligation.            00580000
+*               *RETURN* fields define the result set.                  00590000
+*                                                                       00600000
+*        RC04 - The source request is of the form                       00610000
+*               "SELECT * FROM <table>".  The base table                00620000
+*               definition provided in CRSDP is suitable                00630000
+*               for creation of the result set as is.                   00640000
+*               *RETURN* fields define the result set.                  00650000
+*                                                                       00660000
+*        RC08 - Column reference error.  A column named appearing       00670000
+*               in either the SELECT <column-list> or in the            00680000
+*               search argument is not defined in a base table.         00690000
+*                                                                       00700000
+*               R1 contains the address of the invalid SQCOLREF         00710000
+*                                                                       00720000
+*        RC12 - Request error.  The semantic summary does not           00730000
+*               describe a SELECT operation, or is otherwise            00740000
+*               in error, etc.                                          00750000
+*                                                                       00760000
+**<DOC-OFF>****************************************************         00770000
+                                                                        00780000
+         EJECT                                                          00790000
+***************************************************************         00800000
+*                                                                       00810000
+* Maintenance:                                                          00820000
+*                                                                       00830000
+*    02/17/95 R. Turgeon         ODBC support                           00840000
+*             Initial version                                           00850000
+*                                                                       00860000
+***************************************************************         00870000
+                                                                        00880000
+         EJECT                                                          00890000
+         #WORK ,                                                        00900000
+                                                                        00910000
+REGSAVE  DS    16F                LOCAL SUBROUTINE SAVEAREA             00920000
+                                                                        00930000
+         #ENDWORK                                                       00940000
+                                                                        00950000
+         EJECT                                                          00960000
+         CRSDP                    RSD CREATE REQUEST/RESPONSE BLOCK     00970000
+                                                                        00980000
+         EJECT                                                          00990000
+         SQLSEMAL ,               SQL SEMANTIC SUMMARY                  01000000
+                                                                        01010000
+         EJECT                                                          01020000
+         @TBCOLDF ,               TABLE COLUMN DEFINTION                01030000
+                                                                        01040000
+         EJECT                                                          01050000
+         EQUS  ,                                                        01060000
+                                                                        01070000
+         EJECT                                                          01080000
+ISQLCRSD #ENTER PREG=R9                                                 01090000
+                                                                        01100000
+         USING CRSDP,R9                                                 01110000
+                                                                        01120000
+         EJECT                                                          01130000
+**<DOC-ON>*****************************************************         01140000
+*                                                                       01150000
+*   General Initialization - If the query is simple (SELECT *           01160000
+*   FROM ...)  there is no need for a new RSD; the base table           01170000
+*   definition can be used as is.                                       01180000
+*                                                                       01190000
+*   Otherwise, allocate a working storage area large enough to          01200000
+*   contain the required TBCOLDEF pointer array and TBCOLDEF            01210000
+*   entries.  Note that the TBCOLDEF entries present in the             01220000
+*   base input table definitions are used directly and no               01230000
+*   copies are made.                                                    01240000
+*                                                                       01250000
+*   Column references found in search argument predicates that          01260000
+*   have not been predetermined to be categorically true or             01270000
+*   false require membership in the result set (in this                 01280000
+*   implementation).  These columns are appended to the end of          01290000
+*   the result set proper and are not visible to the requester.         01300000
+*                                                                       01310000
+*   The ceiling of the total space (# TBCOLDEFs) required for           01320000
+*   the RSD TBCOLDEF pointer array can be computed by adding            01330000
+*   the number of entries in the SELECT <column-list> to the            01340000
+*   number of column references made on behalf of a search              01350000
+*   argument predicate.  This approximation is inflated in a            01360000
+*   couple of ways.  First, the SELECT <comma-list> may contain         01370000
+*   duplicate column references.  Also a column reference may           01380000
+*   occur in both the <column-list> and in search argument              01390000
+*   predicates.                                                         01400000
+*                                                                       01410000
+**<DOC-OFF>****************************************************         01420000
+                                                                        01430000
+         L     R7,CRSDSMRY        QUERY SEMANTIC SUMMARY                01440000
+         USING SQSEMAL,R7         LIFE OF FUNCTION                      01450000
+         CLI   SQSQUERY,SQSQ_SEL  A SELECT REQUEST?                     01460000
+         BNE   ERR_REQ            NOT OUR CONCERN OTHERWISE             01470000
+                                                                        01480000
+         ICM   R2,15,SQSASELC+8   LENGTH OF <COLUMN-LIST>               01490000
+         BNZ   TALLYCOL           SELECT * FROM <TABLE> IF ZERO         01500000
+                                                                        01510000
+*--------------------------------------------------------------         01520000
+*   Reflect base table structure as result set                          01530000
+*--------------------------------------------------------------         01540000
+                                                                        01550000
+         ICM   R4,15,CRSDTBL@     FIRST ELIGIBLE TABLE                  01560000
+         BZ    ERR_REQ            REQUEST LIST IN ERROR                 01570000
+         USING CRSTREF,R4         TABLE ENTRY FORMAT                    01580000
+         MVC   CRSDPTR@,CRSTCOL@  BASE TABLE TBCOLDEF PTR ARRAY         01590000
+         MVC   CRSDRSC#,CRSTCOL#  ALL BASE COLS IN RESULT SET           01600000
+         MVC   CRSDTOT#,CRSTCOL#  NO HIDDEN / EXTRA COLUMNS             01610000
+         B     WRN_STAR                                                 01620000
+                                                                        01630000
+*--------------------------------------------------------------         01640000
+*   Determine upper limit on number of result set columns               01650000
+*--------------------------------------------------------------         01660000
+                                                                        01670000
+TALLYCOL DS    0H                 TALLY RESULT SET COLUMN REQUIREMENTS  01680000
+         SR    R3,R3              SARG PREDICATE COLUMN REFERENCES      01690000
+         ICM   R6,15,SQSACOLS     GENERIC REFERENCES TO COLUMNS         01700000
+         USING SQCOLREF,R6        CONVENIENTLY FOUND IN A SINGLE LIST   01710000
+                                                                        01720000
+TALLYSCN DS    0H                 SCAN ALL COLUMN REFS                  01730000
+         ICM   R0,3,SQCUCNTB      COLUMN APPEARS IN SARG?               01740000
+         BZ    *+8                SKIP IF NOT                           01750000
+         LA    R3,1(,R3)          ELSE BUMP TBCOLDEF COUNT ACCORDINGLY  01760000
+         ICM   R6,15,SQCOLINK     ADVANCE TO NEXT COLUMN                01770000
+         BNZ   TALLYSCN           AGAIN                                 01780000
+         DROP  R6                 SQCOLREF                              01790000
+                                                                        01800000
+*--------------------------------------------------------------         01810000
+*   Acquire storage for RSD TBCOLDEF ptr array                          01820000
+*--------------------------------------------------------------         01830000
+                                                                        01840000
+         LA    R1,0(R2,R3)        TOTAL RESULT SET COLUMN REQUIREMENT   01850000
+         SLL   R1,2               POINTER FOR EACH COLUMN               01860000
+                                                                        01870000
+         $GETSTOR (R1),OWNER=*CRSDOWNR   ACQUIRE WORKAREA               01880000
+                                                                        01890000
+         LR    R5,R1              CURRENT POSITION IN POINTER ARRAY     01900000
+         ST    R5,CRSDPTR@        RETURN POINTER ARRAY ORIGIN           01910000
+                                                                        01920000
+         EJECT                                                          01930000
+***************************************************************         01940000
+*                                                                       01950000
+*   Generate RSD segment for the result set proper composed             01960000
+*   from the SELECT <column-list>.  Note that SQREFP will               01970000
+*   contain table reference information in the future.                  01980000
+*                                                                       01990000
+***************************************************************         02000000
+                                                                        02010000
+         L     R6,SQSASELC+0      RUN THE SELET <COLUMN-LIST>           02020000
+         USING SQREFP,R6          SYNTACTIC ELEMENT FORMAT              02030000
+                                                                        02040000
+SELNXCOL DS    0H                                                       02050000
+         L     R1,SQRNODE         R1 <== ASSOCIATED COLUMN SUMMARY NODE 02060000
+         BAS   R14,LOCDEF         LOCATE ASSOCIATED TBCOLDEF (RET R1)   02070000
+         LTR   R15,R15            FOUND AS EXPECTED?                    02080000
+         BNZ   ERR_CREF           INPUT PREVIOUSLY VALIDATED - SERIOUS  02090000
+                                                                        02100000
+*--------------------------------------------------------------         02110000
+*   Determine if column is already a member of the RSD                  02120000
+*--------------------------------------------------------------         02130000
+                                                                        02140000
+         L     R2,CRSDPTR@        SCAN FROM START OF RSD                02150000
+         LA    R14,4              LENGTH OF EACH PTR                    02160000
+         LR    R15,R5             BXLE SCAN LIMIT                       02170000
+                                                                        02180000
+SELDUPS  DS    0H                 SCAN RSD                              02190000
+         C     R1,0(,R2)          PREVIOUSLY ASSIGNED RSD MEMBERSHIP?   02200000
+         BE    SELADV             DONE HERE IF SO                       02210000
+         BXLE  R2,R14,SELDUPS     CONTINUE THE SCAN IF NOT              02220000
+                                                                        02230000
+*--------------------------------------------------------------         02240000
+*   Add column to the RSD - increment result set column count           02250000
+*--------------------------------------------------------------         02260000
+                                                                        02270000
+         ST    R1,0(,R5)          TBCOLDEF SEQUENCED IN PTR ARRAY       02280000
+         LA    R5,4(,R5)          UPDATE FREE PTR ADDRESS               02290000
+                                                                        02300000
+         L     R15,CRSDRSC#       COLUMNS IN RESULT SET                 02310000
+         LA    R15,1(,R15)        ACCOUNT FOR THIS ENTRY                02320000
+         ST    R15,CRSDRSC#                                             02330000
+                                                                        02340000
+SELADV   DS    0H                                                       02350000
+         ICM   R6,15,SQRLINK      ADVANCE TO NEXT <COLUMN-LIST> ENTRY   02360000
+         BNZ   SELNXCOL           PROCESS ENTIRE LIST                   02370000
+         DROP  R6                 SQREFP                                02380000
+                                                                        02390000
+***************************************************************         02400000
+*                                                                       02410000
+*   Now, for each column reference found in the search argument,        02420000
+*   acquire the associated TBCOLDEF but add it to the RSD only          02430000
+*   if the column has not been previously referenced in the             02440000
+*   <column-list> or in an earlier predicate.  Predicates that          02450000
+*   are either categorically true or false are bypassed.                02460000
+*                                                                       02470000
+***************************************************************         02480000
+                                                                        02490000
+         MVC   CRSDTOT#,CRSDRSC#  TOTAL COLUMNS = RESULT SET COLUMNS    02500000
+         ICM   R6,15,SQSEXTRE     LOCATE SEARCH ARGUMENT                02510000
+         BZ    NORMRET            NO SEARCH ARGUMENT PROVIDED           02520000
+                                                                        02530000
+PFX      USING PREDENT,R6         PREDICATE LIST COMMON PREFIX          02540000
+BPT      USING SBPTERM,R6         BASIC PREDICATE FORMAT                02550000
+                                                                        02560000
+SAPRED   DS    0H                 LOCATE COLUMN REF ENTRIES             02570000
+         CLI   PFX.PREDTYPE,PRED$BPE    BASIC PREDICATE?                02580000
+         BE    SATRUTHV                                                 02590000
+         CLI   PFX.PREDTYPE,PRED$LIK    LIKE PREDICATE?                 02600000
+         BNE   SADVANCE                                                 02610000
+                                                                        02620000
+SATRUTHV DS    0H                                                       02630000
+         CLI   PFX.PREDTV,0       TRUTH VALUE ASSIGNED?                 02640000
+         BNE   SADVANCE           NOT OF INTEREST IF SO                 02650000
+                                                                        02660000
+*--------------------------------------------------------------         02670000
+*   Acquire TBCOLDEF associated with referenced column                  02680000
+*--------------------------------------------------------------         02690000
+                                                                        02700000
+         L     R1,BPT.SBPACOL     R1 <== ASSOCIATED COLUMN SUMMARY NODE 02710000
+         BAS   R14,LOCDEF         LOCATE ASSOCIATED TBCOLDEF (RET R1)   02720000
+         LTR   R15,R15            FOUND AND RETURNED IN R1 AS EXPECTED? 02730000
+         BNZ   ERR_CREF           INPUT PREVIOUSLY VALIDATED - SERIOUS  02740000
+                                                                        02750000
+*--------------------------------------------------------------         02760000
+*   Determine if column is already a member of the RSD                  02770000
+*--------------------------------------------------------------         02780000
+                                                                        02790000
+         L     R2,CRSDPTR@        SCAN FROM START OF RSD                02800000
+         LA    R14,4              LENGTH OF EACH PTR                    02810000
+         LR    R15,R5             BXLE SCAN LIMIT                       02820000
+                                                                        02830000
+SARSDSCN DS    0H                 SCAN RSD                              02840000
+         C     R1,0(,R2)          PREVIOUSLY ASSIGNED RSD MEMBERSHIP?   02850000
+         BE    SADVANCE           DONE HERE IF SO                       02860000
+         BXLE  R2,R14,SARSDSCN    CONTINUE THE SCAN IF NOT              02870000
+                                                                        02880000
+*--------------------------------------------------------------         02890000
+*   Add new column to the RSD - adjust column count                     02900000
+*--------------------------------------------------------------         02910000
+                                                                        02920000
+         ST    R1,0(,R5)          TBCOLDEF SEQUENCED IN PTR ARRAY       02930000
+         LA    R5,4(,R5)          UPDATE FREE PTR ADDRESS               02940000
+                                                                        02950000
+         L     R15,CRSDTOT#       TOTAL COLUMNS IN RSD                  02960000
+         LA    R15,1(,R15)        ACCOUNT FOR THIS ENTRY                02970000
+         ST    R15,CRSDTOT#                                             02980000
+                                                                        02990000
+SADVANCE DS    0H                                                       03000000
+         ICM   R6,15,PFX.PREDLINK NEXT TERM IN SEACH ARGUMENT           03010000
+         BNZ   SAPRED             ACCOUNT FOR ALL COLUMN REFS           03020000
+         DROP  PFX,BPT            PREDENT, SBPTERM                      03030000
+                                                                        03040000
+         EJECT                                                          03050000
+***************************************************************         03060000
+*                                                                       03070000
+*   RETURN COMPLETION STATUS TO CALLER                                  03080000
+*                                                                       03090000
+***************************************************************         03100000
+                                                                        03110000
+NORMRET  DS    0H                                                       03120000
+         LA    R15,RC00           RESULT SET DEFINITION COMPLETE        03130000
+         SR    R0,R0              REASON CODE NOT DEFINED               03140000
+         B     EXIT               DONE                                  03150000
+                                                                        03160000
+WRN_STAR DS    0H                 SELECT * FROM <TABLE>                 03170000
+         LA    R15,RC04           NO ASSISTANCE REQUIRED                03180000
+         SR    R0,R0              REASON CODE NOT DEFINED               03190000
+         B     EXIT               DONE                                  03200000
+                                                                        03210000
+ERR_CREF DS    0H                 INVALID COLUMN REFERENCE              03220000
+         LA    R15,RC08           INDICATE STATEMENT ERROR              03230000
+         SR    R0,R0              REASON CODE NOT DEFINED               03240000
+         B     EXIT               R1 <== SQCOLREF NODE IN ERROR         03250000
+                                                                        03260000
+ERR_REQ  DS    0H                 INVALID REQUEST, ETC.                 03270000
+         LA    R15,RC12           INDICATE FAILURE                      03280000
+         SR    R0,R0              REASON CODE NOT DEFINED               03290000
+                                                                        03300000
+EXIT     DS    0H                                                       03310000
+         #EXIT                                                          03320000
+                                                                        03330000
+         EJECT                                                          03340000
+***************************************************************         03350000
+*                                                                       03360000
+* ROUTINE:  LOCDEF - locate TBCOLDEF defining table column              03370000
+*                                                                       03380000
+* ON ENTRY:                                                             03390000
+*                                                                       03400000
+*    R1  contains the address of the SQCOLREF node designating          03410000
+*        a table column                                                 03420000
+*                                                                       03430000
+*    CRSDP is addressable                                               03440000
+*                                                                       03450000
+*                                                                       03460000
+* ON EXIT:                                                              03470000
+*                                                                       03480000
+*    R15 contains one of the following return codes                     03490000
+*                                                                       03500000
+*        RC00 - TBCOLDEF located and returned in R1                     03510000
+*        RC04 - TBCOLDEF not found, SQCOLREF returned in R1             03520000
+*                                                                       03530000
+***************************************************************         03540000
+                                                                        03550000
+LOCDEF   DS    0H                                                       03560000
+         STM   R0,R15,REGSAVE     PRESERVE MAINLINE REGS                03570000
+                                                                        03580000
+CREF     USING SQCOLREF,R1        GENERIC COLUMN REFERENCE              03590000
+                                                                        03600000
+         ICM   R4,15,CRSDTBL@     FIRST ELIGIBLE TABLE                  03610000
+         BZ    LOCFAIL            REQUEST LIST IN ERROR                 03620000
+         USING CRSTREF,R4         TABLE ENTRY FORMAT                    03630000
+                                                                        03640000
+         ICM   R3,15,CRSTCOL@     TBCOLDEF POINTER ARRAY ORIGIN         03650000
+         BZ    LOCFAIL            REQUEST LIST IN ERROR                 03660000
+         L     R2,CRSTCOL#        NUMBER OF ENTRIES                     03670000
+                                                                        03680000
+*--------------------------------------------------------------         03690000
+*   Locate matching TBCOLDEF                                            03700000
+*--------------------------------------------------------------         03710000
+                                                                        03720000
+LOCTSCAN DS    0H                                                       03730000
+         L     R5,0(,R3)          LOCATE TBCOLDEF ENTRY                 03740000
+         USING TBCOLDEF,R5        PREPARE FOR ENTRY SCAN                03750000
+                                                                        03760000
+         CLC   TBCNAME,CREF.SQCOLNM   MATCHING COLUMN NAME?             03770000
+         BE    LOCHIT                                                   03780000
+         CLC   TBCSNAME,CREF.SQCOLNM  MATCHING SHORT NAME?              03790000
+         BE    LOCHIT                                                   03800000
+                                                                        03810000
+         LA    R3,4(,R3)          ADVANCE TO NEXT TBCOLDEF ENTRY PTR    03820000
+         BCT   R2,LOCTSCAN        COUNT DOWN                            03830000
+         B     LOCFAIL            COLUMN NAME NOT MATCHED               03840000
+                                                                        03850000
+*--------------------------------------------------------------         03860000
+*   Return TBCOLDEF and/or completion status to caller                  03870000
+*--------------------------------------------------------------         03880000
+                                                                        03890000
+LOCHIT   DS    0H                                                       03900000
+         LA    R15,RC00           INDICATE SUCCESS                      03910000
+         LA    R1,TBCOLDEF        RETURN MATCHING TBCOLDEF PTR          03920000
+         B     LOCRET             DONE                                  03930000
+                                                                        03940000
+LOCFAIL  DS    0H                                                       03950000
+         LA    R15,RC04           INDICATE FAILURE                      03960000
+                                                                        03970000
+LOCRET   DS    0H                                                       03980000
+         LM    R2,R14,REGSAVE+8   RESTORE MAININE REGS                  03990000
+         BR    R14                RETURN                                04000000
+         DROP  CREF,R5,R4         SQCOLREF, TBCOLDEF, CRSTREF           04010000
+                                                                        04020000
+         EJECT                                                          04030000
+***************************************************************         04040000
+*                                                                       04050000
+*   Local read-only working storage                                     04060000
+*                                                                       04070000
+***************************************************************         04080000
+                                                                        04090000
+         LTORG ,                                                        04100000
+                                                                        04110000
+         PRINT NOGEN                                                    04120000
+         ICVT  ,                  ICVT                                  04130000
+         END   ,                                                        04140000

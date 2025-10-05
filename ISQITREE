@@ -1,0 +1,531 @@
+ISQITREE TITLE '- GENERATE ITREE FROM STATEMENT ORDER SEARCH ARG'       00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE: ISQITREE - Create ITREE from SQL statement search arg        00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    The function of this routine is to convert a search                00080000
+*    argument presented in statement order into an executable           00090000
+*    (via an interpreter) instruction/execution tree (ITREE).           00100000
+*    The ITREE is a binary tree - its leaves are predicates             00110000
+*    joined by the customary AND and OR connectors.  NOTs are           00120000
+*    pushed down into the predicates.                                   00130000
+*                                                                       00140000
+*    ???  move #CLEX* into common PREDENT (rename desirable)            00150000
+*    ???  so that ERR-CHN can identify element in error                 00160000
+*                                                                       00170000
+*                                                                       00180000
+*    Frank Snow ... -------------------------------------------         00190000
+*                                                                       00200000
+*    THIS ROUTINE PROCESSES THE PREDICTATE QUEUE BUILT BY THE           00210000
+*    PARSE ROUTINE INTO AN EXECUTABLE READY PREDICATE TREE.             00220000
+*                                                                       00230000
+*    THE INITIAL PHASE CONCENTRATES ON BUILDING THE TREE. THIS          00240000
+*    IS ACCOMPLISHED BY BUILDING A PREDICATE STACK CONSISTING           00250000
+*    OF SIMPLE PREDICATES (OF THE FORM A=1, C>3, ETC.) OR               00260000
+*    COMPLEX PREDICATES WHICH ARE REALLY FULL EXPRESSIONS OF            00270000
+*    CONNECTORS AND SIMPLE PREDICATES OR EXPRESSIONS. A                 00280000
+*    CONNECTOR STACK IS ALSO BUILT FOR EACH CONNECTOR FOUND IN          00290000
+*    THE INPUT PARSED LIST. AS A CONNECTOR IS TO BE PUT ON THE          00300000
+*    CONNECTOR STACK A DECISSION IS MADE AS TO THE "TIGHTNESS           00310000
+*    OF THE BIND" OF THAT CONNECTOR. THIS MEANS IF THE LEVEL OF         00320000
+*    THE CONNECTOR IS LOWER THEN IT IS A TIGHTER BIND AND THE           00330000
+*    TWO STACKS MUST BE CLEARED OF ALL LOOSER BINDS.  CLEARING          00340000
+*    THE STACKS IS DONE BY POPING THE CONNECTOR STACK AND TWICE         00350000
+*    POPING THE PREDICATE STACK AND THEN PUSHING THIS EXPRESION         00360000
+*    ONTO THE PREDICATE STACK. IF A CONNECTOR IS AT A HIGHER            00370000
+*    LEVEL THEN IT IS A LOOSER BIND AND IS SIMPLY PUSHED ONTO           00380000
+*    THE CONNECTOR STACK.                                               00390000
+*                                                                       00400000
+*    AS CONNECTORS ARE POPPED OFF THE CONNECTOR STACK, IF A NOT         00410000
+*    CONNECTOR IS SEEN THEN A FLAG BYTE IS SET IT WHATEVER IS           00420000
+*    AT THE TOP OF THE PREDICATE STACK (THIS COULD BE A SIMPLE          00430000
+*    PREDICATE OR OR A CONNECTOR PART OF AN EXPRESSION.                 00440000
+*                                                                       00450000
+*    KEY LABELS AND THEIR FUNCTION ARE AS FOLLOWS:                      00460000
+*                                                                       00470000
+*      ITRCONN  -  DECISION TO PALCE CONNECTOR ON STACK OR NOT          00480000
+*                  ALL PREDICATES ARE IMMEDIATELY PUSHED ONTO           00490000
+*                  THE PREDICATE STACK                                  00500000
+*                                                                       00510000
+*      TREEBLD  -  THE PLACE TO CLEAR PART OF THE STACKS, THIS          00520000
+*                  ROUTINE REMOVES ONLY A CONNECTOR AND AS MANY         00530000
+*                  PREDICATES AS DICTATED    BY THE CONNECTOR.          00540000
+*                  I.E. NOT HAS ONLY A SINGLE PREDICATE WHILE           00550000
+*                  AND/OR ALWAYS HAVE TWO.                              00560000
+*                                                                       00570000
+*      PUSHPSTK -  THESE FOUR ROUTINES CONTROL THE STACKS               00580000
+*      PUSHPSTK    PUSHING AND POPPING ENTRIES AS REQUESTED.            00590000
+*      POPPSTK                                                          00600000
+*      POPCSTK                                                          00610000
+*                                                                       00620000
+*    FINALLY WHEN THE TREE IS BUILT FROM THE PARSED INPUT LIST          00630000
+*    ALL NEGATIONS ARE PUSHED AS FAR DOWN THE TREE AS POSSIBLE          00640000
+*    BY APPPLYING APPROPRIATE BOOLEAN LAWS TO CONNECTOR AND             00650000
+*    OPERANDS THAT HAVE BEEN NEGATED. THE ROUTINE NAME IS               00660000
+*    NEGPROC AND IS A RECURSIVE ROUTINE STARTS AT THE TOP OF            00670000
+*    THE TREE AND COMPLETES WHEN ALL NODES HAVE BEEN PROCESSED.         00680000
+*    THE BOOLEAN LAWS APPLIED ARE THAT A NEGATED CONNECTOR IS           00690000
+*    ITS OPPOSITE (AND BECOMES OR AND VICE VERSA). THIS IS              00700000
+*    HANDLED IN THE CODE BY THE FACT THAT AND IS REPRESENTED BY         00710000
+*    A BINARY 2, OR IS REPRESENTED BY A BINARY 3. TO FLIP THEM          00720000
+*    THE CURRENT CONNECTOR IS SUBTRACTED FROM 5 (THE SUM OF THE         00730000
+*    TWO).  THIS RESULT IS THE OPPOSITE CONNECTOR. ALSO, A              00740000
+*    SIMPLE PREDICATE OPERAND (SUCH AS =, >, <) WHEN NEGATED            00750000
+*    ARE THEIR LOGICAL OPPOSITES EQUAL (=) BECOMES NOT EQUAL            00760000
+*    (<>) AND SO ON. THIS IS ACCOMPLISHED IN THE CODE BY                00770000
+*    EXCLUSIVE OR OF THE CURRENT OPERATOR WITH X'F0'.                   00780000
+*                                                                       00790000
+*                                                                       00800000
+* ON ENTRY:                                                             00810000
+*                                                                       00820000
+*      R1  contains the address of a parameter list constructed         00830000
+*           as follows:                                                 00840000
+*                                                                       00850000
+*             +00 - address of semantic summary block (SQLSEMAL)        00860000
+*                                                                       00870000
+*                                                                       00880000
+* ON EXIT:                                                              00890000
+*                                                                       00900000
+*      R15 contains one of the following return codes                   00910000
+*                                                                       00920000
+*             RC00 - build complete                                     00930000
+*                                                                       00940000
+*                    R1 = origin of semantic summary block              00950000
+*                                                                       00960000
+*             RC08 - build failed                                       00970000
+*                                                                       00980000
+*                    R1 = address of failing SARG node or zero          00990000
+*                                                                       01000000
+*             RC16 - storage depleted                                   01010000
+*                                                                       01020000
+**<DOC-OFF>****************************************************         01030000
+                                                                        01040000
+         EJECT                                                          01050000
+         #WORK ,                                                        01060000
+WRKOPREC DS    0F                 PRECEDENCE                            01070000
+WRKLEVEL DS    H                     LEVEL FROM PARSE                   01080000
+WRKPREC  DS    H                     PRECEDENCE OF CONNECTOR            01090000
+                                                                        01100000
+WRKPSTK  DS    F                  PREDICATE STACK PLACEHOLDER           01110000
+WRKCSTK  DS    2F                 CONNECTOR STACK PLACEHOLDER           01120000
+WRKCON   DS    F                  CONNECTOR PLACEHOLDER                 01130000
+                                                                        01140000
+TBSAVE   DS    A                  RETURN REGISTER SAVE AREA             01150000
+LISTPTR  DS    A                  CURRENT POINTER IN PRED / CON LIST    01160000
+CCOUNT   DS    H                  COUNT OF CONNECTORS ON STACK          01170000
+PCOUNT   DS    H                  COUNT OF PREDICATES ON STACK          01180000
+                                                                        01190000
+*--------------------------------------------------------------         01200000
+*   Connector stack                                                     01210000
+*--------------------------------------------------------------         01220000
+                                                                        01230000
+CSTACK   DS    0A                 TOP OF CONNECTOR STACK                01240000
+COPREC   DS    0F                 OVERALL PRECEDENCE                    01250000
+CLEVEL   DS    H                  DETERMINED LEVEL / DEPTH OF CON       01260000
+CPREC    DS    H                  PRECEDENCE OF CONNECTOR               01270000
+*                                       (1-NOT, 2-AND, 3-OR)            01280000
+CPTR     DS    A                  POINTER TO CONNECTOR NODE             01290000
+CSTKLEN  EQU   *-CSTACK           LENGTH OF STACK ENTRY                 01300000
+         ORG   CSTACK                                                   01310000
+CONSTK   DS    (256*CSTKLEN)X     STACK AREA - 256 ENTRIES              01320000
+                                                                        01330000
+*--------------------------------------------------------------         01340000
+*   Predicate stack                                                     01350000
+*--------------------------------------------------------------         01360000
+                                                                        01370000
+PSTACK   DS    0A                 TOP OF PREDICATE STACK                01380000
+PPTR     DS    A                  POINTER TO PRED / EXPR NODE           01390000
+PSTKLEN  EQU   *-PSTACK           LENGTH OF STACK ENTRY                 01400000
+         ORG   PSTACK                                                   01410000
+PREDSTK  DS    (256*PSTKLEN)X     STACK AREA - 256 ENTRIES              01420000
+                                                                        01430000
+         #ENDWORK ,               END  OF WORKAREA                      01440000
+                                                                        01450000
+         EJECT                                                          01460000
+         SQLSEMAL ,               SQL SEMANTIC SUMMARY                  01470000
+                                                                        01480000
+         EJECT                                                          01490000
+         EQUS  ,                                                        01500000
+                                                                        01510000
+         EJECT                                                          01520000
+ISQITREE #ENTER BASE=R12,PREG=R8                                        01530000
+                                                                        01540000
+         L     R8,0(,R8)          OBTAIN PLIST                          01550000
+         USING SQSEMAL,R8         DECLARE INTENTIONS                    01560000
+                                                                        01570000
+         EJECT                                                          01580000
+***************************************************************         01590000
+*                                                                       01600000
+*   INITIALIZE FOR TREE BUILD                                           01610000
+*                                                                       01620000
+***************************************************************         01630000
+ITREES   DS    0H                                                       01640000
+         LA    R15,RC00                                                 01650000
+         ICM   R2,15,SQSEXTRE     GET START OF SEARCH ARGUMENT          01660000
+         BZ    EXIT               NO TERMS TO PROCESS                   01670000
+         ST    R2,LISTPTR         SAVE IN CURRENT POINTER AREA          01680000
+         USING PREDENT,R2         DECLARE INTENTIONS (PREFIX)           01690000
+         LA    R6,PSTACK          PREDICATE STACK ORIGIN                01700000
+         LA    R7,CSTACK          CONNECTOR STADCK ORIGIN               01710000
+                                                                        01720000
+*--------------------------------------------------------------         01730000
+*   Examine node, determine if its a connector or predicate             01740000
+*--------------------------------------------------------------         01750000
+                                                                        01760000
+ITRLOOP  DS    0H                                                       01770000
+         CLI   PREDTYPE,PRED$BPE  BASIC-PREDICATE                       01780000
+         BE    ITRBPRED                                                 01790000
+         CLI   PREDTYPE,PRED$LIK  LIKE-PREDICATE                        01800000
+         BE    ITRBPRED                                                 01810000
+         CLI   PREDTYPE,PRED$NUL  NULL-PREDICATE                        01820000
+         BE    ITRBPRED                                                 01830000
+                                                                        01840000
+         CLI   PREDTYPE,PRED$CON  BOOLEAN CONNECTOR                     01850000
+         BE    ITRCONN                                                  01860000
+                                                                        01870000
+         LR    R1,R2              PRESENT TO ERROR HANDLER              01880000
+         B     ERR_CHN            UNRECOGNIZED ENTRY                    01890000
+         DROP  R2                                                       01900000
+                                                                        01910000
+***************************************************************         01920000
+                                                                        01930000
+ITRBPRED DS    0H                                                       01940000
+         BAS   R5,PUSHPSTK         PUSH PREDICATE ON PRED STACK         01950000
+         LTR   R15,R15                                                  01960000
+         BNZ   ERR_STG                                                  01970000
+         B     ITRNEXT             GET NEXT LIST ENTRY                  01980000
+                                                                        01990000
+***************************************************************         02000000
+                                                                        02010000
+         USING PRBCON,R2           DECLARE INTENTIONS (CONNECTOR)       02020000
+ITRCONN  DS    0H                                                       02030000
+         L     R1,PRBLVL           GET SQL LEVEL COUNT                  02040000
+         STH   R1,WRKLEVEL         LEVEL VALUE IN WORKING STORAGE       02050000
+         SR    R1,R1               CLEAR REGISTER                       02060000
+         IC    R1,PRBCONTP         GET OPERATOR PRECEDENCE              02070000
+         STH   R1,WRKPREC          OPERATOR PRECEDENCE IN STACK ENTRY   02080000
+                                                                        02090000
+         LH    R1,CCOUNT           GET CONNECTOR STACK COUNT            02100000
+         LTR   R1,R1               ARE THERE ANY?                       02110000
+         BZ    ITRCPUSH            GO PUSH IT ON THE STACK              02120000
+         LH    R1,WRKLEVEL         GET LEVEL   WORK PRECEDENCE          02130000
+         CH    R1,CLEVEL           COMPARE LEVEL PRECEDENCE             02140000
+         BH    ITRCPUSH            LOOSER BIND - SO PUSH ON STACK       02150000
+         BNE   ITRTPOP             LEVELS ARE NOT THE SAME SO POP STACK 02160000
+         LH    R1,WRKPREC          GET SAME LEVEL OPERATOR PRECEDENCE   02170000
+         CH    R1,CPREC            COMPARE OPERATOR PRECEDENCE          02180000
+         BNH   ITRCPUSH            LOOSER BIND - SO PUSH ON STACK       02190000
+*                                  OTHERWISE CLEAR PART OF THE STACK    02200000
+ITRTPOP  CLI   PRBCONTP,PRBC$NOT   IS THIS A NOT OPERATOR?              02210000
+         BE    ITRCPUSH            YES - GO TRY TO PUSH STACK ANYWAY    02220000
+         BAS   R5,TREEBLD          CLEAR PART OF THE STACK              02230000
+         B     ITRCONN             GO SEE IF WE ARE DONE POPING         02240000
+                                                                        02250000
+ITRCPUSH DS    0H                                                       02260000
+         BAS   R5,PUSHCSTK         PUSH THIS CONNECTOR ONTO THE STACK   02270000
+         LTR   R15,R15                                                  02280000
+         BNZ   ERR_STG                                                  02290000
+                                                                        02300000
+ITRNEXT  DS    0H                                                       02310000
+         ICM   R2,15,PRBLINK       GET NEXT LIST ENTRY POINTER          02320000
+         BNZ   ITRLOOP             KEEP GOING UNTIL END OF STREAM       02330000
+                                                                        02340000
+ITRFIN   BAS   R5,TREEBLD          PUT A NEW NODE IN THE TREE           02350000
+         CLC   PCOUNT,=H'0'        ANY MORE PREDICATES?                 02360000
+         BNE   ITRFIN              GO CLEAR THEM                        02370000
+         CLC   CCOUNT,=H'0'        ANY MORE CONNECTORS?                 02380000
+         BNE   ITRFIN              GOTTA CLEAR THEM                     02390000
+                                                                        02400000
+***************************************************************         02410000
+*                                                                       02420000
+*   NORMAL / ABNORMAL COMPLETION                                        02430000
+*                                                                       02440000
+***************************************************************         02450000
+ITRRET   DS    0H                 SELECT SUMMARIZATION AREA             02460000
+         ICM   R1,15,SQSITREE     GET TOP OF TREE ADDRESS               02470000
+         BZ    ITRRETZ            IF NONE THEN FORGET NEGATION PROCESS  02480000
+         SR    R0,R0              CLEAR THE NEGATE FLAG REG TO START    02490000
+         BAS   R14,NEGPROC        PUSH NEGATIONS INTO TERMINAL OPS      02500000
+                                                                        02510000
+ITRRETZ  DS    0H                                                       02520000
+         LA    R1,SQSEMAL         SELECT SUMMARIZATION AREA             02530000
+         SR    R0,R0                                                    02540000
+         LA    R15,RC00                                                 02550000
+         B     EXIT                                                     02560000
+                                                                        02570000
+ERR_CHN  DS    0H                 INPUT SEARCH ARGUMENT IN ERROR        02580000
+         LA    R15,RC08                                                 02590000
+         SR    R0,R0                                                    02600000
+         B     EXIT                                                     02610000
+                                                                        02620000
+ERR_STG  DS    0H                 INSUFFICIENT STORAGE                  02630000
+         LA    R15,RC16                                                 02640000
+         SR    R1,R1                                                    02650000
+         SR    R0,R0                                                    02660000
+         B     EXIT                                                     02670000
+                                                                        02680000
+*--------------------------------------------------------------         02690000
+*   RETURN COMPLETION STATUS TO CALLER                                  02700000
+*--------------------------------------------------------------         02710000
+EXIT     DS    0H                                                       02720000
+         #EXIT ,                  RETURN                                02730000
+                                                                        02740000
+         EJECT                                                          02750000
+***************************************************************         02760000
+*                                                                       02770000
+*   TREE NODE BUILDING SUB-ROUTINES                                     02780000
+*                                                                       02790000
+***************************************************************         02800000
+                                                                        02810000
+TREEBLD  ST    R5,TBSAVE           SAVE RETURN REGISTER                 02820000
+         LH    R1,CCOUNT           ANYTHING IN CONNECTOR STACK?         02830000
+         LTR   R1,R1                                                    02840000
+         BNZ   TRPOP               GO POP CSTACK                        02850000
+         ST    R2,WRKCON           PRESERVE CURRENT CONNECTOR           02860000
+         LH    R1,PCOUNT                                                02870000
+         LTR   R1,R1               ANYTHING IN PSTACK?                  02880000
+         BZ    ITRTREND            THEN GET OUT                         02890000
+         BAS   R5,POPPSTK          POP THE PREDICATE STACK              02900000
+         LR    R3,R1               SIMPLE PRED IS OUR TREE              02910000
+         B     ITRTREND            AND GET OUT                          02920000
+                                                                        02930000
+TRPOP    BAS   R5,POPCSTK          GO POP AN ENTRY OFF THE CON STACK    02940000
+         ST    R1,WRKCON           SAVE THE CONNECTOR POINTER           02950000
+         BAS   R5,POPPSTK          POP THE PREDICATE STACK              02960000
+         L     R3,WRKCON           RESET CONNECTOR POINTER              02970000
+         ST    R1,PRBRIGHT-PRBCON(R3)  RIGHT NODE POINTER               02980000
+         CLI   PRBCONTP-PRBCON(R3),PRBC$NOT   IS IT A "NOT"?            02990000
+         BNE   ITRTWOP             NO - THEN WE NEED TWO PREDICATES     03000000
+         XI    PRBNEG-PRBCON(R1),PRB$NOT   NEGATE THE TOP ENTRY         03010000
+         LR    R3,R1               NEGATION HAS BEEN DONE SO FORGET THE 03020000
+*                                  "NOT" CONNECTOR                      03030000
+         B     ITRROOT             GO SEE IF WE HAVE TO GO DEEPER       03040000
+                                                                        03050000
+ITRTWOP  BAS   R5,POPPSTK          POP THE PREDICATE STACK              03060000
+         L     R3,WRKCON           RESET CONNECTOR POINTER              03070000
+         ST    R1,PRBLEFT-PRBCON(R3)  SET LEFT POINTER                  03080000
+                                                                        03090000
+ITRROOT  ST    R2,WRKCON           RETAIN OUR CURRENT CONNECTOR         03100000
+         LR    R2,R3               POINT TO EXPRESSION TO PUSH ON STACK 03110000
+         BAS   R5,PUSHPSTK         PUSH EPRESSION ON PRED STACK         03120000
+         LTR   R15,R15                                                  03130000
+         BNZ   ERR_STG                                                  03140000
+         LR    R3,R2               RESET TREE ROOT ADDRESS              03150000
+         L     R2,WRKCON           GET ORIGINAL PREDICATE               03160000
+                                                                        03170000
+ITRTREND ST    R3,SQSITREE         RESET TREE POINTER                   03180000
+         L     R5,TBSAVE           RESTORE RETURN REGISTER              03190000
+         BR    R5                                                       03200000
+                                                                        03210000
+         EJECT                                                          03220000
+***************************************************************         03230000
+*                                                                       03240000
+*   STACK MANIPULATION SUB-ROUTINES                                     03250000
+*                                                                       03260000
+***************************************************************         03270000
+PUSHPSTK DS    0H                                                       03280000
+         LA    R15,RC04            INIT RETURN CODE                     03290000
+         LH    R1,PCOUNT           GET CURRENT ENTRY COUNT              03300000
+         CH    R1,=H'256'          EXCEED LIMIT ?                       03310000
+         BH    PUSHPRET                                                 03320000
+         LR    R4,R6               POINT TO CURRENT STACK ENTRY         03330000
+         LA    R3,PSTKLEN(,R4)     POINT TO NEXT AVAILABLE STACK ENTRY  03340000
+         LTR   R1,R1               DO WE HAVE OTHER ENTRIES ?           03350000
+         BNZ   PUSHPLP1            YES - GO MOVE THEM DOWN              03360000
+         ST    R2,PPTR-PSTACK(,R4) NEW PREDICATE ON TOP OF STACK        03370000
+         B     PUSHPEND            AND WE ARE DONE                      03380000
+                                                                        03390000
+PUSHPLP1 DS    0H                                                       03400000
+         MVC   0(PSTKLEN,R3),0(R4)  MOVE THE ENTRY                      03410000
+         LR    R3,R4               STEP UP STACK ONE ENTRY              03420000
+         LA    R9,PSTKLEN          GET LENGTH OF STACK ENTRY            03430000
+         SR    R4,R9               POINT TO PREVIOUS STACK ENTRY        03440000
+         BCT   R1,PUSHPLP1         PUSH DOWN ENTIRE STACK               03450000
+                                                                        03460000
+         ST    R2,PPTR-PSTACK(,R3) NEW PREDICATE ON TOP OF STACK        03470000
+         LA    R6,PSTKLEN(,R6)     UPDATE CURRENT STACK POINTER         03480000
+                                                                        03490000
+PUSHPEND LH    R1,PCOUNT           GET CURRENT ENTRY COUNT              03500000
+         LA    R1,1(,R1)           INCREMENT COUNT BY ONE               03510000
+         STH   R1,PCOUNT           SAVE IT                              03520000
+                                                                        03530000
+         SR    R15,R15             CLEAR RETURN REGISTER                03540000
+                                                                        03550000
+PUSHPRET BR    R5                  RETURN TO REQUESTOR                  03560000
+                                                                        03570000
+*--------------------------------------------------------------         03580000
+*  POPPSTK - POP AN ENTRY FROM THE PREDICATE STACK                      03590000
+*--------------------------------------------------------------         03600000
+POPPSTK  DS    0H                                                       03610000
+         LA    R4,PSTACK           POINT TO TOP OF STACK                03620000
+         MVC   WRKPSTK(PSTKLEN),0(R4)  SAVE TOP ENTRY                   03630000
+         LA    R3,PSTKLEN(,R4)     POINT TO NEXT ENTRY IN LIST          03640000
+         LH    R1,PCOUNT           GET COUNT OF ENTRIES IN STACK        03650000
+         LTR   R1,R1               ARE THERE ENTRIES TO POP?            03660000
+         BNZ   POPPLP1             YES GO MOVE THEM UP                  03670000
+         B     POPPFAIL            NO - TELL REQUESTOR                  03680000
+                                                                        03690000
+POPPLP1  DS    0H                                                       03700000
+         MVC   0(PSTKLEN,R4),0(R3) MOVE ENTRY UP ONE                    03710000
+         LR    R4,R3               POINT TO NEXT ENTRY                  03720000
+         LA    R3,PSTKLEN(,R3)     POINT TO ENTRY BEYOND                03730000
+         BCT   R1,POPPLP1          POP ENTIRE STACK                     03740000
+                                                                        03750000
+         SR    R1,R1               CLEAR REGISTER                       03760000
+         ST    R1,0(,R6)           CLEAN UP FORMER LAST ENTRY           03770000
+         LH    R1,PCOUNT           GET CURRENT ENTRY COUNT              03780000
+         BCTR  R1,0                DECREMENT COUNT BY ONE               03790000
+         STH   R1,PCOUNT           SAVE IT                              03800000
+         LA    R1,PSTACK           GET TOP ADDRESS                      03810000
+         CR    R6,R1               SEE IF WE ARE ALREADY AT TOP?        03820000
+         BE    POPPEND             NO - THEN RESET POINTER              03830000
+         LA    R1,PSTKLEN          GET ENTRY LENGTH                     03840000
+         SR    R6,R1               UPDATE R6 TO PREVIOUS ENTRY          03850000
+                                                                        03860000
+POPPEND  LA    R3,WRKPSTK          ADDRESS SAVED TOP OF STACK           03870000
+         L     R1,PPTR-PSTACK(,R3) POINT USER TO FORMER TOP ENTRY       03880000
+         SR    R15,R15             CLEAR RETURN REGISTER                03890000
+         BR    R5                  RETURN TO REQUESTOR                  03900000
+                                                                        03910000
+POPPFAIL LA    R15,RC04            REQUEST FAILED - NO ENTRIES TO POP   03920000
+         BR    R5                  RETURN TO REQUESTOR                  03930000
+                                                                        03940000
+*--------------------------------------------------------------         03950000
+*  PUSHCSTK - PUSH A CONNECTOR ONTO THE CONNECTOR STACK                 03960000
+*--------------------------------------------------------------         03970000
+PUSHCSTK DS    0H                                                       03980000
+         LA    R15,RC04            INIT RETURN CODE                     03990000
+         LH    R1,CCOUNT           GET CURRENT ENTRY COUNT              04000000
+         CH    R1,=H'256'          EXCEED LIMIT ?                       04010000
+         BH    PUSHCRET                                                 04020000
+         LR    R4,R7               POINT TO CURRENT STACK ENTRY         04030000
+         LA    R3,CSTKLEN(,R4)     POINT TO NEXT AVAILABLE STACK ENTRY  04040000
+         LTR   R1,R1               DO WE HAVE OTHER ENTRIES ?           04050000
+         BNZ   PUSHCLP1            YES - GO CHECK FO NOT OPERATOR       04060000
+         ST    R2,CPTR-CSTACK(,R4) CONNECTOR POINTER INTO STACK ENTRY   04070000
+         L     R1,WRKOPREC         GET WORKING OVERALL PRECEDENCE       04080000
+         ST    R1,COPREC-CSTACK(,R4) OVERALL PRECEDENCE IN STACK ENTRY  04090000
+         B     PUSHCEND            AND WE ARE DONE                      04100000
+                                                                        04110000
+PUSHCLP1 DS    0H                                                       04120000
+         MVC   0(CSTKLEN,R3),0(R4)  MOVE THE STACK ENTRY                04130000
+         LR    R3,R4               STEP UP STACK ONE ENTRY              04140000
+         LA    R9,CSTKLEN          GET LENGTH OF STACK ENTRY            04150000
+         SR    R4,R9               POINT TO PREVIOUS STACK ENTRY        04160000
+         BCT   R1,PUSHCLP1         PUSH DOWN ENTIRE STACK               04170000
+                                                                        04180000
+         ST    R2,CPTR-CSTACK(,R3) CONNECTOR POINTER INTO STACK ENTRY   04190000
+         L     R1,WRKOPREC         GET WORKING OVERALL PRECEDENCE       04200000
+         ST    R1,COPREC-CSTACK(,R3) OVERALL PRECEDENCE IN STACK ENTRY  04210000
+         LA    R7,CSTKLEN(,R7)     UPDATE CURRENT STACK POINTER         04220000
+                                                                        04230000
+PUSHCEND LH    R1,CCOUNT           GET CURRENT ENTRY COUNT              04240000
+         LA    R1,1(,R1)           INCREMENT COUNT BY ONE               04250000
+         STH   R1,CCOUNT           SAVE IT                              04260000
+                                                                        04270000
+         SR    R15,R15             CLEAR RETURN REGISTER                04280000
+                                                                        04290000
+PUSHCRET BR    R5                  RETURN TO REQUESTOR                  04300000
+                                                                        04310000
+*--------------------------------------------------------------         04320000
+*  POPCSTK - POP AN ENTRY FROM THE CONNECTOR STACK                      04330000
+*--------------------------------------------------------------         04340000
+POPCSTK  DS    0H                                                       04350000
+         LH    R1,CCOUNT           GET CURRENT ENTRY COUNT              04360000
+         LA    R4,CSTACK           POINT TO TOP OF STACK                04370000
+         MVC   WRKCSTK(CSTKLEN),0(R4)  SAVE TOP ENTRY                   04380000
+         LA    R3,CSTKLEN(,R4)     POINT TO NEXT AVAILABLE STACK ENTRY  04390000
+         LTR   R1,R1               ARE THERE ENTRIES TO POP?            04400000
+         BNZ   POPCLP1             YES GO MOVE THEM UP                  04410000
+         B     POPCFAIL            NO - TELL REQUESTOR                  04420000
+                                                                        04430000
+POPCLP1  DS    0H                                                       04440000
+         MVC   0(CSTKLEN,R4),0(R3) MOVE ENTRY UP ONE                    04450000
+         LR    R4,R3               POINT TO NEXT ENTRY                  04460000
+         LA    R3,CSTKLEN(,R3)     POINT TO ENTRY BEYOND                04470000
+         BCT   R1,POPCLP1          POP ENTIRE STACK                     04480000
+                                                                        04490000
+         SR    R1,R1               CLEAR REGISTER                       04500000
+         ST    R1,0(,R7)           CLEAN UP FORMER LAST ENTRY           04510000
+         ST    R1,4(,R7)           CLEAN UP FORMER LAST ENTRY           04520000
+         LH    R1,CCOUNT           GET CURRENT ENTRY COUNT              04530000
+         BCTR  R1,0                DECREMENT COUNT BY ONE               04540000
+         STH   R1,CCOUNT           SAVE IT                              04550000
+         LA    R1,CSTACK           GET TOP ADDRESS                      04560000
+         CR    R7,R1               SEE IF WE ARE ALREADY AT TOP?        04570000
+         BE    POPCEND             YES - THEN DO NOT RESET THE POINTER  04580000
+         LA    R1,CSTKLEN          GET ENTRY LENGTH                     04590000
+         SR    R7,R1               UPDATE R7 TO PREVIOUS ENTRY          04600000
+                                                                        04610000
+POPCEND  LA    R3,WRKCSTK          ADDRESS OF SAVED TOP ENTRY           04620000
+         L     R1,CPTR-CSTACK(,R3) POINT REQUESTOR TO FORMER TOP ENTRY  04630000
+         SR    R15,R15             CLEAR RETURN REGISTER                04640000
+         BR    R5                  RETURN TO REQUESTOR                  04650000
+                                                                        04660000
+POPCFAIL LA    R15,RC04            REQUEST FAILED - NO ENTRIES TO POP   04670000
+         BR    R5                  RETURN TO REQUESTOR                  04680000
+                                                                        04690000
+         EJECT                                                          04700000
+***************************************************************         04710000
+*                                                                       04720000
+*   NEGPROC - NEGATION PROCESSING OF THE TREE                           04730000
+*                                                                       04740000
+***************************************************************         04750000
+         DROP  R2                                                       04760000
+         USING PRBCON,R1         ADDRESS NODE                           04770000
+                                                                        04780000
+NEGPROC  DS    0H                                                       04790000
+         BAKR  R14,0             STACK CURRENT STATE                    04800000
+         IC    R2,PRBNEG         GET NEGATION BYTE                      04810000
+         XR    R2,R0             EXCLUSIVE OR THE NEGATION BYTE         04820000
+         STC   R2,PRBNEG         RESET IN NODE                          04830000
+         IC    R0,PRBNEG         SET NEGATION FLAG                      04840000
+                                                                        04850000
+         TM    PRBNEG,PRB$NOT    IS IT A NEGATION NOW?                  04860000
+         BNO   NEGNEXT           NO - GO PROCESS THE REST               04870000
+                                                                        04880000
+         CLI   PRBTYPE,PRB$CON   IS THIS A CONNECTOR NODE?              04890000
+         BNE   NEGPRED           NO THEN IT MUST BE A PREDICATE         04900000
+                                                                        04910000
+         SR    R6,R6             CLEAR WORK REGISTER                    04920000
+         IC    R6,PRBCONTP       GET CURRENT CONNECTOR VALUE            04930000
+         LA    R5,PRBC$IV        AND <==> OR INVERTER                   04940000
+         SR    R5,R6             5 - CON VALUE IS NEGATED VALUE         04950000
+         STC   R5,PRBCONTP       SAVE NEW CONNECTOR VALUE               04960000
+         XI    PRBNEG,PRB$NOT    CLEAR THE NEGATION BYTE                04970000
+                                                                        04980000
+NEGNEXT  CLI   PRBTYPE,PRB$CON   IS IT A CONNECTOR?                     04990000
+         BNE   NEGEND            NO -A PREDICATE SO NO FURTHER TO GO    05000000
+         LR    R9,R1             SAVE INPUT NODE ADDRESS                05010000
+         ICM   R1,15,PRBLEFT-PRBCON(R9)   GET LEFT ARM OF TREE          05020000
+         BZ    *+6                                                      05030000
+         LR    R2,R0             SAVE NEGATION FLAG                     05040000
+         BAS   R14,NEGPROC       AND PROCESS THE NEGATION               05050000
+         LR    R0,R2             RESTORE NEGATION FLAG                  05060000
+                                                                        05070000
+         ICM   R1,15,PRBRIGHT-PRBCON(R9)  GET RIGHT ARM OF TREE         05080000
+         BZ    *+8                                                      05090000
+         BAS   R14,NEGPROC       AND PROCESS NEGATIONS                  05100000
+         B     NEGEND            DONE FOR NOW                           05110000
+                                                                        05120000
+NEGPRED  DS    0H                                                       05130000
+         XI    SBPCOMP-SBPTERM(R1),X'F0'  NEGATE THE PRED OPERAND       05140000
+         XI    PRBNEG,PRB$NOT    TURN OFF THE NEGATION BYTE             05150000
+                                                                        05160000
+NEGEND   DS    0H                                                       05170000
+         PR    ,                 UNSTACK A LEVEL                        05180000
+                                                                        05190000
+         EJECT                                                          05200000
+***************************************************************         05210000
+*                                                                       05220000
+*  LITERALS, CONSTANTS, AND MAPPINGS                                    05230000
+*                                                                       05240000
+***************************************************************         05250000
+         LTORG ,                                                        05260000
+                                                                        05270000
+         PRINT NOGEN                                                    05280000
+         ICVT  ,                                                        05290000
+         ITASK ,                                                        05300000
+         END   ,                                                        05310000

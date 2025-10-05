@@ -1,0 +1,408 @@
+ISQLPREP TITLE '- SQL STATEMENT PARSE AND SEMANTIC ANALYSIS'            00010000
+***************************************************************         00020000
+*                                                                       00030000
+* ROUTINE: ISQLPREP - SQL statement parse and semantic analysis         00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This routine is invoked to parse and analyze the SQL               00080000
+*    statement anchored in the input QCS.  Two types of SQL             00090000
+*    statements are recognized.  The SET CURRENT SQLID                  00100000
+*    <projname> statement can be used to declare a target               00110000
+*    project name.  Otherwise traditional SELECT, UPDATE,               00120000
+*    INSERT, DELETE DML is expected and is parsed using the             00130000
+*    PPL#CR PPA parser.  In either case, QCSQUERY contains              00140000
+*    the query type indicator upon exit.                                00150000
+*                                                                       00160000
+*                                                                       00170000
+* SQL COMPLETION (RC,RSN) CODES:                                        00180000
+*                                                                       00190000
+*    RC16, RSN00 - PPL#C* discovery of syntax error                     00200000
+*    RC16, RSN04 - SET CURRENT SQLID statement invalid                  00210000
+*    RC16, RSN08 - semantic analysis error (ISQPARSE)                   00220000
+*                                                                       00230000
+*                                                                       00240000
+* SQL MESSAGES:                                                         00250000
+*                                                                       00260000
+*    025-029     - SET statement                                        00270000
+*    050-053     - semantic analysis of DML statement                   00280000
+*    UNNUMBERED  - PPL#C* parser                                        00290000
+*                                                                       00300000
+*                                                                       00310000
+* ON ENTRY:                                                             00320000
+*                                                                       00330000
+*    R1  contains the address of the Query Content Summary              00340000
+*        mapped by QCS                                                  00350000
+*                                                                       00360000
+*                                                                       00370000
+* ON EXIT:                                                              00380000
+*                                                                       00390000
+*    R15 contains one of the following standard SQL processor           00400000
+*        return codes                                                   00410000
+*                                                                       00420000
+*        RC00 - normal completion without error                         00430000
+*                                                                       00440000
+*        RC04 - reserved                                                00450000
+*                                                                       00460000
+*        RC08 - errors noted                                            00470000
+*                                                                       00480000
+*        RC12 - critical environmental errors encountered               00490000
+*                                                                       00500000
+*        RC16 - storage management failure                              00510000
+*                                                                       00520000
+*    For RC04-RC12, various QCS SQL executor return area                00530000
+*    fields may be updated by this routine, including:                  00540000
+*                                                                       00550000
+*        - return, reason, info, and super codes                        00560000
+*        - project name                                                 00570000
+*        - error #CLEX                                                  00580000
+*        - message number count and array                               00590000
+*                                                                       00600000
+***************************************************************         00610000
+                                                                        00620000
+         EJECT                                                          00630000
+***************************************************************         00640000
+*                                                                       00650000
+* MAINTENANCE:                                                          00660000
+*                                                                       00670000
+*    12/29/94 R. Turgeon                                                00680000
+*             Initial version, SQL restructuring                        00690000
+*                                                                       00700000
+***************************************************************         00710000
+                                                                        00720000
+         EJECT                                                          00730000
+         QCS   ,                  QUERY CONTENT SUMMARY                 00740000
+                                                                        00750000
+         EJECT                                                          00760000
+         SQLSEMAL ,               SEMANTIC ANALYSIS DATA AREAS          00770000
+                                                                        00780000
+         EJECT                                                          00790000
+         PPLRESP ,                PTI SQL PARSER RETURN AREA            00800000
+                                                                        00810000
+         EJECT                                                          00820000
+         EQUS  ,                                                        00830000
+                                                                        00840000
+         EJECT                                                          00850000
+         $MSGDFT PREFIX=ICTPID,COMPID='SQL',TABLE=#MSGS,               X00860000
+               PRINT=NOGEN,MF=(E,$MSGMFL)                               00870000
+                                                                        00880000
+         EJECT                                                          00890000
+         #WORK ,                                                        00900000
+                                                                        00910000
+STORPOOL DS    D                  STGMGR QUEUE HEADER                   00920000
+                                                                        00930000
+$PPLREGS DS    3F                 R15-R1 FROM PPL#CR                    00940000
+$SEMREGS DS    3F                 R15-R1 FROM SEMANTIC ANALYSIS         00950000
+                                                                        00960000
+$MSGMFL  $MSG  FIELDS=(,,,,),MF=(L,*)                                   00970000
+                                                                        00980000
+WK512    DS    0F,XL512           ISQSET WORK AREA                      00990000
+                                                                        01000000
+         #ENDWORK ,                                                     01010000
+                                                                        01020000
+         EJECT                                                          01030000
+ISQLPREP #ENTER PREG=(R8)                                               01040000
+                                                                        01050000
+         EJECT                                                          01060000
+***************************************************************         01070000
+*                                                                       01080000
+*   Fetch passed parameters                                             01090000
+*                                                                       01100000
+***************************************************************         01110000
+                                                                        01120000
+         USING QCS,R8             QUERY CONTENT SUMMARY                 01130000
+                                                                        01140000
+**<DOC-ON>*****************************************************         01150000
+*                                                                       01160000
+*   SET CURRENT SQLID = may be used by runtime users to                 01170000
+*   identify the target project.  Because the PPL#CR parser             01180000
+*   does not accept this statement, it must be identified and           01190000
+*   parsed separately.  Projects may also be identified by              01200000
+*   including a table name qualifier (project.tablename) in a           01210000
+*   DML statement but workbench users are constrained to the            01220000
+*   opened project or the system spaces.                                01230000
+*                                                                       01240000
+**<DOC-OFF>****************************************************         01250000
+                                                                        01260000
+         CLI   QCSOURCE,QCSS_RT   RUN-TIME REQUEST?                     01270000
+         BNE   STDPARSE           ONLY DML FROM WORKBENCH               01280000
+                                                                        01290000
+         @CALL ISQSET,(*QCSTMTP,*QCSTMTLN),                            X01300000
+               WKA=WK512,                                              X01310000
+               MF=(E,MFE_LIST)                                          01320000
+                                                                        01330000
+         B     *+4(R15)           ANALYZE COMPLETION STATUS             01340000
+         B     SET_PROJ              SQLID PROVIDED (R1,R0)             01350000
+         B     STDPARSE              NOT A SET STATEMENT                01360000
+         B     ERR_SET               INVALID SET STATEMENT              01370000
+         B     ERR_SETQ              PROJECT NAME IN QUOTES             01380000
+                                                                        01390000
+*--------------------------------------------------------------         01400000
+*   Extract project name from SET statement and validate                01410000
+*--------------------------------------------------------------         01420000
+                                                                        01430000
+SET_PROJ DS    0H                                                       01440000
+         CLI   QCSCLI,QCSC_PRP    ATTEMPTING A PREPARE()?        153987 01450000
+         BE    ERR_SETP           PREPARE() NOT ALLOWED FOR SET  153987 01460000
+                                                                        01470000
+         C     R0,=A(8) ????????  VALID PROJECT NAME LENGTH?            01480000
+         BH    ERR_SETL           ERROR IF NOT                          01490000
+         LTR   R0,R0              NULL PROJECT NAME?                    01500000
+         BZ    ERR_SETL           ERROR IF NULL                         01510000
+                                                                        01520000
+         MVC   QCSPRJNM,BLANKS    BLANK PADDING                         01530000
+         LR    R15,R0             LENGTH OF NAME                        01540000
+         BCTR  R15,0              PREPARE FOR COPY                      01550000
+         EX    R15,*+4            RETAIN CANDIDATE PROJECT NAME         01560000
+         MVC   QCSPRJNM(*-*),0(R1)                                      01570000
+                                                                        01580000
+         MVI   QCSQUERY,QCSQ_SET  INDICATE SET STATEMENT                01590000
+         B     NORMRET            DONE                                  01600000
+                                                                        01610000
+*---------------------------------------------------------------        01620000
+*   Invalid SET CURRENT SQLID =  statement                              01630000
+*---------------------------------------------------------------        01640000
+                                                                        01650000
+ERR_SETP DS    0H                 PREPARE(SET) NOT SUPPORTED            01660000
+         LA    R2,025                                                   01670000
+         B     ERR_SET_ALL                                              01680000
+                                                                        01690000
+ERR_SETQ DS    0H                 QUOTE FOUND IN PROJECT NAME           01700000
+         LA    R2,026                                                   01710000
+         B     ERR_SET_ALL                                              01720000
+                                                                        01730000
+ERR_SETL DS    0H                 INVALID PROJECT NAME LENGTH           01740000
+         LA    R2,027                                                   01750000
+         B     ERR_SET_ALL                                              01760000
+                                                                        01770000
+ERR_SET  DS    0H                 INVALID SET STATEMENT SYNTAX          01780000
+         LA    R2,029                                                   01790000
+                                                                        01800000
+ERR_SET_ALL    DS   0H                                                  01810000
+         ST    R15,QCSEINFO       ISQSET COMPLETION CODE                01820000
+         LM    R0,R1,ERC_SET      APPROPRIATE RETURN AND REASON CODES   01830000
+         ST    R0,QCSERC          RETURN CODE                           01840000
+         ST    R1,QCSERSN         REASON CODE                           01850000
+                                                                        01860000
+         SQLMSG (R2)              POST MESSAGING REQUIREMENTS           01870000
+                                                                        01880000
+         B     ERROR              REQUEST FAILS                         01890000
+                                                                        01900000
+         EJECT                                                          01910000
+***************************************************************         01920000
+*                                                                       01930000
+*   Acquire SQL statement grammar tree from PPL#CR                      01940000
+*                                                                       01950000
+***************************************************************         01960000
+                                                                        01970000
+STDPARSE DS    0H                                                       01980000
+         LA    R1,MFE_LIST        PARSE PLIST CONSTRUCTION AREA         01990000
+         XC    0(4*4,R1),0(R1)    PLATINUM PLIST FORMAT FBA             02000000
+         MVC   0(4,R1),QCSTMTVL   STATEMENT AS CONCAT(LEN,TEXT)         02010000
+                                                                        02020000
+         @CALL #PPLCR,CTYPE=CVT   INVOKE SQL STATEMENT PARSE SERVICE    02030000
+                                                                        02040000
+         STM   R15,R1,$PPLREGS    SAVE RESULTS                          02050000
+                                                                        02060000
+*---------------------------------------------------------------        02070000
+*   Anaylze parse results - respond with PTI msgs if failure            02080000
+*---------------------------------------------------------------        02090000
+                                                                        02100000
+         LR    R5,R1              PRESERVE RETURNED PPLRESP             02110000
+         USING PPLRESP,R5         ADDRESSABILITY                        02120000
+         ST    R5,QCSPARSE        GLOBALLY AVAILABLE                    02130000
+                                                                        02140000
+         CH    R15,=AL2(RC16)     HOW DID PARSE FARE?                   02150000
+         BL    SEMANTIC           ACCEPTED                              02160000
+         BH    STORAGE            CATASTROPHIC STORAGE FAILURE          02170000
+                                                                        02180000
+****************************************************************        02190000
+*                                                                       02200000
+*   Statement does not conform to DB2 grammar.  Return the              02210000
+*   message array generated by PPL#CR to COOP and identify              02220000
+*   the (first) failing #CLEX.                                          02230000
+*                                                                       02240000
+****************************************************************        02250000
+                                                                        02260000
+         L     R3,PPLR#MSG        MESSAGE COUNT PTR                     02270000
+         L     R3,0(,R3)          MESSAGE COUNT                         02280000
+         L     R4,PPLRAMSG        MESSAGE LIST                          02290000
+                                                                        02300000
+MSGARRAY DS    0H                 REFORM MSGS FOR RETURN TO COOP        02310000
+         SQLRESP ((R4),60),DSQLRESP=QCSRESP@                            02320000
+                                                                        02330000
+         LA    R4,60(,R4)         ADVANCE TO NEXT MSG                   02340000
+         BCT   R3,MSGARRAY        ACCOUNT FOR ALL MSGS                  02350000
+                                                                        02360000
+*---------------------------------------------------------------        02370000
+*   Identify the failing #CLEX                                          02380000
+*---------------------------------------------------------------        02390000
+                                                                        02400000
+         L     R2,PPLRTLCB        #CLEX LIST LCB                        02410000
+         ICM   R2,15,0(R2)        FIRST #CLEX BLOCK                     02420000
+         BZ    PARSEFIN           DONE                                  02430000
+         USING #CLEX_NODE_S,R2    #CLEX ENTRY                           02440000
+                                                                        02450000
+PARSENXT DS    0H                 LOCATE FIRST CLEX ENTRY IN ERROR      02460000
+         TM    #CLEX_ERROR,L'#CLEX_ERROR   STD PTI TECHNIQUE            02470000
+         BO    PARSEHIT           FOUND INVALID TOKEN                   02480000
+         ICM   R2,15,#CLEX_NEXT   ADVANCE TO NEXT #CLEX NODE            02490000
+         BNZ   PARSENXT           CONTINUE THE SCAN                     02500000
+         B     PARSEFIN           STRANGE BUT NOT FATAL                 02510000
+                                                                        02520000
+PARSEHIT DS    0H                                                       02530000
+         ST    R2,QCSECLEX        IDENTIFY THE FAILING #CLEX            02540000
+                                                                        02550000
+PARSEFIN DS    0H                                                       02560000
+         LM    R0,R1,ERC_PPLC     SYTAX ERROR IN STATEMENT              02570000
+         ST    R0,QCSERC          RETURN CODE                           02580000
+         ST    R1,QCSERSN         REASON CODE                           02590000
+         MVC   QCSEINFO,$PPLREGS  PPL#CR RETURN CODE AS INFO CODE       02600000
+         B     ERROR              REQUEST FAILS                         02610000
+         DROP  R5,R2              PPLRESP, #CLEX                        02620000
+                                                                        02630000
+         EJECT                                                          02640000
+**<DOC_ON>******************************************************        02650000
+*                                                                       02660000
+*   Perform a semantic analysis of the SQL statement previously         02670000
+*   reduced to a syntax tree.  ISQPARSE is invoked to determine         02680000
+*   if the parse tree is admitted by this product's much more           02690000
+*   limitted grammar.  If so, the semantic summary is populated         02700000
+*   with a number of lists that relate like semantic units,             02710000
+*   column and table references for example.  (PTI #CLEX                02720000
+*   structures are referenced directly in the semantic summary).        02730000
+*                                                                       02740000
+*   Once the semantic summary (SQLSEMAL) is returned, the               02750000
+*   STGMGR QH residing in local working storage is copied               02760000
+*   into it (SQSPOOL) and the working storage version is                02770000
+*   erased.  This operation transfers ownership of the storage          02780000
+*   pool to the semantic summary and its resource managers.             02790000
+*                                                                       02800000
+**<DOC-OFF>*****************************************************        02810000
+                                                                        02820000
+SEMANTIC DS    0H                                                       02830000
+         STGINIT 512,QH=STORPOOL INIT A STORAGE POOL FOR SQLSEMAL       02840000
+                                                                        02850000
+*---------------------------------------------------------------        02860000
+*   Semantic analysis and ITREE generation                              02870000
+*---------------------------------------------------------------        02880000
+                                                                        02890000
+         L     R5,QCSPARSE        PPL#C* PARSE RESULTS                  02900000
+         USING PPLRESP,R5         ADDRESSABILITY                        02910000
+                                                                        02920000
+         @CALL ISQPARSE,(*PPLRCTRE,*PPLRTLCB,STORPOOL),                X02930000
+               MF=(E,MFE_LIST)                                          02940000
+                                                                        02950000
+         STM   R15,R1,$SEMREGS    SAVE RETURN REGS                      02960000
+         LTR   R15,R15            STATEMENT ACCEPTED?                   02970000
+         BNZ   ERR_ANAL           BAIL OUT OTHERWISE                    02980000
+                                                                        02990000
+         ST    R1,QCSSSMRY        SAVE SEMANTIC RESULT PTR              03000000
+         LR    R6,R1              SEMANTIC SUMMARY ORIGIN               03010000
+         USING SQSEMAL,R6         SEMANTIC SUMMARY HEADER FORMAT        03020000
+                                                                        03030000
+         MVC   QCSQUERY,SQSQUERY  GLOBAL REFERENCE FOR QUERY TYPE       03040000
+         MVC   SQSPOOL,STORPOOL   CLAIM OWNERSHIP OF THIS POOL          03050000
+         XC    STORPOOL,STORPOOL  TRANSFER OF OWNERSHIP COMPLETE        03060000
+         LA    R0,SQSPOOL         NEW LOCATION OF STGMGR QH             03070000
+         ST    R0,SQSPOOL@        POST FOR UNIVERSAL ACCESS             03080000
+         DROP  R5                 PPLRESP                               03090000
+                                                                        03100000
+*---------------------------------------------------------------        03110000
+*   Dump the predicate ITREE                                            03120000
+*---------------------------------------------------------------        03130000
+                                                                        03140000
+         ICM   R2,15,SQSITREE     ITREE GENERATED?                      03150000
+         BZ    NTRCITRE           SKIP IF NOT                           03160000
+         TM    ICTSTAT4,ICT4$SQL  SQL TRACE ACTIVE?                     03170000
+         BNO   NTRCITRE           SKIP IF NOT                           03180000
+                                                                        03190000
+ZAPZAP1  B     NTRCITRE           ZAPPABLE PREDICATE TREE DISPLAY       03200000
+                                                                        03210000
+         $MSG  003                ITREE DUMP FOLLOWS                    03220000
+                                                                        03230000
+         $CLINK FUNC=DMPTREE,(STRUCT*,(R2))                             03240000
+                                                                        03250000
+NTRCITRE DS    0H                                                       03260000
+         B     NORMRET            DONE                                  03270000
+         DROP  R6                 SQSEMAL                               03280000
+                                                                        03290000
+*---------------------------------------------------------------        03300000
+*   Semantic analysis failure                                           03310000
+*---------------------------------------------------------------        03320000
+                                                                        03330000
+ERR_ANAL DS    0H                                                       03340000
+         STGTERM QH=STORPOOL      RELEASE ACQUIRED STORAGE              03350000
+                                                                        03360000
+         MVC   QCSECLEX,$SEMREGS+8   IDENTIFY #CLEX IN ERROR            03370000
+         LM    R0,R1,ERC_ANAL     SEMANTIC ANALYSIS REJECTS STATEMENT   03380000
+         ST    R0,QCSERC          RETURN CODE                           03390000
+         ST    R1,QCSERSN         REASON CODE                           03400000
+         L     R15,$SEMREGS+0     ISQPARSE RETURN CODE BECOMES          03410000
+         ST    R15,QCSEINFO       INFO CODE                             03420000
+                                                                        03430000
+         SRL   R15,2              ENSURE FORMAT IS APPROPRIATE          03440000
+         SLL   R15,2                                                    03450000
+                                                                        03460000
+         SQLMSG *SAMSGTAB(R15)                                          03470000
+                                                                        03480000
+         B     ERROR              REQUEST FAILS                         03490000
+                                                                        03500000
+****************************************************************        03510000
+*                                                                       03520000
+*   Return completion status to caller                                  03530000
+*                                                                       03540000
+****************************************************************        03550000
+                                                                        03560000
+NORMRET  DS    0H                 COMPLETE WITHOUT ERROR                03570000
+         LA    R15,RC00                                                 03580000
+         B     EXIT                                                     03590000
+                                                                        03600000
+ERROR    DS    0H                 ERRORS PREVENTING CONTINUATION        03610000
+         LA    R15,RC08                                                 03620000
+         B     EXIT                                                     03630000
+                                                                        03640000
+STORAGE  DS    0H                 STORAGE MANAGEMENT FAILURE            03650000
+                                                                        03660000
+         SQLIDCMP COMPONENT='PPL#CR',INFOCODE=(R15)                     03670000
+                                                                        03680000
+         LA    R15,RC16                                                 03690000
+                                                                        03700000
+EXIT     DS    0H                                                       03710000
+         #EXIT ,                                                        03720000
+                                                                        03730000
+         EJECT                                                          03740000
+****************************************************************        03750000
+*                                                                       03760000
+*   local read only data areas                                          03770000
+*                                                                       03780000
+****************************************************************        03790000
+                                                                        03800000
+BLANKS   DC    CL16' '                                                  03810000
+                                                                        03820000
+*--------------------------------------------------------------         03830000
+*   msgs for various failures relating to semantic analysis             03840000
+*--------------------------------------------------------------         03850000
+                                                                        03860000
+SAMSGTAB DS    0F                                                       03870000
+         DC    F'0'               RSN00 - SUCCESSFUL COMPLETION         03880000
+         DC    F'050'             RSN04                                 03890000
+         DC    F'051'             RSN08                                 03900000
+         DC    F'052'             RSN12                                 03910000
+         DC    F'010'             RSN16 - STORAGE DEPLETION             03920000
+         DC    F'053'                                                   03930000
+         DC    F'053'                                                   03940000
+         DC    F'053'                                                   03950000
+                                                                        03960000
+         LTORG ,                                                        03970000
+                                                                        03980000
+         EJECT                                                          03990000
+         SQLCODES ,                                                     04000000
+                                                                        04010000
+         EJECT                                                          04020000
+         #CLEX ,                                                        04030000
+                                                                        04040000
+         EJECT                                                          04050000
+         PRINT NOGEN                                                    04060000
+         ICVT  ,                                                        04070000
+         END   ,                                                        04080000

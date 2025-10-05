@@ -1,0 +1,586 @@
+ISESAPI  TITLE 'INTEGRATOR - VTAM SESSION SERVICES API FRONT-END'       00010000
+**<DOC-ON>************************************************************* 00020000
+*                                                                       00030000
+* ROUTINE: ISESAPI - INTEGRATOR VTAM SESSION SERVICES API FRONT-END     00040000
+*                                                                       00050000
+* DESCRIPTION: ISESAPI FRONT-ENDS THE $SESS API REQUEST BY EXAMINING    00060000
+*              THE FUNCTION CODE AND INVOKING THE PROPER API MODULE.    00070000
+*                                                                       00080000
+* ON ENTRY:                                                             00090000
+*                                                                       00100000
+*    R15 = ENTRY POINT ADDRESS                                          00110000
+*    R14 = RETURN ADDRESS                                               00120000
+*    R13 = AVAILABLE SAVE AREA                                          00130000
+*    R11 = ICVT ADDRESS                                                 00140000
+*    R10 = ITASK ADDRESS                                                00150000
+*    R01 = $SESS PARAMETER LIST ADDRESS                                 00160000
+*          (SEE COMMENTS FOR SPECIFIC SERVICE BEING CALLED)             00170000
+*                                                                       00180000
+* ON EXIT TO CALLER:                                                    00190000
+*                                                                       00200000
+*    R15 = $SESS_RC_...                                                 00210000
+*                                                                       00220000
+*    R00 = $SESS_RSN_...                                                00230000
+*                                                                       00240000
+*    R01 = ADDRESS OF USER'S $SESS SPLIST                               00250000
+*                                                                       00260000
+**<DOC-OFF>************************************************************ 00270000
+                                                                        00280000
+         EJECT ,                                                        00290000
+*********************************************************************** 00300000
+*                                                                       00310000
+* MAINTENANCE:                                                          00320000
+*                                                                       00330000
+*   08/01/93 RANDY WITEK                                                00340000
+*   07/01/94 RANDY WITEK - LU6.2 SUPPORT                                00350000
+*                                                                       00360000
+*********************************************************************** 00370000
+                                                                        00380000
+         EQUS  ,                  GENERAL EQUATES                       00390000
+                                                                        00400000
+RICVT    EQU   R11                                                      00410000
+RITASK   EQU   R10                                                      00420000
+RIVTAM   EQU   R9                                                       00430000
+RISESS   EQU   R8                                                       00440000
+RIVUSER  EQU   R7                                                       00450000
+RSPLIST  EQU   R6                                                       00460000
+RIPCB    EQU   R5                                                       00470000
+                                                                        00480000
+         USING ICVT,RICVT         ESTABLISH ADDRESSABILITY              00490000
+         USING ITASK,RITASK       ESTABLISH ADDRESSABILITY              00500000
+         USING IVTAMCVT,RIVTAM    ESTABLISH ADDRESSABILITY              00510000
+         USING ISESS,RISESS       ESTABLISH ADDRESSABILITY              00520000
+         USING IVUSER,RIVUSER     ESTABLISH ADDRESSABILITY              00530000
+         USING SPLIST,RSPLIST     ESTABLISH ADDRESSABILITY              00540000
+         USING IPCB,RIPCB         ESTABLISH ADDRESSABILITY              00550000
+                                                                        00560000
+*---------------------------------------------------------------------- 00570000
+*   S A V E   A N D   W O R K I N G   S T O R A G E                     00580000
+*---------------------------------------------------------------------- 00590000
+                                                                        00600000
+WORKAREA #WORK ,                  READ/WRITE WORKAREA                   00610000
+SUB0SAVE DS    18F                SUBROUTINE SAVE AREA                  00620000
+WRK256   DS    XL256              GENERAL WORKAREA                      00630000
+RETR15   DS    F                  RETURN CODE                           00640000
+RETR0    DS    F                  RETURN REGISTER 0                     00650000
+RETR1    DS    F                  RETURN REGISTER 1                     00660000
+RETREGS  EQU   RETR15,*-RETR15    INCLUSIVE SYMBOL                      00670000
+FLAG     DS    X                                                        00680000
+FLAGLOCK EQU   X'80'              VTAM GLOBAL LOCK IS HELD              00690000
+FLAGLCKD EQU   X'40'              VTAM GLOBAL LOCK WAS HELD ON ENTRY    00700000
+WORKLEN  #ENDWORK                 END OF WORKAREA                       00710000
+                                                                        00720000
+*---------------------------------------------------------------------- 00730000
+*   M E S S A G E   D E F A U L T S                                     00740000
+*---------------------------------------------------------------------- 00750000
+                                                                        00760000
+         $MSGDFT PREFIX=ICTPID,COMPID='VTM',TABLE=*#MSGS,              +00770000
+               PRINT=NOGEN,WORKA=0,MF=(E,WRK256)                        00780000
+                                                                        00790000
+*---------------------------------------------------------------------- 00800000
+*   M O D U L E   E N T R Y                                             00810000
+*---------------------------------------------------------------------- 00820000
+                                                                        00830000
+ISESAPI  #ENTER BASE=R12,         R12 IS BASE REGISTER                 +00840000
+               AMODE=31,                                               +00850000
+               RMODE=ANY,                                              +00860000
+               SAVE=YES,          ALLOCATE SAVE/WORK AREA              +00870000
+               PREG=RSPLIST,      SAVE R1 PARM IN RSPLIST              +00880000
+               RESTENV=NO,        ICVT AND ITASK POINTERS ARE OK       +00890000
+               WAPASS=NO,         NO WORK AREA PASSED IN R0            +00900000
+               LINKAGE=STD        CALLED BY BAS/BASR                    00910000
+                                                                        00920000
+         L     RIVTAM,ICTVTCVT    SET IVTAMCVT BASE                     00930000
+                                                                        00940000
+*---------------------------------------------------------------------- 00950000
+* SET BLOCK ID                                                          00960000
+*---------------------------------------------------------------------- 00970000
+                                                                        00980000
+         MVC   SPLID(4),=CL4'SPL '                                      00990000
+                                                                        01000000
+*---------------------------------------------------------------------- 01010000
+* CLEAR RETURN FIELDS IN THE PARAMETER LIST                             01020000
+*---------------------------------------------------------------------- 01030000
+                                                                        01040000
+         XC    SPLRETCD,SPLRETCD  CLEAR THE RETURN CODE                 01050000
+         XC    SPLRSNCD,SPLRSNCD  CLEAR THE REASON CODE                 01060000
+         XC    SPLSTATE,SPLSTATE  CLEAR THE STATE FLAGS                 01070000
+                                                                        01080000
+*---------------------------------------------------------------------- 01090000
+* CLEAR PARAMETER LIST FIELDS THAT WERE OMITTED FROM THE CALL           01100000
+*---------------------------------------------------------------------- 01110000
+                                                                        01120000
+         SR    R1,R1              CLEAR R1                              01130000
+                                                                        01140000
+         TM    SPLF1,SPLF1OA      OMITTED AREA= ?                       01150000
+         BNO   CLROAL             BRANCH IF NOT                         01160000
+         ST    R1,SPLAREA         CLEAR PARMLIST FIELD                  01170000
+                                                                        01180000
+CLROAL   TM    SPLF1,SPLF1OAL     OMITTED AREALEN= ?                    01190000
+         BNO   CLROEP             BRANCH IF NOT                         01200000
+         ST    R1,SPLAREAL        CLEAR PARMLIST FIELD                  01210000
+                                                                        01220000
+CLROEP   TM    SPLF1,SPLF1OEP     OMITTED EPB= ?                        01230000
+         BNO   CLROCN             BRANCH IF NOT                         01240000
+         ST    R1,SPLEPB          CLEAR PARMLIST FIELD                  01250000
+                                                                        01260000
+CLROCN   TM    SPLF1,SPLF1OCN     OMITTED CNTRL= ?                      01270000
+         BNO   CLRORH             BRANCH IF NOT                         01280000
+         STCM  R1,B'0111',SPLCNTRL CLEAR PARMLIST FIELD                 01290000
+                                                                        01300000
+CLRORH   TM    SPLF1,SPLF1ORH     OMITTED RH= ?                         01310000
+         BNO   CLROSQ             BRANCH IF NOT                         01320000
+         STCM  R1,B'0111',SPLRH   CLEAR PARMLIST FIELD                  01330000
+                                                                        01340000
+CLROSQ   TM    SPLF1,SPLF1OSQ     OMITTED SEQNO= ?                      01350000
+         BNO   CLROSN             BRANCH IF NOT                         01360000
+         STH   R1,SPLSEQNO        CLEAR PARMLIST FIELD                  01370000
+                                                                        01380000
+CLROSN   TM    SPLF1,SPLF1OSN     OMITTED SENSE= ?                      01390000
+         BNO   CLROFL             BRANCH IF NOT                         01400000
+         ST    R1,SPLSENSE        CLEAR PARMLIST FIELD                  01410000
+                                                                        01420000
+CLROFL   TM    SPLF1,SPLF1OFL     OMITTED FIELDS= ?                     01430000
+         BNO   CLROPL             BRANCH IF NOT                         01440000
+         ST    R1,SPLFLDS#        CLEAR PARMLIST FIELD                  01450000
+                                                                        01460000
+CLROPL   TM    SPLF3,SPLF3OPL     OMITTED POOL= ?                       01470000
+         BNO   CLROMK             BRANCH IF NOT                         01480000
+         ST    R1,SPLPOOL         CLEAR PARMLIST FIELD                  01490000
+                                                                        01500000
+CLROMK   TM    SPLF3,SPLF3OMK     OMITTED MASK= ?                       01510000
+         BNO   CLROLU             BRANCH IF NOT                         01520000
+         ST    R1,SPLMASK         CLEAR PARMLIST FIELD                  01530000
+                                                                        01540000
+CLROLU   TM    SPLF3,SPLF3OLU     OMITTED LUNAME= ?                     01550000
+         BNO   CLROLM             BRANCH IF NOT                         01560000
+         ST    R1,SPLUNAME        CLEAR PARMLIST FIELD                  01570000
+                                                                        01580000
+CLROLM   TM    SPLF4,SPLF4OLM     OMITTED LOGMODE= ?                    01590000
+         BNO   CLROSE             BRANCH IF NOT                         01600000
+         ST    R1,SPLOGMDE        CLEAR PARMLIST FIELD                  01610000
+                                                                        01620000
+CLROSE   TM    SPLF4,SPLF4OSE     OMITTED SESSION= ?                    01630000
+         BNO   CLRODR             BRANCH IF NOT                         01640000
+         XC    SPLTOKEN,SPLTOKEN  CLEAR PARMLIST FIELD                  01650000
+                                                                        01660000
+CLRODR   TM    SPLF4,SPLF4ODR     OMITTED DRIVER= ?                     01670000
+         BNO   CLROPM             BRANCH IF NOT                         01680000
+         ST    R1,SPLDRIVR        CLEAR PARMLIST FIELD                  01690000
+                                                                        01700000
+CLROPM   TM    SPLF4,SPLF4OPM     OMITTED PARM= ?                       01710000
+         BNO   CLREND             BRANCH IF NOT                         01720000
+         ST    R1,SPLPARM         CLEAR PARMLIST FIELD                  01730000
+                                                                        01740000
+CLREND   DS    0H                                                       01750000
+                                                                        01760000
+*---------------------------------------------------------------------- 01770000
+* ESTABLISH THE WU TOKEN OF THE OWNING WORK UNIT                        01780000
+*---------------------------------------------------------------------- 01790000
+                                                                        01800000
+         ICM   RIPCB,15,TSKPCBC   ACCESS CURRENT IPCB                   01810000
+         BZ    ERRWUTKN           BRANCH IF NOT FOUND                   01820000
+         MVC   SPLWU,PCBENTKN     SET WU TOKEN IN SPLIST                01830000
+                                                                        01840000
+*---------------------------------------------------------------------- 01850000
+* SET RH FLAGS THAT WERE EXPLICITLY SPECIFIED ON THE CALL               01860000
+*---------------------------------------------------------------------- 01870000
+                                                                        01880000
+         TM    SPLF3,SPLF3AUT     AUTO_PROTOCOL=YES SPECIFIED?          01890000
+         BNO   SETRHDR1           BRANCH IF NOT                         01900000
+         CLC   SPLFUNC,=A($SESS_SEND_DATA)                              01910000
+         BNE   ERREXPRM           AUTO_PROTOCOL IS FOR SEND_DATA ONLY   01920000
+         XC    SPLRH,SPLRH        CLEAR THE USERRH                      01930000
+         B     SETRHEND           AND FIGURE IT OUT LATER               01940000
+                                                                        01950000
+SETRHDR1 TM    SPLF2,SPLF2DR1     DR1=YES SPECIFIED?                    01960000
+         BNO   SETRHDR2           BRANCH IF NOT                         01970000
+         OI    SPLRH+1,RHDR1      SET DR1                               01980000
+                                                                        01990000
+SETRHDR2 TM    SPLF2,SPLF2DR2     DR2=YES SPECIFIED?                    02000000
+         BNO   SETRHER1           BRANCH IF NOT                         02010000
+         OI    SPLRH+1,RHDR2      SET DR2                               02020000
+                                                                        02030000
+SETRHER1 TM    SPLF2,SPLF2ER1      ER1=YES SPECIFIED?                   02040000
+         BNO   SETRHER2            BRANCH IF NOT                        02050000
+         OI    SPLRH+1,RHDR1+RHERI SET DR1 + ERI                        02060000
+                                                                        02070000
+SETRHER2 TM    SPLF2,SPLF2ER2      ER2=YES SPECIFIED?                   02080000
+         BNO   SETRHBB             BRANCH IF NOT                        02090000
+         OI    SPLRH+1,RHDR2+RHERI SET DR1 + ER                         02100000
+                                                                        02110000
+SETRHBB  TM    SPLF2,SPLF2BB       BB=YES SPECIFIED?                    02120000
+         BNO   SETRHEB             BRANCH IF NOT                        02130000
+         OI    SPLRH+2,RHBBI       SET BB                               02140000
+                                                                        02150000
+SETRHEB  TM    SPLF2,SPLF2EB       EB=YES SPECIFIED?                    02160000
+         BNO   SETRHBC             BRANCH IF NOT                        02170000
+         OI    SPLRH+2,RHEBI       SET EB                               02180000
+                                                                        02190000
+SETRHBC  TM    SPLF2,SPLF2BC       BC=YES SPECIFIED?                    02200000
+         BNO   SETRHEC             BRANCH IF NOT                        02210000
+         OI    SPLRH,RHBCI         SET BC                               02220000
+                                                                        02230000
+SETRHEC  TM    SPLF2,SPLF2EC       EC=YES SPECIFIED?                    02240000
+         BNO   SETRHCD             BRANCH IF NOT                        02250000
+         OI    SPLRH,RHECI         SET EC                               02260000
+                                                                        02270000
+SETRHCD  TM    SPLF3,SPLF3CD       CD=YES SPECIFIED?                    02280000
+         BNO   SETRHEND            BRANCH IF NOT                        02290000
+         OI    SPLRH+2,RHCDI       SET CD                               02300000
+                                                                        02310000
+SETRHEND DS    0H                                                       02320000
+                                                                        02330000
+*---------------------------------------------------------------------- 02340000
+* TRACE THE MODULE ENTRY                                                02350000
+*---------------------------------------------------------------------- 02360000
+                                                                        02370000
+         $TRACE *=A(TRC_ISESAPI_ENTER),48  TRACE ENTRY W/ 48 USER BYTES 02380000
+         BNZ   NOETRACE                    BRANCH IF NOT TRACING        02390000
+         $APITRC ISESAPI                   TRACE COMMON STUFF           02400000
+         MVC   24(4,R1),SPLFUNC            TRACE $SESS FUNCTION CODE    02410000
+         ST    RSPLIST,28(,R1)             TRACE SPLIST ADDRESS         02420000
+         MVC   32(L'ISETK,R1),SPLTOKEN     TRACE SESSION TOKEN          02430000
+NOETRACE DS    0H                                                       02440000
+                                                                        02450000
+*---------------------------------------------------------------------- 02460000
+* VALIDATE THE SESSION TOKEN THAT WAS SPECIFIED                         02470000
+*---------------------------------------------------------------------- 02480000
+                                                                        02490000
+         CLC   SPLFUNC,=A($SESS_FIND_SESSION) FIND ISESS BLOCK?         02500000
+         BNE   NOTFIND                     BRANCH IF NOT                02510000
+         OC    SPLTOKEN,SPLTOKEN           IS THERE A TOKEN?            02520000
+         BNZ   FUNCLOOK                    BRANCH IF YES                02530000
+         B     ERRTOKEN                    STOP REQUEST IF NO TOKEN PTR 02540000
+                                                                        02550000
+NOTFIND  DS    0H                                                       02560000
+                                                                        02570000
+         ICM   RIVUSER,15,TSKIVUSR         IS THERE AN IVUSER BLOCK?    02580000
+         BZ    VALCHKTK                    BRANCH YES, MAY BE NEW USER  02590000
+         CLC   IVUID,=CL8'IVUSER'          VALIDATE EYECATCHER          02600000
+         BNE   ERRVUSER                    BRANCH IF INVALID            02610000
+                                                                        02620000
+         CLC   SPLFUNC,=A($SESS_ADD_SESSION) ADD_SESSION?               02630000
+         BE    VALID                       BRANCH IF YES                02640000
+                                                                        02650000
+         BAS   R14,VTAMLOCK                SERIALIZE                    02660000
+                                                                        02670000
+         OC    SPLTOKEN,SPLTOKEN           IS THERE A TOKEN?            02680000
+         BZ    VALCHKST                    BRANCH IF NOT                02690000
+         OC    SPLTOKEN+4(4),SPLTOKEN+4    IS THERE A USER TOKEN ONLY?  02700000
+         BZ    VALCHKST                    BRANCH IF YES                02710000
+         CLC   IVUTKUSR,SPLTOKEN           IVUSER MATCH?                02720000
+         BNE   ERRTOKEN                                                 02730000
+         LA    RISESS,IVUIS1ST-(ISENEXT-ISE) NORMALIZED CHAIN HEADER    02740000
+                                                                        02750000
+VALLOOP  DS    0H                                                       02760000
+                                                                        02770000
+         ICM   RISESS,15,ISENEXT           NEXT ISESS IN CHAIN          02780000
+         BM    ERRTOKEN                    BRANCH IF NOT IN CHAIN       02790000
+         CLC   SPLTOKEN(L'ISETK),ISETK     COMPARE TOKENS               02800000
+         BH    VALLOOP                     BRANCH IF PROVIDED TOKEN HI  02810000
+         BNE   ERRTOKEN                    BRANCH IF PROVIDED TOKEN LOW 02820000
+                                                                        02830000
+         BAS   R14,VTAMUNLK                DESERIALIZE                  02840000
+                                                                        02850000
+         CLC   SPLFUNC,=A($SESS_START_SESSION) START_SESSION?           02860000
+         BE    FUNCLOOK                        BRANCH IF YES            02870000
+         B     VALID                           AND CONTINUE             02880000
+                                                                        02890000
+VALCHKTK DS    0H                                                       02900000
+                                                                        02910000
+         OC    SPLTOKEN,SPLTOKEN           IS THERE A TOKEN?            02920000
+         BZ    VALCHKST                    NO TOKEN, START NEW USER     02930000
+         OC    SPLTOKEN+4(4),SPLTOKEN+4    IS THERE A USER TOKEN ONLY?  02940000
+         BZ    VALCHKST                    BRANCH IF YES                02950000
+         B     ERREXPRM                    ERROR: SESSION TOKEN PASSED  02960000
+                                                                        02970000
+VALCHKST DS    0H                                                       02980000
+                                                                        02990000
+         CLC   SPLFUNC,=A($SESS_START_SESSION) START_SESSION?           03000000
+         BNE   ERRTOKEN                        BRANCH IF NOT            03010000
+                                                                        03020000
+VALSTART DS    0H                                                       03030000
+                                                                        03040000
+         SR    RISESS,RISESS               NO ISESS BLOCK               03050000
+         BAS   R14,VTAMUNLK                DESERIALIZE                  03060000
+         B     FUNCLOOK                    AND CONTINUE START_SESSION   03070000
+                                                                        03080000
+VALID    DS    0H                                                       03090000
+                                                                        03100000
+*---------------------------------------------------------------------- 03110000
+* MAKE AUTO_PROTOCOL DECISIONS                                          03120000
+*---------------------------------------------------------------------- 03130000
+                                                                        03140000
+         TM    SPLF3,SPLF3AUT     AUTO_PROTOCOL=YES SPECIFIED?          03150000
+         BNO   FUNCLOOK           BRANCH IF NOT                         03160000
+                                                                        03170000
+         OI    SPLRH,RHBCI+RHECI  ALWAYS A COMPLETE CHAIN               03180000
+                                                                        03190000
+         TM    ISEF3,ISEF3BB      ARE BRACKETS USED & WE SEND BB?       03200000
+         BZ    APNOBRK            BRANCH IF NOT                         03210000
+         TM    ISES1,ISES1INB     ARE WE INB?                           03220000
+         BO    APNOBRK            BRANCH IF YES                         03230000
+         OI    SPLRH2,RHBBI       SET BB                                03240000
+                                                                        03250000
+APNOBRK  DS    0H                                                       03260000
+                                                                        03270000
+         TM    ISEF3,ISEF3CD      IS CD USED?                           03280000
+         BNO   APNOCD             BRANCH IF NOT                         03290000
+* MAYBE NEED SPECIAL HANDLING FOR LU6.2 FULL DUPLEX                     03300000
+         OI    SPLRH2,RHCDI       SET CD                                03310000
+                                                                        03320000
+APNOCD   DS    0H                                                       03330000
+                                                                        03340000
+         TM    ISEF3,ISEF3DEF     CAN WE ASK FOR DR1/2?                 03350000
+         BNO   APNODR             BRANCH IF NOT                         03360000
+         OI    SPLRH1,RHDR1       ASK FOR A DR1                         03370000
+         B     FUNCLOOK                                                 03380000
+                                                                        03390000
+APNODR   DS    0H                                                       03400000
+                                                                        03410000
+         TM    ISEF3,ISEF3EXR     CAN WE AT LEAST GET ER1/2?            03420000
+         BNO   FUNCLOOK           BRANCH IF NOT                         03430000
+         OI    SPLRH1,RHDR1+RHERI ASK FOR AN ER1                        03440000
+         B     FUNCLOOK                                                 03450000
+                                                                        03460000
+*---------------------------------------------------------------------- 03470000
+* FUNCTION CODE LOOKUP                                                  03480000
+*---------------------------------------------------------------------- 03490000
+                                                                        03500000
+FUNCLOOK DS    0H                                                       03510000
+                                                                        03520000
+         ICM   R15,15,SPLFUNC     FUNCTION CODE                         03530000
+         BNP   RETURN4            BRANCH IF BAD FUNCTION CODE           03540000
+         C     R15,FUNCMAX        CHECK AGAINST MAX FUNCTION CODE       03550000
+         BH    RETURN4            BRANCH IF BAD FUNCTION CODE           03560000
+         BCTR  R15,0              MINUS 1                               03570000
+         SLL   R15,2              MULTIPLY BY 4                         03580000
+         L     R15,FUNCTABL(R15)  OFFSET OF REAL API ROUTINE ADDRESS    03590000
+         A     R15,ICTVTCVT       ADDRESS OF REAL API ROUTINE ADDRESS   03600000
+                                                                        03610000
+         L     R15,0(,R15)        R15 HAS REAL API ROUTINE ADDRESS      03620000
+         BASR  R14,R15            GO TO THE REAL API ROUTINE            03630000
+         STM   R15,R1,RETREGS     SET REGISTERS FOR RETURN              03640000
+         B     RETURN             AND RETURN TO USER'S POINT OF CALL    03650000
+                                                                        03660000
+*---------------------------------------------------------------------- 03670000
+*   SET RETURN CODE OF 8: ENVIRONMENT W/REASON CODE INVALID WU TOKEN    03680000
+*---------------------------------------------------------------------- 03690000
+                                                                        03700000
+ERRWUTKN DS    0H                                                       03710000
+                                                                        03720000
+         MVC   SPLRSNCD,=A($SESS_RSN_WUTOKEN)                           03730000
+         B     RETURN8                                                  03740000
+                                                                        03750000
+*---------------------------------------------------------------------- 03760000
+*   SET RETURN CODE OF 8: ENVIRONMENT W/REASON CODE INVALID TOKEN       03770000
+*---------------------------------------------------------------------- 03780000
+                                                                        03790000
+ERRTOKEN DS    0H                                                       03800000
+                                                                        03810000
+         MVC   SPLRSNCD,=A($SESS_RSN_TOKEN)                             03820000
+         B     RETURN8                                                  03830000
+                                                                        03840000
+*---------------------------------------------------------------------- 03850000
+*   SET RETURN CODE OF 8: ENVIRONMENT W/REASON CODE INVALID IVUSER BLK  03860000
+*---------------------------------------------------------------------- 03870000
+                                                                        03880000
+ERRVUSER DS    0H                                                       03890000
+                                                                        03900000
+         MVC   SPLRSNCD,=A($SESS_RSN_IVUSER)                            03910000
+         B     RETURN8                                                  03920000
+                                                                        03930000
+*---------------------------------------------------------------------- 03940000
+*   SET RETURN CODE OF 4: FUNCTION W/REASON CODE EXTRANEOUS PARM        03950000
+*---------------------------------------------------------------------- 03960000
+                                                                        03970000
+ERREXPRM DS    0H                                                       03980000
+                                                                        03990000
+         MVC   SPLRSNCD,=A($SESS_RSN_EXTRANEOUS_PARM)                   04000000
+         B     RETURN4                                                  04010000
+                                                                        04020000
+*---------------------------------------------------------------------- 04030000
+*   SET RETURN CODE OF 8: ENVIRONMENT ERROR                             04040000
+*---------------------------------------------------------------------- 04050000
+                                                                        04060000
+RETURN8  DS    0H                                                       04070000
+                                                                        04080000
+         MVC   SPLRETCD,=A($SESS_RC_ENVIRONMENT)                        04090000
+         B     RETURN                                                   04100000
+                                                                        04110000
+*---------------------------------------------------------------------- 04120000
+*   SET RETURN CODE OF 4: FUNCTION CODE ERROR                           04130000
+*---------------------------------------------------------------------- 04140000
+                                                                        04150000
+RETURN4  DS    0H                                                       04160000
+                                                                        04170000
+         MVC   SPLRETCD,=A($SESS_RC_FUNCTION)                           04180000
+         B     RETURN                                                   04190000
+                                                                        04200000
+*---------------------------------------------------------------------- 04210000
+*   R E T U R N   T O   C A L L E R                                     04220000
+*---------------------------------------------------------------------- 04230000
+                                                                        04240000
+RETURN   DS    0H                                                       04250000
+                                                                        04260000
+         BAS   R14,VTAMUNLK         RELEASE THE LOCK IF IT IS HELD      04270000
+                                                                        04280000
+         ST    RSPLIST,RETR1        RETURN SPLIST ADDRESS IN R1         04290000
+         MVC   RETR15,SPLRETCD      $SESS_RC_...                        04300000
+         MVC   RETR0,SPLRSNCD       $SESS_RSN_...                       04310000
+                                                                        04320000
+*---------------------------------------------------------------------- 04330000
+* ISSUE DIAGNOSTIC MESSAGE FOR NON-ZERO RETURN CODES                    04340000
+*---------------------------------------------------------------------- 04350000
+                                                                        04360000
+         OC    SPLRETCD,SPLRETCD    IS RETURN CODE ZERO?                04370000
+         BZ    RETNOMSG             BRANCH IF YES                       04380000
+                                                                        04390000
+         $MSG  963,                  "NON-ZERO $SESS RETURN CODE..."   +04400000
+               FIELDS=((RISESS),     ISESS ADDRESS                     +04410000
+               (SPLTOKEN,4),         SESSION TOKEN                     +04420000
+               (SPLTOKEN+4,4),       SESSION TOKEN PART2               +04430000
+               (RSPLIST),            SPLIST ADDRESS                    +04440000
+               (SPLSENSE,4),         SENSE                             +04450000
+               (SPLF1,4),            FLAGS                             +04460000
+               (SPLSTATE,4),         SESSION STATE                     +04470000
+               (SPLAREA,4),          AREA  ADDRESS                     +04480000
+               (SPLAREAL,4),         AREA  LENGTH                      +04490000
+               (SPLCNTRL,3),         RPL CNTRL FLAGS                   +04500000
+               (SPLRH,3),            RPL USERRH                        +04510000
+               (SPLSEQNO,2),         RPL SEQNO                         +04520000
+               (SPLRETCD,4),         THE RETURN CODE                   +04530000
+               (SPLRSNCD,4),         THE REASON CODE                   +04540000
+               (SPLFUNC,4))          THE FUNCTION                       04550000
+                                                                        04560000
+RETNOMSG DS    0H                                                       04570000
+                                                                        04580000
+*---------------------------------------------------------------------- 04590000
+* TRACE THE MODULE EXIT                                                 04600000
+*---------------------------------------------------------------------- 04610000
+                                                                        04620000
+         $TRACE *=A(TRC_ISESAPI_EXIT),32 TRACE ENTRY WITH 32 USER BYTES 04630000
+         BNZ   NOXTRACE                  BRANCH IF NOT TRACING          04640000
+         MVC   0(4,R1),SPLFUNC           TRACE $SESS FUNCTION CODE      04650000
+         ST    RSPLIST,4(,R1)            TRACE SPLIST ADDRESS           04660000
+         MVC   16(12,R1),RETREGS         TRACE 15,0,1 RETURN REGISTERS  04670000
+         MVC   8(8,R1),SPLTOKEN          TRACE SESSION TOKEN            04680000
+NOXTRACE DS    0H                                                       04690000
+                                                                        04700000
+         LM    R15,R1,RETREGS       LOAD RETURN REGISTERS               04710000
+                                                                        04720000
+         #EXIT R1=YES               RETURN W/R15,R0,R1                  04730000
+                                                                        04740000
+*---------------------------------------------------------------------- 04750000
+*   SUBROUTINE: OBTAIN VTAM GLOBAL LOCK                                 04760000
+*---------------------------------------------------------------------- 04770000
+                                                                        04780000
+VTAMLOCK DS    0H                                                       04790000
+                                                                        04800000
+         TM    FLAG,FLAGLOCK        HAVE WE ALREADY OBTAINED THE LOCK?  04810000
+         BOR   R14                  JUST RETURN IF IT IS                04820000
+         STM   R14,R2,SUB0SAVE      SAVE CALLER'S REGISTERS             04830000
+                                                                        04840000
+         $SER  OBTAIN,                                                 +04850000
+               VTAM                                                     04860000
+                                                                        04870000
+         C     R15,=F'4'            LOCK HELD BY CALLER?                04880000
+         BNE   VTAMLOEX             BRANCH IF NOT                       04890000
+         OI    FLAG,FLAGLCKD        REMEMBER THAT CALLER HELD LOCK      04900000
+                                                                        04910000
+VTAMLOEX DS    0H                                                       04920000
+                                                                        04930000
+         OI    FLAG,FLAGLOCK        REMEMBER LOCK IS HELD               04940000
+         LM    R14,R2,SUB0SAVE      RESTORE CALLER'S REGISTERS          04950000
+         BR    R14                  RETURN                              04960000
+                                                                        04970000
+*---------------------------------------------------------------------- 04980000
+*   SUBROUTINE: RELEASE VTAM GLOBAL LOCK                                04990000
+*---------------------------------------------------------------------- 05000000
+                                                                        05010000
+VTAMUNLK DS    0H                                                       05020000
+                                                                        05030000
+         TM    FLAG,FLAGLOCK        IS THE LOCK HELD?                   05040000
+         BNOR  R14                  JUST RETURN IF NOT                  05050000
+         TM    FLAG,FLAGLCKD        WAS LOCK HELD ON ENTRY?             05060000
+         BOR   R14                  DON'T RELEASE IF IT WAS             05070000
+         STM   R14,R2,SUB0SAVE      SAVE CALLER'S REGISTERS             05080000
+                                                                        05090000
+         $SER  RELEASE,                                                +05100000
+               VTAM                                                     05110000
+                                                                        05120000
+         NI    FLAG,255-FLAGLOCK    SHOW LOCK NOT HELD                  05130000
+         LM    R14,R2,SUB0SAVE      RESTORE CALLER'S REGISTERS          05140000
+         BR    R14                  RETURN                              05150000
+                                                                        05160000
+*---------------------------------------------------------------------- 05170000
+* FUNCTION CODE LOOKUP TABLE                                            05180000
+*---------------------------------------------------------------------- 05190000
+                                                                        05200000
+FUNCTABL                     DS    0A                                   05210000
+#SESS_SEND_DATA              DC    A(ISE@API1-IVTAMCVT) 1               05220000
+#SESS_SEND_POSRESP           DC    A(ISE@API1-IVTAMCVT) 2               05230000
+#SESS_SEND_NEGRESP           DC    A(ISE@API1-IVTAMCVT) 3               05240000
+#SESS_SEND_SIGNAL            DC    A(ISE@API1-IVTAMCVT) 4               05250000
+#SESS_SEND_BID               DC    A(ISE@API1-IVTAMCVT) 5               05260000
+#SESS_SEND_LUSTAT            DC    A(ISE@API1-IVTAMCVT) 6               05270000
+#SESS_SEND_CANCEL            DC    A(ISE@API1-IVTAMCVT) 7               05280000
+#SESS_SEND_RTR               DC    A(ISE@API1-IVTAMCVT) 8               05290000
+#SESS_SEND_CHASE             DC    A(ISE@API1-IVTAMCVT) 9               05300000
+#SESS_SEND_RELQ              DC    A(ISE@API1-IVTAMCVT) 10              05310000
+#SESS_SEND_QEC               DC    A(ISE@API1-IVTAMCVT) 11              05320000
+#SESS_SEND_QC                DC    A(ISE@API1-IVTAMCVT) 12              05330000
+#SESS_SEND_SBI               DC    A(ISE@API1-IVTAMCVT) 13              05340000
+#SESS_SEND_BIS               DC    A(ISE@API1-IVTAMCVT) 14              05350000
+#SESS_SEND_SDT               DC    A(ISE@API1-IVTAMCVT) 15              05360000
+#SESS_SEND_CLEAR             DC    A(ISE@API1-IVTAMCVT) 16              05370000
+#SESS_SEND_STSN              DC    A(ISE@API1-IVTAMCVT) 17              05380000
+#SESS_SEND_RQR               DC    A(ISE@API1-IVTAMCVT) 18              05390000
+#SESS_SEND_SHUTD             DC    A(ISE@API1-IVTAMCVT) 19              05400000
+#SESS_SEND_SHUTC             DC    A(ISE@API1-IVTAMCVT) 20              05410000
+#SESS_SEND_RSHUTD            DC    A(ISE@API1-IVTAMCVT) 21              05420000
+#SESS_RECEIVE                DC    A(ISE@API1-IVTAMCVT) 22              05430000
+#SESS_EXTRACT                DC    A(ISE@API1-IVTAMCVT) 23              05440000
+#SESS_START_SESSION          DC    A(ISE@API1-IVTAMCVT) 24              05450000
+#SESS_END_SESSION            DC    A(ISE@API1-IVTAMCVT) 25              05460000
+#SESS_ADD_SESSION            DC    A(ISE@API2-IVTAMCVT) 26              05470000
+#SESS_DELETE_SESSION         DC    A(ISE@API2-IVTAMCVT) 27              05480000
+#SESS_FIND_SESSION           DC    A(ISE@API2-IVTAMCVT) 28              05490000
+FUNCMAX                      DC    A((*-FUNCTABL)/4)                    05500000
+                                                                        05510000
+*---------------------------------------------------------------------- 05520000
+*   C O N S T A N T S   A N D   L I T E R A L S                         05530000
+*---------------------------------------------------------------------- 05540000
+                                                                        05550000
+         LTORG ,                                                        05560000
+                                                                        05570000
+*---------------------------------------------------------------------- 05580000
+*   D S E C T S                                                         05590000
+*---------------------------------------------------------------------- 05600000
+                                                                        05610000
+         PRINT NOGEN                                                    05620000
+         IHAPSA ,                 MVS PREFIXED SAVE AREA                05630000
+         ISTDBIND ,               VTAM BIND IMAGE                       05640000
+         ISTRH ,                  VTAM SNA REQUEST HEADER               05650000
+         TRACODES ,               INTEGRATOR TRACE CODE EQUATES         05660000
+         ICVT  ,                  INTEGRATOR CVT                        05670000
+         IVTAMCVT ,               INTEGRATOR VTAM CVT                   05680000
+         ITASK ,                  INTEGRATOR TASK BLOCK                 05690000
+         IPCB ,                   INTEGRATOR PROC BLOCK                 05700000
+         IVUSER ,                 INTEGRATOR VTAM USER BLOCK            05710000
+         IACB ,                   INTEGRATOR VTAM ACB+                  05720000
+         IRPL ,                   INTEGRATOR VTAM RPL+                  05730000
+         INIB ,                   INTEGRATOR VTAM NIB+                  05740000
+         ISESS ,                  INTEGRATOR SESSION CONTROL            05750000
+         IRQE ,                   INTEGRATOR RECEIVE QUEUE ELEMENT      05760000
+         IWEVTAM ,                INTEGRATOR VTAM WORK ELEMENTS         05770000
+         TMSG  ,                  INTEGRATOR INTERTASK MSG FORMAT       05780000
+         EVCODES ,                INTEGRATOR EVENT CODES                05790000
+         ABCODES ,                INTEGRATOR $ABEND CODES               05800000
+         MSGCODES ,               INTEGRATOR INTERTASK MSGING CODES     05810000
+         $TASK DSECT=YES          INTEGRATOR $TASK SERVICES             05820000
+         $VTAM DSECT=YES          INTEGRATOR $VTAM SERVICES             05830000
+         $SESS DSECT=YES          INTEGRATOR $SESS SERVICES             05840000
+         IFGEXLST ,               VTAM EXIT LIST                        05850000
+         END   ,                                                        05860000

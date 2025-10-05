@@ -1,0 +1,723 @@
+ISERGETL TITLE '- ACQUIRE LOCK'                                         00010000
+**<DOC-ON>******************************************************        00020000
+*                                                                       00030000
+* ROUTINE: ISERGETL - Acquire lock                                      00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This routine implements the $SER OBTAIN lock acquisition           00080000
+*    service which is used to serialize access to a resource            00090000
+*    designated by a $LOCK on behalf of a workunit.  Lock               00100000
+*    requests may be made by standard workunits and SRBs.               00110000
+*    IRB mode requests are prohibited.                                  00120000
+*                                                                       00130000
+*    Two types of locks are defined.  One group is referred to          00140000
+*    as the "global lock group".  These are single-instance             00150000
+*    locks, each of which covers all resources associated with          00160000
+*    the lock.  These locks are usually obtained and released           00170000
+*    by name.  Global locks must be acquired in lock Hierarchy          00180000
+*    sequence.                                                          00190000
+*                                                                       00200000
+*    The second group is composed of application defined locks.         00210000
+*    It is assumed that application defined locks are                   00220000
+*    multi-instance locks, allowing the application to lock             00230000
+*    individual resources, and potentially manage a large               00240000
+*    number of locks.  No lock acquisition hierarchy is imposed         00250000
+*    on application defined locks.  Application, multi-instance         00260000
+*    locks (MILs) are identified by the absence of a class bit          00270000
+*    in the LOCKCLAS field.  MILs must be obtained and released         00280000
+*    by address.                                                        00290000
+*                                                                       00300000
+*                                                                       00310000
+* METHOD:                                                               00320000
+*                                                                       00330000
+*    If the lock is immediately available, it is acquired and           00340000
+*    control returns to the requestor without examination of            00350000
+*    any other workunit.   If the lock is not available, the            00360000
+*    execution of the workunit is either blocked until the              00370000
+*    lock is acquired (COND=NO), or the requestor is so                 00380000
+*    informed via RC (COND=YES).  Note that a CANCEL requests           00390000
+*    request received by the workunit also causes lock                  00400000
+*    acquisition to fail.                                               00410000
+*                                                                       00420000
+*    The blocking technique used depends on the type of work            00430000
+*    unit.  In all cases, the blocked workunit is represented           00440000
+*    by attaching a $QLOCK entry to the Deferred Execution Queue        00450000
+*    maintained in the lock (ref $LOCK).                                00460000
+*                                                                       00470000
+*    In the standard environment (process and ITASK modes), an          00480000
+*    EPB is set in the $QLOCK and a $TASK WAIT is issued. In SRB        00490000
+*    mode, SUSPEND is issued and the SRB token needed to RESUME         00500000
+*    the SRB is captured in the SUSPEND exit routine.                   00510000
+*                                                                       00520000
+*                                                                       00530000
+* ON ENTRY:                                                             00540000
+*                                                                       00550000
+*    R1  Contains the address of a lock structure described by          00560000
+*        $LOCK                                                          00570000
+*                                                                       00580000
+*    R0  The high order bit is set if the request is contingent         00590000
+*        upon the lock being immediately available (COND=YES).          00600000
+*        No implicit waits occur on a COND=YES request.                 00610000
+*                                                                       00620000
+*        For non-standard workunits only, bits 1-31 designate           00630000
+*        the address of a $QLOCK used to represent the work             00640000
+*        unit's lock status and requirements.                           00650000
+*                                                                       00660000
+*                                                                       00670000
+* ON EXIT:                                                              00680000
+*                                                                       00690000
+*    R15 contains one of the following return codes                     00700000
+*                                                                       00710000
+*        RC00 - lock obtained                                           00720000
+*        RC04 - lock already held by workunit                           00730000
+*        RC08 - lock obtain failed                                      00740000
+*                                                                       00750000
+**<DOC-OFF>*****************************************************        00760000
+                                                                        00770000
+                                                                        00780000
+****************************************************************        00790000
+*                                                                       00800000
+* MAINTENANCE:                                                          00810000
+*                                                                       00820000
+*   06/15/93 R. Turgeon                                                 00830000
+*            Initial version                                            00840000
+*                                                                       00850000
+*   12/06/94 R. Colmone                                                 00860000
+*            Added QLOCK parameter to $SER REQUEUE request.             00870000
+*            Defer allocation of 1K $TASK workarea until                00880000
+*            required, if ever.                                         00890000
+*                                                                       00900000
+*   09/25/95 R. Colmone                                                 00910000
+*            MIL locks held by a workunit are now maintained            00920000
+*            in the workunits QLOCK (MIL lock held array).              00930000
+*                                                                       00940000
+*   11/04/95 R. Turgeon                                                 00950000
+*            New approach to the $TRACE strategy with the aim           00960000
+*            to reduce the number of trace records cut by lock          00970000
+*            requests.                                                  00980000
+*                                                                       00990000
+****************************************************************        01000000
+                                                                        01010000
+         EJECT                                                          01020000
+         #WORK ,                                                        01030000
+                                                                        01040000
+FLAGS    DS    X                  LOCAL FLAGS                           01050000
+F_EPBSET EQU   X'80'                 EPB REQUIRES POST                  01060000
+                                                                        01070000
+REQFLAGS DS    X                  REQUEST FLAGS                         01080000
+REQCOND  EQU   X'80'                 CONDITIONAL REQUEST                01090000
+REQMIL   EQU   X'40'                 MULTI-INSTANCE LOCK                01100000
+                                                                        01110000
+CLASS    DS    X                  LOCK CLASS - HIERARCHY POSITION       01120000
+BYTE     DS    X                  WORKAREA                              01130000
+                                                                        01140000
+RETCODE  DS    F                  RETURN CODE                           01150000
+RSNCODE  DS    F                  REASON CODE                           01160000
+PITASK   DS    A                  CURRENT ITASK OR ZERO                 01170000
+PIPCB    DS    A                  CURRENT IPCB  OR ZERO                 01180000
+PQLOCK   DS    A                  $QLOCK ASSOCIATED WITH WORKUNIT       01190000
+                                                                        01200000
+STGQLOCK DS    A                  ADDR OF DYNAM ACQUIRED $QLOCK         01210000
+STGQLEN  DS    F                  LENG OF DYNAM $QLOCK                  01220000
+                                                                        01230000
+$TASKMFL $TASK MF=(L,*)           $TASK PLIST CONSTRUCTION AREA         01240000
+                                                                        01250000
+CPYLOCK  DS    XL(LOCKLN)         DIAGNOSTIC COPY OF FAILING LOCK       01260000
+CPYQLOCK DS    XL(QLOCKLN)        DIAGNOSTIC COPY OF FAILING $QLOCK     01270000
+                                                                        01280000
+WORK1K@  DS    A                  ADDR OF 1K $TASK WORKAREA             01290000
+                                                                        01300000
+         #ENDWORK ,                                                     01310000
+                                                                        01320000
+         EJECT                                                          01330000
+         $LOCK ,                  LOCK STRUCTURE                        01340000
+                                                                        01350000
+         EJECT                                                          01360000
+         $QLOCK ,                 LOCK QUEUE ENTRY AND STATUS           01370000
+                                                                        01380000
+         EJECT                                                          01390000
+         EVCODES ,                EVENT CODES                           01400000
+                                                                        01410000
+         ABCODES ,                ABEND CODES                           01420000
+                                                                        01430000
+         TRACODES ,               TRACE EVENT CODES                     01440000
+                                                                        01450000
+         EQUS  STDENV=TEST        GENERAL EQUATES                       01460000
+                                                                        01470000
+         EJECT                                                          01480000
+ISERGETL #ENTER PREG=(R8,R6)                                            01490000
+         USING ITASK,R10          ESTABLISH ADDRESSABILITY              01500000
+                                                                        01510000
+         EJECT                                                          01520000
+****************************************************************        01530000
+*                                                                       01540000
+*   Identify requestor, locate associated $QLOCK block                  01550000
+*                                                                       01560000
+****************************************************************        01570000
+                                                                        01580000
+         LTR   R8,R8              LOCK MGR NOT YET INITIALIZED          01590000
+         BZ    RET_HAVE           INFORM CALLER THAT LOCK PREV OBTAINED 01600000
+         USING LOCK,R8            LOCK FORMAT                           01610000
+         STCM  R6,8,REQFLAGS      SAVE OPTION FLAGS                     01620000
+         NI    REQFLAGS,REQCOND   RETAIN COND= OPTION                   01630000
+         LA    R6,0(,R6)          ISOLATE $QLOCK ADDR IF NON-STD WU     01640000
+         ST    R6,PQLOCK          SAVE $QLOCK ADDRESS PROVIDED          01650000
+                                                                        01660000
+         ST    R10,PITASK         IDENTIFY CURRENT ITASK                01670000
+         LTR   R10,R10            PROCESS IN CONTROL?                   01680000
+         BZ    *+10               SKIP IF NOT                           01690000
+         MVC   PIPCB,TSKPCBC      ELSE EXTRACT PTR                      01700000
+                                                                        01710000
+         ICM   R6,15,PQLOCK       MUST EXTRACT $QLOCK PTR FROM WU?      01720000
+         BNZ   VERQLOCK           SKIP IF NOT                           01730000
+         ICM   R15,15,PITASK      TASK RUNNING?                         01740000
+         BZ    *+10               SKIP IF NOT                           01750000
+         MVC   PQLOCK,TSKSERQ-ITASK(R15)                                01760000
+         ICM   R15,15,PIPCB       PROCESS RUNNING?                      01770000
+         BZ    *+10               SKIP IF NOT                           01780000
+         MVC   PQLOCK,PCBSERQ-IPCB(R15)                                 01790000
+                                                                        01800000
+VERQLOCK DS    0H                                                       01810000
+                                                                        01820000
+*--------------------------------------------------------------         01830000
+*   Request validation                                                  01840000
+*--------------------------------------------------------------         01850000
+                                                                        01860000
+         ICM   R7,15,PQLOCK       $QLOCK ASSOCIATED WITH WORKUNIT?      01870000
+         BZ    ABNQLOCK           REQUEST IS INVALID OTHERWISE          01880000
+         USING QLOCK,R7           REFRESH PER MODULE CONVENTION         01890000
+         CLC   QLOID,=CL8'QLOCK'  APPROPRIATE INPUT?                    01900000
+         BNE   ABNQLOCK           ERROR OTHERWISE                       01910000
+                                                                        01920000
+         EJECT                                                          01930000
+****************************************************************        01940000
+*                                                                       01950000
+*   Global, single instance locks must be acquired in hier.             01960000
+*   sequence as defined in LOCKCLAS.  Ownership of these locks          01970000
+*   can be determined by inspecting the $QLOCK "locks held"             01980000
+*   mask.                                                               01990000
+*                                                                       02000000
+*   No access sequence is imposed on dynamically defined,               02010000
+*   multiple instance locks (MILs).  These are recognized by            02020000
+*   a null LOCKCLAS field.  Ownership of these locks is                 02030000
+*   determined by workunit / $QLOCK compare.                            02040000
+*                                                                       02050000
+****************************************************************        02060000
+                                                                        02070000
+         ICM   R0,1,LOCKCLAS      GLOBAL LOCK?                          02080000
+         BNZ   GLOBAL             ONWARD IF SO                          02090000
+         OI    REQFLAGS,REQMIL    INDICATE MULTI-INSTANCE LOCK          02100000
+         CLC   LOCKITSK,PITASK    DETERMINE                             02110000
+         BNE   PROCREQ            ... IF THE REQUESTD LOCK              02120000
+         CLC   LOCKIPCB,PIPCB     ... IS ALREADY HELD BY SOME           02130000
+         BNE   PROCREQ            ... OTHER ITASK / PROCESS             02140000
+         CLC   LOCKQ,PQLOCK                                             02150000
+         BNE   PROCREQ                                                  02160000
+         B     RET_HAVE           LOCK ALREADY HELD                     02170000
+                                                                        02180000
+GLOBAL   DS    0H                                                       02190000
+         MVC   CLASS,LOCKCLAS     ELSE USE $LOCK DESCRIPTION            02200000
+         NC    CLASS,QLOHELD      LOCK ALREADY OWNED?                   02210000
+         BNZ   RET_HAVE           NO FURTHER VALIDATION IF SO           02220000
+                                                                        02230000
+         CLC   LOCKCLAS,QLOHELD   REQS PROGRESS UPWARD THRU HIERARCHY?  02240000
+         BNH   ABN_LSEQ           LOCK REQUEST PROTOCOL VIOLATION       02250000
+         TM    REQFLAGS,REQCOND   CONDITIONAL REQUEST?                  02260000
+         BO    PROCREQ            WAITS NEVER OCCUR                     02270000
+         TM    LOCKCLAS,LC_LOCAL  REQUEST FOR LOCAL LOCK?               02280000
+         BO    PROCREQ            LOCK UNAVAIL IS TASK LEVEL WAIT       02290000
+         ICM   R0,3,QLONWAIT      CAN WORKUNIT TOLERATE A WAIT?         02300000
+         BNZ   ABN_WAIT           FAIL IF NOT, WE MAY NEED TO WAIT      02310000
+                                                                        02320000
+         EJECT                                                          02330000
+****************************************************************        02340000
+*                                                                       02350000
+*   Distinct handling of requests for the MVS local lock                02360000
+*                                                                       02370000
+****************************************************************        02380000
+                                                                        02390000
+PROCREQ  DS    0H                                                       02400000
+         TM    LOCKCLAS,LC_LOCAL  REQUEST FOR LOCAL LOCK?               02410000
+         BNO   STDLOCK            SKIP IF NOT                           02420000
+         TM    ICTSTAT2,ICT2$SUP  RUNNING SUP STATE?                    02430000
+         BZ    ABN_PVOP           PRIVOP FAILS                          02440000
+                                                                        02450000
+         L     R0,LOCKREQS        NUMBER OF REQUESTS FOR LOCK           02460000
+                                                                        02470000
+ASSAULT1 DS    0H                                                       02480000
+         LR    R1,R0              REQUEST COUNT                         02490000
+         AL    R1,=F'1'           ACCOUNT FOR THIS REQUEST              02500000
+         CS    R0,R1,LOCKREQS     SAVE UPDATED COUNT                    02510000
+         BNZ   ASSAULT1           REGISTER THIS ATTEMPT                 02520000
+                                                                        02530000
+*---------------------------------------------------------------        02540000
+*   Approximation of lock-in-use for statistics                         02550000
+*---------------------------------------------------------------        02560000
+                                                                        02570000
+         USING PSA,R0             PSA ADDRESSABILITY                    02580000
+         L     R2,PSAAOLD         OUR ASCB                              02590000
+         ICM   R0,15,ASCBLOCK-ASCB(R2)  LOCAL LOCK APPEARS IN USE?      02600000
+         BZ    NOLOCAL                                                  02610000
+                                                                        02620000
+         L     R0,LOCKDEFS        NUMBER OF REQUESTS FOR LOCK BLOCKED   02630000
+                                                                        02640000
+BLOCKLCL DS    0H                                                       02650000
+         LR    R1,R0              REQUEST COUNT                         02660000
+         AL    R1,=F'1'           ACCOUNT FOR THIS REQUEST              02670000
+         CS    R0,R1,LOCKDEFS     SAVE UPDATED COUNT                    02680000
+         BNE   BLOCKLCL           REGISTER THIS ATTEMPT                 02690000
+                                                                        02700000
+NOLOCAL  DS    0H                                                       02710000
+         DROP  R0                 PSA                                   02720000
+                                                                        02730000
+*---------------------------------------------------------------        02740000
+*   Acquire the LOCAL lock                                              02750000
+*---------------------------------------------------------------        02760000
+                                                                        02770000
+         MODESET EXTKEY=ZERO,     KEY=0 REQUIRED FOR SETLOCK           X02780000
+               SAVEKEY=(2)                                              02790000
+                                                                        02800000
+         SETLOCK OBTAIN,          OBTAIN HOME A/S LOCAL LOCK           X02810000
+               TYPE=LOCAL,                                             X02820000
+               MODE=UNCOND,                                            X02830000
+               REGS=USE                                                 02840000
+                                                                        02850000
+         MODESET KEYADDR=(2)      RESTORE TO CALLER'S KEY               02860000
+                                                                        02870000
+         B     *+4(R15)           BRANCH ON RC                          02880000
+         B     MVSLOCAL              RC00 - LOCK OBTAINED               02890000
+         B     RET_HAVE              RC04 - LOCK ALREADY OWNED          02900000
+         B     RET_FAIL              RC08 - LOCK COULD NOT BE OBTAINED  02910000
+                                                                        02920000
+MVSLOCAL DS    0H                 SPECIAL TAGGING FOR MVS LOCAL LOCK    02930000
+         LTR   R10,R10            STANDARD ENVIRONMENT?                 02940000
+         BZ    *+8                SKIP IF NOT                           02950000
+         OI    TSKFLGS,TSK$LOCK   INDICATE ITASK HOLDS LOCAL LOCK       02960000
+         B     POSTOWNR                                                 02970000
+                                                                        02980000
+         EJECT                                                          02990000
+****************************************************************        03000000
+*                                                                       03010000
+*   Acquire designated $LOCK if available                               03020000
+*                                                                       03030000
+****************************************************************        03040000
+                                                                        03050000
+STDLOCK  DS    0H                                                       03060000
+         L     R0,LOCKREQS        NUMBER OF REQUESTS FOR LOCK           03070000
+                                                                        03080000
+ASSAULT2 DS    0H                                                       03090000
+         LR    R1,R0              REQUEST COUNT                         03100000
+         AL    R1,=F'1'           ACCOUNT FOR THIS REQUEST              03110000
+         CS    R0,R1,LOCKREQS     SAVE UPDATED COUNT                    03120000
+         BNZ   ASSAULT2           REGISTER THIS ATTEMPT                 03130000
+                                                                        03140000
+*---------------------------------------------------------------        03150000
+*   Attempt acquisition of lock                                         03160000
+*---------------------------------------------------------------        03170000
+                                                                        03180000
+         LM    R0,R1,LOCKSWAP     ACQUIRE LOCK STATUS WORDS             03190000
+         LR    R3,R1              MAINTAIN DEFERRED EXEC QUEUE          03200000
+         LTR   R2,R0              NUMBER OF ENTRIES ON DFEXEQ           03210000
+         BM    TCOND1             LOCK IS NOT AVAILABLE                 03220000
+         O     R2,=X'80000000'    LOCK HELD IF ACQUIRED                 03230000
+         CDS   R0,R2,LOCKSWAP     ATTEMPT CHEAP ACQUISITION             03240000
+         BE    POSTOWNR           ITS OURS                              03250000
+                                                                        03260000
+TCOND1   DS    0H                 COND=YES REQS DO NOT BLOCK            03270000
+         TM    REQFLAGS,REQCOND   CONDITIONAL REQUEST?                  03280000
+         BO    RET_FAIL           LOCK NOT AVAILABLE IF SO              03290000
+         B     ENQUEUE            DEFER FURTHER EXECUTION               03300000
+                                                                        03310000
+****************************************************************        03320000
+*                                                                       03330000
+*   Lock acquired, identify new owner and record in workunit            03340000
+*                                                                       03350000
+****************************************************************        03360000
+                                                                        03370000
+POSTOWNR DS    0H                                                       03380000
+         ST    R7,LOCKQ           $QLOCK BLOCK IS ALWAYS UNIQUE         03390000
+         L     R0,PIPCB                                                 03400000
+         ST    R0,LOCKIPCB        PROCESS WORKUNIT OR ZERO              03410000
+         L     R0,PITASK                                                03420000
+         ST    R0,LOCKITSK        ITASK WORKUNIT OR ZERO                03430000
+                                                                        03440000
+         OC    QLOHELD,LOCKCLAS   POST LOCK HELD, IF GLOBAL LOCK        03450000
+         TM    LOCKATTR,LA_NWAIT  LOCK TOLERATES WAITS?                 03460000
+         BNO   POSTEND            SKIP IF SO                            03470000
+                                                                        03480000
+         LH    R15,QLONWAIT       NUMBER OF NO-WAIT LOCKS HELD          03490000
+         LA    R15,1(,R15)        ACCOUNT FOR NEW ACQUISITION           03500000
+         STH   R15,QLONWAIT       SAVE UPDATED COUNT                    03510000
+                                                                        03520000
+POSTEND  DS    0H                                                       03530000
+         TM    REQFLAGS,REQMIL    MULTI-INSTANCE LOCK?                  03540000
+         BNO   POSTFIN            DONE IF NOT                           03550000
+                                                                        03560000
+         L     R15,QLOMILCT       ACCESS COUNT                          03570000
+         LA    R15,1(,R15)        ACCOUNT FOR USAGE                     03580000
+         ST    R15,QLOMILCT       REPLACE UPDATED VALUE                 03590000
+                                                                        03600000
+         LR    R1,R8              ADDRESS OF LOCK                       03610000
+         LR    R0,R7              ADDRESS OF QLOCK                      03620000
+         BAS   R14,MILHELD        UPDATE MIL LOCKS HELD ARRAY           03630000
+                                                                        03640000
+POSTFIN  DS    0H                                                       03650000
+         B     RET_ACQ            LOCK ACQUIRED                         03660000
+                                                                        03670000
+         EJECT                                                          03680000
+****************************************************************        03690000
+*                                                                       03700000
+*   Request deferral for calls made in standard execution env           03710000
+*                                                                       03720000
+****************************************************************        03730000
+                                                                        03740000
+ENQUEUE  DS    0H                 R0 CONTAINS DFEXEQ LIST SIZE          03750000
+         ICM   R0,15,PITASK       STANDARD ENVIRONMENT?                 03760000
+         BZ    SRBREQ             ELSEWHERE IF NOT                      03770000
+                                                                        03780000
+         TM    FLAGS,F_EPBSET     EPB DECLARED ON PRIOR PASS?           03790000
+         BO    READYEPB           SKIP DECLARE IF SO                    03800000
+         OI    FLAGS,F_EPBSET     INDICATE EPB READY                    03810000
+                                                                        03820000
+         MVC   CPYLOCK,LOCK       ASSERTION: $QLOCK IS AVAILABLE        03830000
+         MVC   CPYQLOCK,QLOCK     DISPATCH FAILURE OTHERWISE            03840000
+         TM    QLOFLAGS,QLOFINQ   WORKUNIT ALREADY WAITING ON A LOCK    03850000
+         BO    ABN_DISP           WE SHOULD NOT BE DISPATCHABLE IF SO   03860000
+                                                                        03870000
+*---------------------------------------------------------------        03880000
+*   Standard itask / process execution block via epb                    03890000
+*---------------------------------------------------------------        03900000
+                                                                        03910000
+         $QLOCK CLEAR,ENTRY=QLOCK PREPARE FOR NEW REQUEST               03920000
+                                                                        03930000
+         OI    QLOFLAGS,QLOFSTD   STANDARD WORKUNIT (ITASK OR PROCESS)  03940000
+                                                                        03950000
+         BAS   R14,GETWORK        ACQUIRE $TASK MGR WORKAREA            03960000
+         LR    R3,R1              STANDARD WORKAREA PTR                 03970000
+                                                                        03980000
+         $TASK SETEPB,            DECLARE LOCK-AVAIL EPB               X03990000
+               EPB=QLOEPBAL,                                           X04000000
+               ECODE=EC$SER,                                           X04010000
+               ERRET=ABN_TASK,                                         X04020000
+               WORKA=(R3),                                             X04030000
+               MF=(E,$TASKMFL)                                          04040000
+                                                                        04050000
+*---------------------------------------------------------------        04060000
+*   Put entry on lock deferred exec q - lock may become avail           04070000
+*---------------------------------------------------------------        04080000
+                                                                        04090000
+READYEPB DS    0H                                                       04100000
+         LA    R1,QLOCK           R1 <== LOCK DEFERRED REQ ENTRY        04110000
+         BAS   R14,INQ            ENQUEUE ON THE LOCK                   04120000
+         BNZ   STDLOCK            LOCK BECAME AVAILABLE                 04130000
+                                                                        04140000
+*---------------------------------------------------------------        04150000
+*   Lock still held, $TRACE the intent to wait                          04160000
+*---------------------------------------------------------------        04170000
+                                                                        04180000
+         $TRACE *=A(TRC_GETLOCK),6*4                                    04190000
+         BNZ   EWAITTRC           TRACE NOT ACTIVE/AVAIL                04200000
+                                                                        04210000
+         ST    R8,0(,R1)          SAVE ADDRESS OF LOCK                  04220000
+         MVC   4(4,R1),RETCODE    POST COMPLETION CODE                  04230000
+         MVC   4(1,R1),REQFLAGS   OPTION FLAGS                          04240000
+         MVC   8(8,R1),LOCKNAME   INSERT LOCK NAME                      04250000
+         MVC   16(4,R1),PQLOCK    RETURN ADDRESS                        04260000
+         L     R2,4(,R13)         ADDRESS OF CALLERS SAVEAREA           04270000
+         MVC   20(4,R1),12(R2)    RETURN ADDRESS                        04280000
+                                                                        04290000
+EWAITTRC DS    0H                                                       04300000
+                                                                        04310000
+*---------------------------------------------------------------        04320000
+*   Await lock availability                                             04330000
+*---------------------------------------------------------------        04340000
+                                                                        04350000
+         LA    R2,FALSE           ASSUME TWAIT=NO                       04360000
+         TM    LOCKATTR,LA_TASKW  LOCK BLOCKS ENTIRE ITASK?             04370000
+         BNO   *+8                SKIP IF NOT                           04380000
+         LA    R2,TRUE            ELSE USING EXPENSIVE LOCK             04390000
+                                                                        04400000
+         BAS   R14,GETWORK        ACQUIRE $TASK MGR WORKAREA            04410000
+         LR    R3,R1              STANDARD WORKAREA PTR                 04420000
+                                                                        04430000
+         $TASK WAIT,              WAIT FOR LOCK-READY EVENT            X04440000
+               EPB=QLOEPBAL,      $QLOCK RESIDENT EPB                  X04450000
+               TWAIT=(R2),        SCOPE OF WAIT (ITASK OR PROCESS)     X04460000
+               CANCEL=CNCLREQ,    CANCEL REQUEST RECEIVED              X04470000
+               WORKA=(R3),                                             X04480000
+               MF=(E,$TASKMFL)                                          04490000
+                                                                        04500000
+         NI    FLAGS,FF-F_EPBSET  EPB HAS BEEN CLEARED                  04510000
+         TM    QLOFLAGS,QLOFCNCL  WORKUNIT DENIED ACCESS TO LOCK?       04520000
+         BO    RET_FAIL           FAILURE IF SO                         04530000
+         B     STDLOCK            REATTEMPT REACQUISITION OF THE LOCK   04540000
+                                                                        04550000
+*---------------------------------------------------------------        04560000
+*   Cancel request recieved for workunit - withdraw lock req            04570000
+*---------------------------------------------------------------        04580000
+                                                                        04590000
+CNCLREQ  DS    0H                                                       04600000
+         OI    QLOFLAGS,QLOFCNCL  INDICATE CANCELATION OF REQUEST       04610000
+         TM    QLOFLAGS,QLOFINQ   WAITING FOR LOCK?                     04620000
+         BNO   RET_FAIL           BLOCK HAS CLEARED IF NOT              04630000
+                                                                        04640000
+         $SER  REQUEUE,           WITHDRAW PENDING LOCK REQUEST        +04650000
+               QLOCK=QLOCK,                                            +04660000
+               LOCKPTR=*QLOLOCK                                         04670000
+         B     RET_FAIL           DONE                                  04680000
+                                                                        04690000
+         EJECT                                                          04700000
+****************************************************************        04710000
+*                                                                       04720000
+*   Request deferral for SRB mode callers                               04730000
+*                                                                       04740000
+*   (Run inq routine in suspend exit, canceling via RC04 if             04750000
+*    the lock becomes available in route).                              04760000
+*                                                                       04770000
+****************************************************************        04780000
+                                                                        04790000
+SRBREQ   DS    0H                                                       04800000
+         USING QLOCK,R7           PREPARE $QLOCK FOR ENQUEUE            04810000
+         ICM   R7,15,STGQLOCK     $QLOCK PREVIOUSLY ACQUIRED?           04820000
+         BZ    SRBINIT            SKIP STORAGE OPERATION IF SO          04830000
+                                                                        04840000
+         LA    R2,QLOCKLN         LENGTH OF $QLOCK                      04850000
+                                                                        04860000
+         $GETSTOR (R2),COND=NO,CLEAR=NO   ACQUIRE STORAGE               04870000
+                                                                        04880000
+         ST    R1,STGQLOCK        RETAIN $QLOCK ADDR                    04890000
+         ST    R2,STGQLEN         AND $QLOCK LEN                        04900000
+         LR    R7,R1              ASSIGN PERM BASE                      04910000
+                                                                        04920000
+SRBINIT  DS    0H                                                       04930000
+         $QLOCK INIT,ENTRY=QLOCK  INITIALIZE LOCK QUEUE ENTRY           04940000
+                                                                        04950000
+         OI    QLOFLAGS,QLOFSRB   WORKUNIT IS AN SRB                    04960000
+                                                                        04970000
+         EX    R0,*               NOT IMPLEMENTED                       04980000
+                                                                        04990000
+         EJECT                                                          05000000
+****************************************************************        05010000
+*                                                                       05020000
+*   Return completion status to caller                                  05030000
+*                                                                       05040000
+****************************************************************        05050000
+                                                                        05060000
+RET_ACQ  DS    0H                                                       05070000
+         LA    R15,RC00           SERIALIZATION OBTAINED                05080000
+         ST    R15,RETCODE        PRESERVE                              05090000
+         B     RET                EXIT                                  05100000
+                                                                        05110000
+RET_HAVE DS    0H                                                       05120000
+         LA    R15,RC04           SERIALIZATION ALREADY OWNED           05130000
+         ST    R15,RETCODE        PRESERVE                              05140000
+         B     RET                EXIT                                  05150000
+                                                                        05160000
+RET_FAIL DS    0H                                                       05170000
+         LA    R15,RC08           SERIALIZATION FAILED                  05180000
+         ST    R15,RETCODE        PRESERVE                              05190000
+                                                                        05200000
+*---------------------------------------------------------------        05210000
+*   Release dynam $QLOCK                                                05220000
+*---------------------------------------------------------------        05230000
+                                                                        05240000
+RET      DS    0H                 SKIP IF NOT                           05250000
+         ICM   R0,15,STGQLEN      $QLOCK DYNAM ACQUIRED?                05260000
+         BZ    RET1               SKIP IF NOT                           05270000
+                                                                        05280000
+         $RETSTOR *STGQLOCK       RELEASE ACQUIRED STORAGE              05290000
+                                                                        05300000
+*---------------------------------------------------------------        05310000
+*   Retract EPB                                                         05320000
+*---------------------------------------------------------------        05330000
+                                                                        05340000
+RET1     DS    0H                 EPB WAIT MAY NOT HAVE BEEN NECESSARY  05350000
+         TM    FLAGS,F_EPBSET     EPB DANGLING?                         05360000
+         BNO   RET2               SKIP IF NOT                           05370000
+                                                                        05380000
+         BAS   R14,GETWORK        ACQUIRE $TASK MGR WORKAREA            05390000
+         LR    R3,R1              STANDARD WORKAREA PTR                 05400000
+                                                                        05410000
+         $TASK REMEPB,            CANCEL REQUEST FOR LOCK-AVAIL EVENT  X05420000
+               EPB=QLOEPBAL,                                           X05430000
+               WORKA=(R3),                                             X05440000
+               MF=(E,$TASKMFL)                                          05450000
+                                                                        05460000
+*--------------------------------------------------------------         05470000
+*   Trace lock request completion                                       05480000
+*--------------------------------------------------------------         05490000
+                                                                        05500000
+RET2     DS    0H                                                       05510000
+         LTR   R8,R8              LOCK MGR INITIALIZED?                 05520000
+         BZ    ETRC               SKIP IF NOT                           05530000
+                                                                        05540000
+         $TRACE *=A(TRC_GETLOCK),6*4                                    05550000
+         BNZ   ETRC               TRACE NOT ACTIVE/AVAIL                05560000
+                                                                        05570000
+         ST    R8,0(,R1)          SAVE ADDRESS OF LOCK                  05580000
+         MVC   4(4,R1),RETCODE    POST COMPLETION CODE                  05590000
+         MVC   4(1,R1),REQFLAGS   OPTION FLAGS                          05600000
+         MVC   8(8,R1),LOCKNAME   INSERT LOCK NAME                      05610000
+         MVC   16(4,R1),PQLOCK    RETURN ADDRESS                        05620000
+         L     R2,4(,R13)         ADDRESS OF CALLERS SAVEAREA           05630000
+         MVC   20(4,R1),12(R2)    RETURN ADDRESS                        05640000
+                                                                        05650000
+*--------------------------------------------------------------         05660000
+*   Return to requestor                                                 05670000
+*--------------------------------------------------------------         05680000
+                                                                        05690000
+ETRC     DS    0H                                                       05700000
+         BAS   R14,RETWORK        RELEASE DYNAM ACQUIRED WORKAREA       05710000
+                                                                        05720000
+         L     R15,RETCODE        COMPLETION CODE                       05730000
+         #EXIT ,                  RETURN                                05740000
+                                                                        05750000
+         EJECT                                                          05760000
+****************************************************************        05770000
+*                                                                       05780000
+* ROUTINE: INQ - Add entry to lock deferred execution queue             05790000
+*                                                                       05800000
+****************************************************************        05810000
+                                                                        05820000
+INQ      DS    0H                                                       05830000
+         ST    R14,FWORD          PRESERVE RETURN ADDR                  05840000
+                                                                        05850000
+         $QLOCK ENQ,ENTRY=(R1),LOCK=LOCK,DWORD=DWORD                    05860000
+                                                                        05870000
+         L     R14,FWORD          RESTORE RETURN ADDR                   05880000
+         BR    R14                STATUS RETURNED VIA CC                05890000
+                                                                        05900000
+         EJECT                                                          05910000
+****************************************************************        05920000
+*                                                                       05930000
+* ROUTINE: GETWORK - Acquire 1K $TASK manager workarea                  05940000
+*                                                                       05950000
+****************************************************************        05960000
+                                                                        05970000
+GETWORK  DS    0H                                                       05980000
+         ST    R14,FWORD          PRESERVE RETURN ADDR                  05990000
+                                                                        06000000
+         ICM   R1,15,WORK1K@      WORKAREA PREVIOUSLY ALLOCATED?        06010000
+         BNZ   GETWORKX           CONTINUE IF SO                        06020000
+                                                                        06030000
+         $GETSTOR 1024            1K WORKAREA                           06040000
+                                                                        06050000
+         ST    R1,WORK1K@         RETAIN WORKAREA ADDRESS               06060000
+                                                                        06070000
+GETWORKX DS    0H                                                       06080000
+         L     R14,FWORD          RESTORE RETURN ADDR                   06090000
+         BR    R14                STATUS RETURNED VIA CC                06100000
+                                                                        06110000
+         EJECT                                                          06120000
+****************************************************************        06130000
+*                                                                       06140000
+* ROUTINE: RETWORK - Release $TASK manager workarea                     06150000
+*                                                                       06160000
+****************************************************************        06170000
+                                                                        06180000
+RETWORK  DS    0H                                                       06190000
+         ST    R14,FWORD          PRESERVE RETURN ADDR                  06200000
+                                                                        06210000
+         ICM   R1,15,WORK1K@      WORKAREA PREVIOUSLY ALLOCATED?        06220000
+         BZ    RETWORKX           CONTINUE IF NOT                       06230000
+                                                                        06240000
+         $RETSTOR (R1)            RELEASE WORKAREA                      06250000
+                                                                        06260000
+RETWORKX DS    0H                                                       06270000
+         L     R14,FWORD          RESTORE RETURN ADDR                   06280000
+         BR    R14                STATUS RETURNED VIA CC                06290000
+                                                                        06300000
+         EJECT                                                          06310000
+****************************************************************        06320000
+*                                                                       06330000
+* ROUTINE: MILHELD - Update multi-instance lock held array              06340000
+*                                                                       06350000
+* ENTRY:   R1  - address of LOCK                                        06360000
+*          R0  - address of QLOCK                                       06370000
+*                                                                       06380000
+* EXIT:    N/A                                                          06390000
+*                                                                       06400000
+****************************************************************        06410000
+                                                                        06420000
+MILHELD  DS    0H                                                       06430000
+         ST    R14,FWORD          PRESERVE RETURN ADDRESS               06440000
+         LR    R14,R0             ADDRESS OF QLOCK                      06450000
+QL       USING QLOCK,R14          ADDRESSABILITY                        06460000
+                                                                        06470000
+         LA    R14,QL.QLOMILHD    ADDRESS OF MIL HELD ARRAY             06480000
+         LA    R15,QLOMILH#       COUNT OF MIL HELD ARRAY ENTRIES       06490000
+                                                                        06500000
+MIL_POST DS    0H                                                       06510000
+         ICM   R0,15,0(R14)       SLOT ALREADY USED                     06520000
+         BNZ   MIL_NEXT           YES, ADVANCE TO NEXT ENTRY            06530000
+         ST    R1,0(,R14)         UPDATE MULTI INSTANCE ARRAY           06540000
+         B     MIL_EXIT           DONE                                  06550000
+                                                                        06560000
+MIL_NEXT DS    0H                                                       06570000
+         LA    R14,4(,R14)        ADDRESS OF NEXT ARRAY SLOT            06580000
+         BCT   R15,MIL_POST       TRY NEXT ENTRY                        06590000
+         B     ABN_MILK           MIL HELD ARRAY EXHAUSTED              06600000
+                                                                        06610000
+MIL_EXIT DS    0H                                                       06620000
+         L     R14,FWORD          RESTORE RETURN ADDRESS                06630000
+         BR    R14                RETURN                                06640000
+         DROP  QL                 QLOCK                                 06650000
+                                                                        06660000
+         EJECT                                                          06670000
+****************************************************************        06680000
+*                                                                       06690000
+*   Catastrophic errors, protocol violations etc.                       06700000
+*                                                                       06710000
+****************************************************************        06720000
+                                                                        06730000
+ABN_PVOP DS    0H                                                       06740000
+         $ABEND ABE_PRIVOP,DUMP=NO,                                    X06750000
+               TITLE='PRIVILEGED OPERATION'                             06760000
+                                                                        06770000
+ABN_DISP DS    0H                                                       06780000
+         $ABEND ABE_LOCKDISP,DUMP=YES,                                 X06790000
+               TITLE='$SER ENCOUNTERED FROM NON-DISPATCHABLE WU'        06800000
+                                                                        06810000
+ABN_LSEQ DS    0H                                                       06820000
+         $ABEND ABE_LOCKSEQ,DUMP=YES,                                  X06830000
+               TITLE='$SER OBTAIN: LOCK OUT OF SEQUENCE'                06840000
+                                                                        06850000
+ABN_WAIT DS    0H                                                       06860000
+         $ABEND ABE_LOCKWAIT,DUMP=YES,                                 X06870000
+               TITLE='$SER OBTAIN: REQUESTOR HOLDS NO-WAIT LOCKS'       06880000
+                                                                        06890000
+ABN_TASK DS    0H                                                       06900000
+         ST    R15,RETCODE                                              06910000
+         ST    R0,RSNCODE                                               06920000
+                                                                        06930000
+         $ABEND ABE_$TASK,*RETCODE,*RSNCODE,DUMP=YES,                  X06940000
+               TITLE='$SER OBTAIN: ERROR IN $TASK FUNCTION'             06950000
+                                                                        06960000
+ABNQLOCK DS    0H                                                       06970000
+         $ABEND ABE_QLOCK,DUMP=YES,                                    X06980000
+               TITLE='$SER OBTAIN: $QLOCK MISSING OR INVALID'           06990000
+                                                                        07000000
+ABN_MILK DS    0H                                                       07010000
+         $ABEND ABE_MILHELD,DUMP=YES,                                  X07020000
+               TITLE='$SER OBTAIN: MIL LOCK HELD ARRAY EXHAUSTED'       07030000
+                                                                        07040000
+         EJECT                                                          07050000
+****************************************************************        07060000
+*                                                                       07070000
+*   Literals and constants                                              07080000
+*                                                                       07090000
+****************************************************************        07100000
+                                                                        07110000
+         LTORG ,                                                        07120000
+                                                                        07130000
+         PRINT NOGEN                                                    07140000
+         ICVT  ,                                                        07150000
+         ITASK ,                                                        07160000
+         IPCB ,                                                         07170000
+                                                                        07180000
+         $TASK DSECT=YES          $TASK SERVICES                        07190000
+                                                                        07200000
+         IHAPSA ,                                                       07210000
+         IHAASCB ,                                                      07220000
+         END   ,                                                        07230000
