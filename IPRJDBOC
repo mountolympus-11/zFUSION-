@@ -1,0 +1,609 @@
+IPRJDBOC TITLE '- PROJECT DATABASE OPEN/CLOSE SUPPORT'                  00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE:   IPRJDBOC - PROJECT DATABASE OPEN/CLOSE SUPPORT             00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    THIS ROUTINE PROVIDES AN INTERFACE TO THE DATABASE                 00080000
+*    OPEN/CLOSE/INIT SERVICE FACILITIES.  STANDARD VSAM KSDS            00090000
+*    PROCESSING IS USED FOR THE PROJECT DATABASE.  IF THE               00100000
+*    DATABASE OPENS IN LOAD MODE (EMPLY CLUSTER) THEN A                 00110000
+*    REASON CODE IS RETURNED INDICATING THAT THE DATABASE               00120000
+*    SHOULD BE FIRST BE INITIALIZED.   THE VSAM ACB IS ALLOCATED        00130000
+*    FROM THE STANDARD ACB STORAGE POOL,  ALLTHOUGH ONLY THE            00140000
+*    VSAM ACB IS INITIALIZED.  THE ACB ADDRESS IS STORED                00150000
+*    IN IVECTOR (I@VSMACB).                                             00160000
+*                                                                       00170000
+* ON ENTRY:                                                             00180000
+*                                                                       00190000
+*    R1 CONTAINS THE ADDRESS OF A STANDARD OS/VS PARAMETER              00200000
+*    LIST AS FOLLOWS:                                                   00210000
+*                                                                       00220000
+*       00 - FUNCTION CODE                                              00230000
+*            1 - OPEN  REQUEST                                          00240000
+*            2 - CLOSE REQUEST                                          00250000
+*            3 - INIT  REQUEST                                          00260000
+*                                                                       00270000
+* ON EXIT:                                                              00280000
+*                                                                       00290000
+*    R15 CONTAINS ONE OF THE FOLLOWING RETURN CODES:                    00300000
+*                                                                       00310000
+*        R15 = RC00 - REQUEST COMPLETED SUCCESSFULLY                    00320000
+*                     R0 = RSN00 - OPEN SUCCESSFULL                     00330000
+*                          RSN04 - OPEN LOAD MODE                       00340000
+*                                                                       00350000
+*              RC04 - REQUEST COMPLETED WITH WARNINGS                   00360000
+*                     R0 = RSN04 - ACB ALREADY OPEN   (OPEN)            00370000
+*                          RSN08 - ACB NOT OPEN       (CLOSE)           00380000
+*                                                                       00390000
+*              RC08 - REQUEST FAILED                                    00400000
+*                     R0 = RSN04 - GENCB ACB FAILED   (OPEN)            00410000
+*                          RSN08 - ACB OPEN  FAILED   (OPEN)            00420000
+*                          RSN12 - ACB CLOSE FAILED   (CLOSE)           00430000
+*                          RSN16 - DB NOT LOAD MODE   (INIT)            00440000
+*                                                                       00450000
+**<DOC-OFF>****************************************************         00460000
+                                                                        00470000
+         EJECT ,                                                        00480000
+***************************************************************         00490000
+*                                                                       00500000
+* MAINTENANCE:                                                          00510000
+*                                                                       00520000
+*    07/15/92 RON COLMONE                                               00530000
+*             INITIAL VERSION                                           00540000
+*                                                                       00550000
+***************************************************************         00560000
+                                                                        00570000
+         EJECT ,                                                        00580000
+         EQUS  ,                       REGISTER EQUATES                 00590000
+                                                                        00600000
+         EJECT ,                                                        00610000
+         ABCODES ,                     $ABEND CODES                     00620000
+                                                                        00630000
+         EJECT ,                                                        00640000
+         IPRJREC DSECT=YES             PROJECT RECORD HEADER            00650000
+                                                                        00660000
+         EJECT ,                                                        00670000
+         IDBIOP  DSECT=YES             DATABASE I/O PLIST               00680000
+                                                                        00690000
+         EJECT ,                                                        00700000
+*--------------------------------------------------------------         00710000
+*                                                                       00720000
+*   GENERAL WORKAREA                                                    00730000
+*                                                                       00740000
+*--------------------------------------------------------------         00750000
+         #WORK LENGTH=2048                                              00760000
+WK256    DS    XL256                   WORKAREA                         00770000
+WK1024   DS    XL1024                  WORKAREA 1K                      00780000
+*                                                                       00790000
+REGSAVE1 DS    16F                     REGISTER SAVE AREA               00800000
+REGSAVE2 DS    16F                     REGISTER SAVE AREA               00810000
+REGSAVE3 DS    16F                     REGISTER SAVE AREA               00820000
+*                                                                       00830000
+STGFLAG  DS    X                       STORAGE ALLOC FLAG               00840000
+WKALLOC  EQU   X'80'                    WORKAREA ALLOCATED              00850000
+         DS    XL3                     *** RESERVED ***                 00860000
+*                                                                       00870000
+HIGHRBA  DS    F                       HIGH USED RBA                    00880000
+OPENERR  DS    F                       OPEN ERROR CODE                  00890000
+*                                                                       00900000
+RECAREA  DS    XL(IPRHDLN)             PROJECT HEADER                   00910000
+*                                                                       00920000
+$DBIOPRM $DBIO MF=L                    DBIO  PLIST                      00930000
+$OPEN    OPEN  (0),MODE=31,MF=L        OPEN  PLIST                      00940000
+$CLOSE   CLOSE (0),MODE=31,MF=L        CLOSE PLIST                      00950000
+         #ENDWORK ,                    END OF WORKAREA                  00960000
+                                                                        00970000
+         EJECT ,                                                        00980000
+*--------------------------------------------------------------         00990000
+*   ESTABLISH ENTRY LINKAGE AND ALLOCATE WORKAREA IF NOT                01000000
+*   PROVIDED BY CALLER IN REG0.                                         01010000
+*--------------------------------------------------------------         01020000
+                                                                        01030000
+IPRJDBOC #ENTER PREG=R8                ENTRY LINKAGE                    01040000
+                                                                        01050000
+         USING ITASK,R10               ADDRESSABILITY                   01060000
+                                                                        01070000
+         EJECT ,                                                        01080000
+*--------------------------------------------------------------         01090000
+*                                                                       01100000
+*  OBTAIN PASSED PARAMETERS AND CALL REQUESTED FUNCTION                 01110000
+*                                                                       01120000
+*--------------------------------------------------------------         01130000
+         L     R2,0(,R8)               PICK UP PARM REGS                01140000
+                                                                        01150000
+         BCTR  R2,0                    CALC FUNCTION INDEX              01160000
+         SLL   R2,2                    PREPARE FOR WFB                  01170000
+         B     *+4(R2)                 BRANCH TO APPROPRIATE FUNC       01180000
+         B     DBOPEN                     DATABASE OPEN                 01190000
+         B     DBCLOSE                    DATABASE CLOSE                01200000
+         B     DBINIT                     INITIALIZE PROJ DATABASE      01210000
+         EX    R0,*-*                     *** UNSUPPORTED FUNC ***      01220000
+         EX    R0,*-*                     *** UNSUPPORTED FUNC ***      01230000
+         EX    R0,*-*                     *** UNSUPPORTED FUNC ***      01240000
+         EX    R0,*-*                     *** UNSUPPORTED FUNC ***      01250000
+                                                                        01260000
+         EJECT ,                                                        01270000
+*---------------------------------------------------------------        01280000
+*  PROCESS REQUEST TO OPEN THE MIRAQL PROJECT DATABASE.                 01290000
+*  AN ACB IS ALLOCATED AND GENERATED FOR USE BY THE VSAM DATABASE.      01300000
+*  FOR A SUCCESSFULL OPEN, THE REASON CODE WILL BE SET TO               01310000
+*  INDICATE IF THE DB IS BEING OPEN INITIALLY FOR LOAD PROCESSING.      01320000
+*---------------------------------------------------------------        01330000
+                                                                        01340000
+DBOPEN   DS    0H                                                       01350000
+         ICM   R1,15,ICTACBDB          GET ACB ADDRESS                  01360000
+         BNZ   DBCHKACB                EXIST, CHECK IF ACB IS OPEN      01370000
+                                                                        01380000
+         BAS   R14,GETACB              ALLOCATE AN ACB                  01390000
+         LTR   R15,R15                 GENERATE SUCCESSFULL?            01400000
+         BNZ   ERRACBGN                NO,  RETURN ERROR                01410000
+                                                                        01420000
+DBCHKACB DS    0H                                                       01430000
+         LR    R4,R1                   ADDRESS OF ACB                   01440000
+         USING IFGACB,R4               ESTABLISH ADDRESSABILITY         01450000
+         TM    ACBOFLGS,ACBOPEN        ACB ALREADY OPEN?                01460000
+         BO    ERRACBAO                YES, RETURN ERROR                01470000
+                                                                        01480000
+         MVC   $OPEN(OPENL),OPEN       COPY OPEN PLIST                  01490000
+         OPEN  ((R4)),MODE=31,MF=(E,$OPEN)  OPEN DATABASE               01500000
+                                                                        01510000
+         LR    R2,R15                  SAVE RETURN CODE                 01520000
+         B     *+4(R15)                BRANCH ON OPEN RC                01530000
+         B     DBTESTLD                  TEST LOAD MODE                 01540000
+         B     DBTESTLD                  TEST LOAD MODE                 01550000
+         B     ERRACBOP                  OPEN FAILED                    01560000
+         B     ERRACBOP                  OPEN FAILED                    01570000
+         B     ERRACBOP                  OPEN FAILED                    01580000
+                                                                        01590000
+DBTESTLD DS    0H                                                       01600000
+         BAS   R14,TESTLOAD            TEST FOR LOAD MODE               01610000
+         B     *+4(R15)                BRANCH ON RC                     01620000
+         B     DBVERIFY                  TEST FOR VERIFY                01630000
+         B     DBOPENLD                  INITIAL LOAD OPEN              01640000
+                                                                        01650000
+DBVERIFY DS    0H                                                       01660000
+         LTR   R2,R2                   OPEN SUCCESSFULL?                01670000
+         BZ    DBOPENOK                YES, CONTINUE                    01680000
+                                                                        01690000
+         BAS   R14,VERIFY              VERIFY VSAM ACB                  01700000
+         B     *+4(R15)                BRANCH ON RC                     01710000
+         B     DBTESTLD                  TEST LOAD MODE                 01720000
+         B     ERRACBOP                  ACB OPEN FAILED                01730000
+                                                                        01740000
+DBOPENOK DS    0H                                                       01750000
+         LA    R15,RC00                OPEN SUCCESSFULL                 01760000
+         LA    R0,RSN00                SUBSEQUENT OPEN                  01770000
+         B     RETURN                  RETURN SUCCESS                   01780000
+*                                                                       01790000
+DBOPENLD DS    0H                                                       01800000
+         LA    R15,RC00                OPEN SUCCESSFULL                 01810000
+         LA    R0,RSN04                INITIAL OPEN                     01820000
+         B     RETURN                  RETURN SUCCESS                   01830000
+                                                                        01840000
+         EJECT ,                                                        01850000
+*---------------------------------------------------------------        01860000
+*  PROCESS REQUEST TO CLOSE THE VSAM PROJECT DATABASE.                  01870000
+*---------------------------------------------------------------        01880000
+                                                                        01890000
+DBCLOSE  DS    0H                                                       01900000
+         USING IFGACB,R4               ESTABLISH ADDRESSABILITY         01910000
+         ICM   R4,15,ICTACBDB          GET ACB ADDRESS                  01920000
+         BZ    ERRACBNO                NO, DATABASE NOT OPEN            01930000
+         TM    ACBOFLGS,ACBOPEN        ACB OPEN?                        01940000
+         BZ    ERRACBNO                NO, DATABASE NOT OPEN            01950000
+                                                                        01960000
+         MVC   $CLOSE(CLOSEL),CLOSE    COPY CLOSE PLIST                 01970000
+         CLOSE ((R4)),MODE=31,MF=(E,$CLOSE) CLOSE DATABASE              01980000
+                                                                        01990000
+         LTR   R15,R15                 CLOSE SUCCESSFULL?               02000000
+         BNZ   ERRACBCL                NO, RETURN ERROR                 02010000
+                                                                        02020000
+         LA    R15,RC00                RETURN SUCCESSFUL                02030000
+         LA    R0,RSN00                                                 02040000
+         B     RETURN                                                   02050000
+                                                                        02060000
+         EJECT ,                                                        02070000
+*---------------------------------------------------------------        02080000
+*  IF THE DATABASE IS OPENED FOR LOAD PROCESSING, BUILD DATABASE        02090000
+*  CREATED RECORD AND INSERT IT INTO THE PROJECT DATABASE.              02100000
+*---------------------------------------------------------------        02110000
+                                                                        02120000
+DBINIT   DS    0H                                                       02130000
+         USING IFGACB,R4               ADDRESSABILITY                   02140000
+         ICM   R4,15,ICTACBDB          GET ACB ADDRESS                  02150000
+         BZ    ERRACBNO                NO, DATABASE NOT OPEN            02160000
+         TM    ACBOFLGS,ACBOPEN        ACB OPEN?                        02170000
+         BZ    ERRACBNO                NO, DATABASE NOT OPEN            02180000
+                                                                        02190000
+         BAS   R14,TESTLOAD            DETERMINE IF IN LOAD MODE        02200000
+         LTR   R15,R15                 DATABASE IN LOAD MODE            02210000
+         BZ    ERRNOTLD                NO, ERROR RETURN                 02220000
+                                                                        02230000
+         LA    R7,RECAREA              ADDRESS OF RECORD HEADER         02240000
+         USING IPRJREC,R7              ESTABLISH ADDRESSABILITY         02250000
+                                                                        02260000
+         XC    IPRJREC(IPRHDLN),IPRJREC INITIALIZE RECORD HEADER        02270000
+         MVC   IPRECLEN,=AL2(IPRHDLN)  LENGTH OF INIT RECORD            02280000
+         MVC   IPRHDRLN,=AL2(IPRHDLN)  LENGTH OF RECORD HDR             02290000
+         MVC   IPRJNAME,=C'$$$$INIT'   INITIAL RECORD PROJECT           02300000
+         MVC   IPRJRSVD,BLANKS         *** RESERVED ***                 02310000
+         MVC   IPRALU,=F'-1'           INITREC ALU NUMBER               02320000
+         MVC   IPRLUSER,INFOSESS       CREATE USERID                    02330000
+         MVC   IPRLTERM,BLANKS         CREATE LUNAME                    02340000
+                                                                        02350000
+         TIME  ,                       GET CURRENT TIME                 02360000
+         ST    R0,IPRLTIME             SET CREATE TIME                  02370000
+         ST    R1,IPRLDATE             SET CREATE DATE                  02380000
+                                                                        02390000
+         $DBIO INSERT,                 INSERT INITIAL RECORD           +02400000
+               AREA=IPRJREC,                                           +02410000
+               AREALEN=IPRHDLN,                                        +02420000
+               RECLEN=IPRHDLN,                                         +02430000
+               KEY=IPRECKEY,                                           +02440000
+               KEYLEN=L'IPRECKEY,                                      +02450000
+               OPTS=(SEQ,MOVE),                                        +02460000
+               WORKA=WK1024,                                           +02470000
+               MF=(E,$DBIOPRM)                                          02480000
+                                                                        02490000
+         LTR   R15,R15                 INSERT SUCCESSFULL?              02500000
+         BZ    RETURN                  RETURN                           02510000
+                                                                        02520000
+         LA    R15,RC08                RETURN CODE - INIT FAIL          02530000
+         LA    R1,$DBIOPRM             ADDR OF DBIO PLIST               02540000
+         USING IDBIOP,R1               ESTABLISH ADDRESSABILITY         02550000
+         L     R0,IDBFDBK              GET VSAM FEEDBACK CODE           02560000
+         B     RETURN                  AND RETURN                       02570000
+         DROP  R1                      IDBIOP                           02580000
+                                                                        02590000
+         EJECT ,                                                        02600000
+*---------------------------------------------------------------        02610000
+*                                                                       02620000
+*  ERROR EXITS                                                          02630000
+*                                                                       02640000
+*---------------------------------------------------------------        02650000
+                                                                        02660000
+*-------------------                                                    02670000
+*  OPEN ERROR                                                           02680000
+*-------------------                                                    02690000
+ERRACBAO DS    0H                                                       02700000
+         LA    R15,RC04                RETURN CODE - WARN               02710000
+         LA    R0,RSN04                REASON CODE - ACB OPEN           02720000
+         B     RETURN                  RETURN ERROR                     02730000
+                                                                        02740000
+ERRACBGN DS    0H                                                       02750000
+         LA    R15,RC08                RETURN CODE - FAIL               02760000
+         LA    R0,RSN04                REASON CODE - GENCB ACB          02770000
+         B     RETURN                  RETURN ERROR                     02780000
+                                                                        02790000
+ERRACBOP DS    0H                                                       02800000
+         LA    R15,RC08                RETURN CODE - FAIL               02810000
+         LA    R0,RSN08                REASON CODE - ACB OPEN FAIL      02820000
+         B     RETURN                  RETURN ERROR                     02830000
+                                                                        02840000
+*-------------------                                                    02850000
+*  CLOSE ERROR                                                          02860000
+*-------------------                                                    02870000
+ERRACBNO DS    0H                                                       02880000
+         LA    R15,RC04                RETURN CODE - WARN               02890000
+         LA    R0,RSN08                REASON CODE - ACB NOT OPEN       02900000
+         B     RETURN                  RETURN ERROR                     02910000
+                                                                        02920000
+ERRACBCL DS    0H                                                       02930000
+         LA    R15,RC08                RETURN CODE - FAIL               02940000
+         LA    R0,RSN12                REASON CODE - ACB CLOSE FAIL     02950000
+         B     RETURN                  RETURN ERROR                     02960000
+                                                                        02970000
+*-------------------                                                    02980000
+*  INIT ERROR                                                           02990000
+*-------------------                                                    03000000
+ERRNOTLD DS    0H                                                       03010000
+         LA    R15,RC08                RETURN CODE - FAIL               03020000
+         LA    R0,RSN16                REASON CODE - NOT IN LOAD MODE   03030000
+         B     RETURN                  RETURN ERROR                     03040000
+                                                                        03050000
+         EJECT ,                                                        03060000
+*---------------------------------------------------------------        03070000
+*                                                                       03080000
+*  RETURN                                                               03090000
+*                                                                       03100000
+*---------------------------------------------------------------        03110000
+                                                                        03120000
+RETURN   DS    0H                                                       03130000
+         #EXIT ,                       RETURN                           03140000
+                                                                        03150000
+         EJECT ,                                                        03160000
+*---------------------------------------------------------------        03170000
+*                                                                       03180000
+*  ROUTINE:   VERIFY                                                    03190000
+*                                                                       03200000
+*  FUNCTION:                                                            03210000
+*                                                                       03220000
+*    VERIFY THE VSAM DATASET.  TEST IF THE DATASET IS OPEN              03230000
+*    FOR LOAD PROCESSING (EMPTY).                                       03240000
+*                                                                       03250000
+*  ENTRY:  N/A                                                          03260000
+*                                                                       03270000
+*  EXIT:   R15 = 0 - VERIFY SUCCESSFULL                                 03280000
+*                4 - VERIFY FAILED                                      03290000
+*                                                                       03300000
+*---------------------------------------------------------------        03310000
+VERIFY   DS    0H                                                       03320000
+         STM   R0,R15,REGSAVE1         SAVE CALLER'S REGISTERS          03330000
+                                                                        03340000
+         LA    R2,OPENERR              ADDR OF AREA FOR OPEN ERROR      03350000
+                                                                        03360000
+         SHOWCB ACB=(R4),              GET OPEN ERROR CODE             +03370000
+               FIELDS=(ERROR),                                         +03380000
+               AREA=(R2),                                              +03390000
+               LENGTH=L'OPENERR,                                       +03400000
+               MF=(G,WK256)                                             03410000
+                                                                        03420000
+         L     R2,OPENERR              GET OPEN ERROR CODE              03430000
+         C     R2,=F'116'              VERIFY REQUIRED?                 03440000
+         BNE   VERFYERR                NO, RETURN ERROR                 03450000
+                                                                        03460000
+         BAS   R14,GETRPL              OBTAIN AN RPL                    03470000
+         LTR   R5,R1                   ADDRESS OF RPL                   03480000
+         BZ    VERFYERR                NONE, ERROR                      03490000
+                                                                        03500000
+         VERIFY RPL=(R5),              VERIFY PROJECT DATABASE         +03510000
+               ACTION=REFRESH                                           03520000
+         LR    R2,R15                  SAVE VERIFY RETURN CODE          03530000
+                                                                        03540000
+         LR    R1,R5                   GET RPL ADDRESS                  03550000
+         BAS   R14,FREERPL             RETURN RPL                       03560000
+                                                                        03570000
+         LA    R15,RC00                ASSUME SUCCESSFULL VERIFY        03580000
+         LTR   R2,R2                   VERIFY SUCCESSFULL?              03590000
+         BZ    VERFYRET                YES, RETURN                      03600000
+                                                                        03610000
+VERFYERR DS    0H                                                       03620000
+         LA    R15,RC04                OPEN/VERIFY FAILED               03630000
+         B     VERFYRET                AND RETURN                       03640000
+                                                                        03650000
+VERFYRET DS    0H                                                       03660000
+         LM    R0,R14,REGSAVE1         RESTORE CALLER'S REGISTERS       03670000
+         BR    R14                     AND RETURN                       03680000
+                                                                        03690000
+         EJECT ,                                                        03700000
+*---------------------------------------------------------------        03710000
+*                                                                       03720000
+*  ROUTINE:   TESTLOAD                                                  03730000
+*                                                                       03740000
+*  FUNCTION:                                                            03750000
+*                                                                       03760000
+*    DETERMINE IF THE DATASET IS EMPTY. THIS CAN BE DETERMINED          03770000
+*    BY ISSUING A SHOWCB FOR THE ENDRBA (HIGH-USED). A HIGH-USED        03780000
+*    RBA OF 0 INDICATES THAT THE DATABASE WAS OPEN FOR LOAD             03790000
+*    PROCESSING.                                                        03800000
+*                                                                       03810000
+*  ENTRY:  N/A                                                          03820000
+*                                                                       03830000
+*  EXIT:   R15 = 0 - SUBSEQUENT DATASET OPEN                            03840000
+*                4 - EMPTY DATASET (LOAD MODE)                          03850000
+*                                                                       03860000
+*---------------------------------------------------------------        03870000
+TESTLOAD DS    0H                                                       03880000
+         STM   R0,R15,REGSAVE1         SAVE CALLER'S REGISTERS          03890000
+                                                                        03900000
+         LA    R2,HIGHRBA              ADDRESS OF HIGH USED RBA         03910000
+                                                                        03920000
+         SHOWCB ACB=(R4),              GET HIGH USED RBA VALUE         +03930000
+               FIELDS=(ENDRBA),                                        +03940000
+               OBJECT=DATA,                                            +03950000
+               AREA=(R2),                                              +03960000
+               LENGTH=L'HIGHRBA,                                       +03970000
+               MF=(G,WK256)                                            +03980000
+                                                                        03990000
+         LA    R15,RC00                ASSUME NOT INITIAL LOAD          04000000
+         OC    HIGHRBA,HIGHRBA         OPEN IN LOAD MODE?               04010000
+         BNZ   *+8                     NO,  CONTINUE                    04020000
+         LA    R15,RC04                OPEN IN LOAD MODE                04030000
+                                                                        04040000
+         LM    R0,R14,REGSAVE1         RESTORE CALLER'S REGISTERS       04050000
+         BR    R14                     AND RETURN                       04060000
+                                                                        04070000
+         EJECT ,                                                        04080000
+*---------------------------------------------------------------        04090000
+*                                                                       04100000
+*  ROUTINE:   GETACB                                                    04110000
+*                                                                       04120000
+*  FUNCTION:                                                            04130000
+*                                                                       04140000
+*    ALLOC STORAGE FOR THE PROJECT DATABASE ACB AND                     04150000
+*    STORE ITS ADDRESS IN THE IVECTOR.  THEN CALL VSAM                  04160000
+*    TO GENERATE THE ACB DATA STRUCTURE.                                04170000
+*                                                                       04180000
+*  ENTRY:  N/A                                                          04190000
+*                                                                       04200000
+*  EXIT:   R15 CONTAINS RETURN CODE FROM GENCB                          04210000
+*          R1  ADDRESS OF ACB                                           04220000
+*                                                                       04230000
+*---------------------------------------------------------------        04240000
+GETACB   DS    0H                                                       04250000
+         STM   R0,R15,REGSAVE2         SAVE CALLER'S REGISTERS          04260000
+                                                                        04270000
+         STGGET $ACBLEN,QH=ICTSTG      ALLOC AN ACB                     04280000
+         BNZ   ABN_STG                 OK, CONTINUE                     04290000
+         LR    R4,R1                   ADDRESS OF ACB                   04300000
+         ST    R4,ICTACBDB             SAVE ACB ADDRESS                 04310000
+                                                                        04320000
+         GENCB BLK=ACB,                GENERATE VSAM ACB               +04330000
+               AM=VSAM,                                                +04340000
+               DDNAME=IPROJDB,                                         +04350000
+               EXLST=VSAMXITS,                                         +04360000
+               MACRF=(KEY,SEQ,SKP,DIR,IN,OUT),                         +04370000
+               STRNO=1,                                                +04380000
+               WAREA=(R4),                                             +04390000
+               LENGTH=$ACBLEN,                                         +04400000
+               MF=(G,WK256)                                             04410000
+                                                                        04420000
+         LR    R1,R4                   ADDRESS OF ACB                   04430000
+         LM    R2,R14,REGSAVE2+8       RESTORE CALLERS REGISTERS        04440000
+         BR    R14                     AND RETURN                       04450000
+                                                                        04460000
+ABN_STG  DS    0H                                                       04470000
+         $ABEND ABE_STORAGE,TITLE='UNABLE TO ACQUIRE STORAGE FOR ACB'   04480000
+                                                                        04490000
+         EJECT ,                                                        04500000
+*---------------------------------------------------------------        04510000
+*                                                                       04520000
+*  ROUTINE:  GETRPL                                                     04530000
+*                                                                       04540000
+*  FUNCTION:                                                            04550000
+*                                                                       04560000
+*    THIS ROUTINE WILL ALLOCATE AN RPL FOR USE BY THE CURRENT           04570000
+*    REQUEST AND SUBSEQUENT REQUEST.                                    04580000
+*                                                                       04590000
+*  ENTRY:  N/A                                                          04600000
+*                                                                       04610000
+*  EXIT:   R1 CONTAINS ADDRESS OF RPL   (0 = ERROR)                     04620000
+*                                                                       04630000
+*---------------------------------------------------------------        04640000
+                                                                        04650000
+GETRPL   DS    0H                                                       04660000
+         STM   R0,R15,REGSAVE2         SAVE CALLER'S REGISTERS          04670000
+                                                                        04680000
+         STGGET $RPLLEN,QH=ICTSTG      GET AN RPL BUFFER                04690000
+         BNZ   GRPLERR                 ERROR,  RETURN                   04700000
+         LR    R6,R1                   GET  RPL ADDRESS                 04710000
+                                                                        04720000
+         L     R5,ICTACBDB             GET ACB ADDRESS                  04730000
+                                                                        04740000
+         GENCB BLK=RPL,                GENERATE VSAM RPL               +04750000
+               AM=VSAM,                                                +04760000
+               ACB=(R5),                                               +04770000
+               OPTCD=(CNV),                                            +04780000
+               WAREA=(R6),                                             +04790000
+               LENGTH=$RPLLEN,                                         +04800000
+               MF=(G,WK256)                                             04810000
+                                                                        04820000
+         LR    R1,R6                   GET RPL ADDRESS                  04830000
+         LTR   R15,R15                 GENCB SUCCESSFULL?               04840000
+         BZ    GRPLEXIT                YES, RETURN                      04850000
+                                                                        04860000
+         BAS   R14,FREERPL             RETURN RPL                       04870000
+                                                                        04880000
+GRPLERR  DS    0H                                                       04890000
+         SR    R1,R1                   ERROR, ZERO RPL ADDRESS          04900000
+                                                                        04910000
+GRPLEXIT DS    0H                                                       04920000
+         LM    R2,R15,REGSAVE2+8       RESTORE CALLER'S REGISTERS       04930000
+         BR    R14                     AND RETURN                       04940000
+                                                                        04950000
+         EJECT ,                                                        04960000
+*---------------------------------------------------------------        04970000
+*                                                                       04980000
+*  ROUTINE:  FREERPL                                                    04990000
+*                                                                       05000000
+*  FUNCTION:                                                            05010000
+*                                                                       05020000
+*    THIS ROUTINE WILL FREE THE CURRENT RPL AND ZERO ITS PTR.           05030000
+*                                                                       05040000
+*                                                                       05050000
+*  ENTRY:  R1 CONTAINS ADDRESS OF THE RPL                               05060000
+*                                                                       05070000
+*  EXIT:   N/A                                                          05080000
+*                                                                       05090000
+*---------------------------------------------------------------        05100000
+                                                                        05110000
+FREERPL  DS    0H                                                       05120000
+         STM   R0,R15,REGSAVE3         SAVE CALLER'S REGISTERS          05130000
+         LR    R2,R1                   RPL ADDRESS                      05140000
+                                                                        05150000
+         STGRETN ADDR=(R2),            FREE RPL STORAGE                +05160000
+               LEN=$RPLLEN,                                            +05170000
+               QH=ICTSTG                                                05180000
+                                                                        05190000
+         LM    R0,R15,REGSAVE3         RESTORE CALLER'S REGISTERS       05200000
+         BR    R14                     RETURN                           05210000
+                                                                        05220000
+         EJECT ,                                                        05230000
+*---------------------------------------------------------------        05240000
+*  CONTANCT, LITERALS                                                   05250000
+*---------------------------------------------------------------        05260000
+BLANKS   DC    CL8' '                  HANDY BLANKS                     05270000
+INFOSESS DC    CL8'INFOSESS'           PRODUCT NAME                     05280000
+                                                                        05290000
+OPEN     OPEN  (0),MODE=31,MF=L        OPEN  PLIST                      05300000
+OPENL    EQU   *-OPEN                                                   05310000
+CLOSE    CLOSE (0),MODE=31,MF=L        CLOSE PLIST                      05320000
+CLOSEL   EQU   *-CLOSE                                                  05330000
+                                                                        05340000
+VSAMXITS EXLST AM=VSAM,                                                +05350000
+               EODAD=EODEXIT,          END OF DATA   EXIT              +05360000
+               LERAD=LEREXIT,          LOGICAL ERROR EXIT              +05370000
+               SYNAD=SYNEXIT           SYNAD ERROR   EXIT               05380000
+                                                                        05390000
+         LTORG ,                                                        05400000
+                                                                        05410000
+         EJECT ,                                                        05420000
+*---------------------------------------------------------------        05430000
+*                                                                       05440000
+*  ROUTINE: EODEXIT - END OF DATA VSAM EXIT                             05450000
+*                                                                       05460000
+*                                                                       05470000
+*                                                                       05480000
+*                                                                       05490000
+*                                                                       05500000
+*                                                                       05510000
+*---------------------------------------------------------------        05520000
+*                                                                       05530000
+EODEXIT  DS    0H                                                       05540000
+         USING *,R15                   ESTAB ADDRESSABILITY             05550000
+                                                                        05560000
+                                                                        05570000
+         BR    R14                     AND RETURN                       05580000
+         DROP  R15                                                      05590000
+                                                                        05600000
+         EJECT ,                                                        05610000
+*---------------------------------------------------------------        05620000
+*                                                                       05630000
+*  ROUTINE: LEREXIT - LOGICAL ERROR VSAM EXIT                           05640000
+*                                                                       05650000
+*                                                                       05660000
+*                                                                       05670000
+*                                                                       05680000
+*                                                                       05690000
+*                                                                       05700000
+*---------------------------------------------------------------        05710000
+*                                                                       05720000
+LEREXIT  DS    0H                                                       05730000
+         USING *,R15                   ESTAB ADDRESSABILITY             05740000
+                                                                        05750000
+                                                                        05760000
+         BR    R14                     AND RETURN                       05770000
+         DROP  R15                                                      05780000
+                                                                        05790000
+         EJECT ,                                                        05800000
+*---------------------------------------------------------------        05810000
+*                                                                       05820000
+*  ROUTINE: SYNEXIT - PHYSICAL ERROR VSAM EXIT                          05830000
+*                                                                       05840000
+*                                                                       05850000
+*                                                                       05860000
+*                                                                       05870000
+*                                                                       05880000
+*                                                                       05890000
+*---------------------------------------------------------------        05900000
+*                                                                       05910000
+SYNEXIT  DS    0H                                                       05920000
+         USING *,R15                   ESTAB ADDRESSABILITY             05930000
+                                                                        05940000
+                                                                        05950000
+         BR    R14                     AND RETURN                       05960000
+         DROP  R15                                                      05970000
+                                                                        05980000
+         EJECT ,                                                        05990000
+         PRINT NOGEN                                                    06000000
+         ICVT  ,                                                        06010000
+         ITASK ,                                                        06020000
+         IFGACB AM=VSAM                                                 06030000
+$ACBLEN  EQU   *-IFGACB                                                 06040000
+         IFGRPL AM=VSAM                                                 06050000
+$RPLLEN  EQU   *-IFGRPL                                                 06060000
+         PRINT GEN                                                      06070000
+                                                                        06080000
+         END   ,                                                        06090000

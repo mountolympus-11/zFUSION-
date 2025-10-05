@@ -1,0 +1,450 @@
+IOPRRESP TITLE ' - Operator Command/Monitor Response Services'          00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE: IOPRRESP - Operator Command/Monitor Response Services        00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This routine will format and manager the Operator Command          00080000
+*    and Monitor response buffer.  Message queues presented             00090000
+*    to the command and monitor processes are requeued onto             00100000
+*    the operator communication area message queue to await             00110000
+*    delivery to the cooperative process.  A $OPRRESP FORMAT            00120000
+*    request, will then remove the messages in sequence and             00130000
+*    add them to the operator response XPBUFR.  Transmit (XMIT)         00140000
+*    request will complete the formating of the response buffer         00150000
+*    by updating the conversational RU header and will then             00160000
+*    send the response buffer to the cooperative process.               00170000
+*                                                                       00180000
+*    An XPBUFR will be initialized during the processing of             00190000
+*    a FORMAT or XMIT request if required.  This response               00200000
+*    buffer is initialized using the @XH from the initial               00210000
+*    operator command/monitor request.                                  00220000
+*                                                                       00230000
+* ON ENTRY:                                                             00240000
+*                                                                       00250000
+*    Upon entry R1 will contain the address of the parameter            00260000
+*    list mapped by OPRPLST generated using the $OPRRESP                00270000
+*    DSECT=YES expansion.                                               00280000
+*                                                                       00290000
+* ON EXIT:                                                              00300000
+*                                                                       00310000
+*    On exit R15 will contain one of the following return codes:        00320000
+*                                                                       00330000
+*       RC00 - Normal Completion                                        00340000
+*                                                                       00350000
+*       RC04 - Buffer Exhausted (FORMAT request)                        00360000
+*                                                                       00370000
+*       RC08 - Service failure                                          00380000
+*              RSN04 - Message requeue failure                          00390000
+*              RSN08 - XPBUFR  request failure                          00400000
+*                                                                       00410000
+*       RC12 - Request Error                                            00420000
+*              RSN04 - Invalid function code specified                  00430000
+*              RSN08 - OPRCOMM area requied for request                 00440000
+*                                                                       00450000
+**<DOC-OFF>****************************************************         00460000
+                                                                        00470000
+***************************************************************         00480000
+*                                                                       00490000
+* MAINTENANCE:                                                          00500000
+*                                                                       00510000
+*    02/28/95 Ron Colmone                                               00520000
+*             Initial Version                                           00530000
+*                                                                       00540000
+***************************************************************         00550000
+         EJECT ,                                                        00560000
+         EQUS  ,                  STANDARD REGISTER EQUATES             00570000
+                                                                        00580000
+         EJECT ,                                                        00590000
+         @XECONV ,                CONVERSATIONAL CONTROL HEADER         00600000
+                                                                        00610000
+         EJECT ,                                                        00620000
+         $MSGBUF ,                MESSAGE BUFFER FORMAT                 00630000
+                                                                        00640000
+         EJECT ,                                                        00650000
+         $OPRRESP DSECT=YES       OPERATOR RESPONSE PLIST               00660000
+                                                                        00670000
+         EJECT ,                                                        00680000
+         OPRCOMM  DSECT=YES       OPERATOR RESPONSE COMMON AREA         00690000
+                                                                        00700000
+         EJECT ,                                                        00710000
+         YOPRRESP DSECT=YES       OPERATOR COMMAND RESPONSE BLOCK       00720000
+                                                                        00730000
+         EJECT ,                                                        00740000
+         $RU      TYPE=DSECT      RUENTRY FORMAT                        00750000
+                                                                        00760000
+         EJECT ,                                                        00770000
+         EVCODES  ,               EVENT CODES                           00780000
+*                                                                       00790000
+         MSGCODES ,               TSEND MESSAGE CODES                   00800000
+                                                                        00810000
+         EJECT ,                                                        00820000
+*--------------------------------------------------------------         00830000
+* Read/Write workarea                                                   00840000
+*--------------------------------------------------------------         00850000
+WORKAREA #WORK ,                                                        00860000
+REGSAVE  DS    16F                REGISTER SAVEAREA                     00870000
+                                                                        00880000
+FLAGS    DS    X                  PROCESSING FLAGS                      00890000
+$XPFULL  EQU   X'80'                 XPBUFR EXHAUSTED                   00900000
+                                                                        00910000
+         DS    XL3                RESERVED                              00920000
+                                                                        00930000
+         #ENDWORK                                                       00940000
+                                                                        00950000
+#XPSIZE  EQU   6*1024             DEFAULT XPORT BUFFER SIZE             00960000
+                                                                        00970000
+         EJECT ,                                                        00980000
+***************************************************************         00990000
+*                                                                       01000000
+*  Operator Command / Monitor Response Services                         01010000
+*                                                                       01020000
+***************************************************************         01030000
+IOPRRESP #ENTER PREG=R8                                                 01040000
+                                                                        01050000
+         USING OPRPLST,R8         PLIST ADDRESSABILITY                  01060000
+         USING ITASK,R10          ITASK ADDRESSABILITY                  01070000
+         USING IPCB,R9            IPCB  ADDRESSABILITY                  01080000
+         L     R9,TSKPCBC         STANDARD ENVIRONMENT                  01090000
+                                                                        01100000
+         EJECT ,                                                        01110000
+*--------------------------------------------------------------         01120000
+*  Obtain Operator Response Common area                                 01130000
+*--------------------------------------------------------------         01140000
+         ICM   R7,15,OPRCOMM@     ADDRESS OF OPRRESP COMMAREA           01150000
+         BZ    ERR_COMM           INVALID REQUEST                       01160000
+         USING OPRCOMM,R7         ADDRESSABILITY                        01170000
+                                                                        01180000
+*--------------------------------------------------------------         01190000
+*  Retrieve requested function code and call appropriate service        01200000
+*--------------------------------------------------------------         01210000
+         SR    R2,R2              PREPARE FOR INSERT                    01220000
+         ICM   R2,1,OPRREQ        RETRIEVE REQUEST CODE                 01230000
+         BZ    ERR_FUNC           REQUEST ERROR                         01240000
+                                                                        01250000
+         BCTR  R2,0               CONVERT TO INDEX                      01260000
+         SLL   R2,2               CONVERT TO OFFSET                     01270000
+                                                                        01280000
+         B     *+4(R2)            BRANCH ON REQUEST CODE                01290000
+         B     INIT                 INITIALIZATION                      01300000
+         B     MSGADD               ADD MESSAGES TO QUEUE               01310000
+         B     FORMAT               FORMAT OPRRESP                      01320000
+         B     XMIT                 TRANSMIT                            01330000
+         B     TERM                 TERMINATE                           01340000
+         EX    0,*                  UNSUPPORTED                         01350000
+         EX    0,*                  UNSUPPORTED                         01360000
+         EX    0,*                  UNSUPPORTED                         01370000
+                                                                        01380000
+         EJECT ,                                                        01390000
+***************************************************************         01400000
+*                                                                       01410000
+*  Initialization (INIT):                                               01420000
+*                                                                       01430000
+*    The initialization request is performed when a command             01440000
+*    or monitor process is initialized.  This request will              01450000
+*    initialize the Operator communication common area with             01460000
+*    a copy of the tranaction request header saved for subsequent       01470000
+*    XPBUFR init requests.                                              01480000
+*                                                                       01490000
+***************************************************************         01500000
+INIT     DS    0H                                                       01510000
+         XC    OPRCOMM(OPRCMLN),OPRCOMM  CLEAR COMMON AREA              01520000
+         MVC   OPCMID,=CL8'OPRCOMM'      EYECATCHER                     01530000
+                                                                        01540000
+         ICM   R1,15,OPRXH        ADDRESS OF TRANSACTION HEADER         01550000
+         MVC   OPCM@XH(OPCMXHLN),0(R1)  COPY TRANSACTION HEADER         01560000
+         MVC   OPCMQH,OPRQH       ADDRESS OF STGMGR QUEUE HEADER        01570000
+         MVC   OPCMRU@,OPRRU@     ADDRESS OF $RU ENTRY                  01580000
+                                                                        01590000
+         B     RET_NORM           NORMAL COMPLETION                     01600000
+                                                                        01610000
+         EJECT ,                                                        01620000
+***************************************************************         01630000
+*                                                                       01640000
+*  Message Add (MSGADD):                                                01650000
+*                                                                       01660000
+*    The msgadd request will requeue the message buffer                 01670000
+*    supplied to a locally managed message queue.                       01680000
+*                                                                       01690000
+***************************************************************         01700000
+MSGADD   DS    0H                                                       01710000
+         $ENQMSG *OPRMSGQ,OPCMMSGQ,  QUEUE MESSAGES TO LOCAL QUEUE     +01720000
+               QH=*OPCMQH,                                             +01730000
+               MF=(E,MFE_LIST)                                          01740000
+                                                                        01750000
+         BNZ   ERR_MSGQ           MESSAGE QUEUEING FAILURE              01760000
+         B     RET_NORM           NORMAL COMPLETION                     01770000
+                                                                        01780000
+         EJECT ,                                                        01790000
+***************************************************************         01800000
+*                                                                       01810000
+* Format:                                                               01820000
+*                                                                       01830000
+*   The format request will initialize an XPBUFR operator               01840000
+*   response if required.  Messages queued to the operator              01850000
+*   common area are then inserted into the response buffer.             01860000
+*                                                                       01870000
+***************************************************************         01880000
+FORMAT   DS    0H                                                       01890000
+         ICM   R5,15,OPCMRSP@     XPBUFR INITIALIZED?                   01900000
+         BNZ   FMT_MSGS           YES, CONTINUE                         01910000
+         USING YOPRRESP,R5        OPER RESP BUFFER ADDRESSABILITY       01920000
+                                                                        01930000
+         BAS   R14,INITXPBF       INITIALIZE XPBUFR                     01940000
+         BNZ   ERR_XPBF           XPBUFR INITIALIZATION FAILURE         01950000
+         L     R5,OPCMRSP@        OPERATOR RESPONSE HEADER              01960000
+                                                                        01970000
+*--------------------------------------------------------------         01980000
+* Insert locally queued messages into response buffer                   01990000
+*--------------------------------------------------------------         02000000
+FMT_MSGS DS    0H                                                       02010000
+         ICM   R4,15,OPCMMSGQ     ADDRESS OF MESSAGE BUFFER             02020000
+         BZ    FMT_RESP           NO MSGS, FORMAT RESPONSE              02030000
+         USING $MSGBUF,R4         ADDRESSABILITY                        02040000
+                                                                        02050000
+FMT_NEXT DS    0H                                                       02060000
+         ICM   R3,15,$MSGQF       ADDRESS OF FIRST/NEXT MESSAGE         02070000
+         BZ    FMT_RESP           END OF MESSAGES                       02080000
+         USING $MSBHDR,R3         MESSAGE LINE ADDRESSABILITY           02090000
+                                                                        02100000
+         LH    R2,$MSBLEN         LENGTH OF MESSAGE TEXT                02110000
+         STH   R2,$MSBRSVD        COPY MESSAGE TEXT LENGTH              02120000
+         LA    R2,L'$MSGRSVD(,R2) ACCOUNT FOR LENGTH FIELD              02130000
+                                                                        02140000
+         $XPBUFR ISRT,            ADD MESSAGE TO OPRRESP BUFFER        +02150000
+               DATA=$MSBRSVD,                                          +02160000
+               DATALEN=(R2),                                           +02170000
+               MF=(E,MFE_LIST)                                          02180000
+         BNZ   FMT_FULL           RESPONSE BUFFER FULL                  02190000
+                                                                        02200000
+         LH    R1,YOPRMSGC        RETRIEVE CURRENT MESSAGE COUNT        02210000
+         LA    R1,1(,R1)          INCREMENT MESSAGE COUNT               02220000
+         STH   R1,YOPRMSGC        SAVE UPDATED MESSAGE COUNT            02230000
+                                                                        02240000
+*--------------------------------------------------------------         02250000
+* Remove message from local message queue                               02260000
+*--------------------------------------------------------------         02270000
+         $DEQMSG $MSBHDR,OPCMMSGQ, REMOVE MESSAGE FROM QUEUE           +02280000
+               QH=*OPCMQH,                                             +02290000
+               MF=(E,MFE_LIST)                                          02300000
+                                                                        02310000
+         B     FMT_NEXT           PROCESS NEXT MESSAGE                  02320000
+                                                                        02330000
+*--------------------------------------------------------------         02340000
+* XPBUFR buffer has been exhausted, set indicator accordingly           02350000
+*--------------------------------------------------------------         02360000
+FMT_FULL DS    0H                                                       02370000
+         OI    FLAGS,$XPFULL      INDICATE XPBUFR EXHAUSTED             02380000
+                                                                        02390000
+*--------------------------------------------------------------         02400000
+* If error return information supplied,  update operator                02410000
+* response header.                                                      02420000
+*--------------------------------------------------------------         02430000
+FMT_RESP DS    0H                                                       02440000
+         OC    OPRRINFO(12),OPRRINFO  ERROR RETURN INFO PROVIDED?       02450000
+         BZ    RET_NORM           NO, NORMAL COMPLETION                 02460000
+                                                                        02470000
+         LM    R15,R1,OPRRINFO    RETRIEVE RETURN INFO                  02480000
+         ST    R15,YOPRRETC       RETURN CODE                           02490000
+         ST    R0,YOPRRSN         REASON CODE                           02500000
+         ST    R1,YOPRINFO        INFO   CODE                           02510000
+                                                                        02520000
+         B     RET_NORM           NORMAL COMPLETION                     02530000
+                                                                        02540000
+         EJECT ,                                                        02550000
+***************************************************************         02560000
+*                                                                       02570000
+* Transmit (XMIT):                                                      02580000
+*                                                                       02590000
+*   The transmit request will initialize an operator response           02600000
+*   XPBUFR if required.  The operator response header and               02610000
+*   conversation transaction headers will be updated if                 02620000
+*   required.                                                           02630000
+*                                                                       02640000
+***************************************************************         02650000
+XMIT     DS    0H                                                       02660000
+         ICM   R15,15,OPCMXCV@    XPBUFR INITIALIZED?                   02670000
+         BNZ   XMT_RESP           YES, CONTINUE                         02680000
+         BAS   R14,INITXPBF       INITIALIZE XPBUFR                     02690000
+         BNZ   ERR_XPBF           $XPBUFR INITIALIZATION FAILURE        02700000
+                                                                        02710000
+*--------------------------------------------------------------         02720000
+* If error return information supplied,  update operator                02730000
+* response header.                                                      02740000
+*--------------------------------------------------------------         02750000
+XMT_RESP DS    0H                                                       02760000
+         OC    OPRRINFO(12),OPRRINFO  ERROR RETURN INFO PROVIDED?       02770000
+         BZ    XMT_CONV           NO, UPDATE CONVERSATION HDR           02780000
+                                                                        02790000
+         LM    R15,R1,OPRRINFO    RETRIEVE RETURN INFO                  02800000
+         ST    R15,YOPRRETC       RETURN CODE                           02810000
+         ST    R0,YOPRRSN         REASON CODE                           02820000
+         ST    R1,YOPRINFO        INFO   CODE                           02830000
+                                                                        02840000
+*--------------------------------------------------------------         02850000
+* Update conversational transaction header if supplied.                 02860000
+*--------------------------------------------------------------         02870000
+XMT_CONV DS    0H                                                       02880000
+         L     R1,OPCMXCV@        ADDRESS OF CONV HDR IN XPBUFR         02890000
+         ICM   R2,15,OPRCONV      ADDRESS OF CONVERSATION HDR           02900000
+         BZ    *+10               NOT AVAILABLE                         02910000
+         MVC   0(@XCVXELN,R1),0(R2)   COPY CONV HEADER TO XPBUFR        02920000
+                                                                        02930000
+*--------------------------------------------------------------         02940000
+* Send operator response buffer to cooperative process                  02950000
+*--------------------------------------------------------------         02960000
+         XC    OPCMXCV@,OPCMXCV@  CLEAR CONV HDR POINTER                02970000
+         XC    OPCMRSP@,OPCMRSP@  CLEAR RESP HDR POINTER                02980000
+                                                                        02990000
+         SR    R3,R3              PREPARE FOR INSERT                    03000000
+         IC    R3,OPRNFYSN        SEND NOTIFICATION INDICATOR           03010000
+                                                                        03020000
+         $XPBUFR XMIT,            TRANSMIT XPORT BUFFER                +03030000
+               NFYSEND=(R3),      SEND NOTIFICATION                    +03040000
+               MF=(E,MFE_LIST)                                          03050000
+                                                                        03060000
+         BNZ   ERR_XPBF           XPORT BUFFER FAILURE                  03070000
+                                                                        03080000
+         LTR   R3,R3              SEND NOTIFICATION REQUESTED           03090000
+         BZ    RET_NORM           NO, NORMAL COMPLETION                 03100000
+                                                                        03110000
+         L     R1,OPCMSND#        GET CURRENT SEND IN PROG CNT          03120000
+         LA    R1,1(,R1)          INCREMENT SEND IN PROG COUNT          03130000
+         ST    R1,OPCMSND#        SAVE NEW SEND IN PROG COUNT           03140000
+         B     RET_NORM           NORMAL COMPLETION                     03150000
+                                                                        03160000
+         EJECT ,                                                        03170000
+***************************************************************         03180000
+*                                                                       03190000
+* Termination (TERM):                                                   03200000
+*                                                                       03210000
+*   The termination request will free any storage associated            03220000
+*   with the local message queue.                                       03230000
+*                                                                       03240000
+***************************************************************         03250000
+TERM     DS    0H                                                       03260000
+         $FREMSG OPCMMSGQ,        FREE MESSAGE QUEUE                   +03270000
+               QH=*OPCMQH,                                             +03280000
+               MF=(E,MFE_LIST)                                          03290000
+                                                                        03300000
+         XC    OPRCOMM(OPRCMLN),OPRCOMM    RESET COMMAREA               03310000
+                                                                        03320000
+         B     RET_NORM           NORMAL COMPLETION                     03330000
+                                                                        03340000
+         EJECT ,                                                        03350000
+*--------------------------------------------------------------         03360000
+*  Return Exits (Normal and Error)                                      03370000
+*--------------------------------------------------------------         03380000
+RET_NORM DS    0H                                                       03390000
+         LA    R0,RSN00           NORMAL COMPLETION                     03400000
+         LA    R15,RC00           ASSUME NORMAL COMPLETION              03410000
+         TM    FLAGS,$XPFULL      XPBUFR EXHAUSTED?                     03420000
+         BZ    *+8                NO, CONTINUE                          03430000
+         LA    R15,RC04           BUFFER EXHAUSTED                      03440000
+         B     RETURN             RETURN                                03450000
+                                                                        03460000
+ERR_FUNC DS    0H                                                       03470000
+         LA    R0,RSN04           INVALID FUNCTION SPECIFIED            03480000
+         LA    R15,RC12           INVALID REQUEST                       03490000
+         B     RETURN             RETURN                                03500000
+                                                                        03510000
+ERR_COMM DS    0H                                                       03520000
+         LA    R0,RSN08           OPER COMMAREA REQUIRED                03530000
+         LA    R15,RC12           INVALID REQUEST                       03540000
+         B     RETURN             RETURN                                03550000
+                                                                        03560000
+ERR_MSGQ DS    0H                                                       03570000
+         LA    R0,RSN04           MESSAGE REQUEUE FAILED                03580000
+         LR    R1,R15             SERVICE RETURN CODE                   03590000
+         LA    R15,RC08           SERVICE REQUEST FAILURE               03600000
+         B     RETURN             RETURN                                03610000
+                                                                        03620000
+ERR_XPBF DS    0H                                                       03630000
+         LA    R0,RSN08           XPBUFR REQUEST FAILED                 03640000
+         LR    R1,R15             SERVICE RETURN CODE                   03650000
+         LA    R15,RC08           SERVICE REQUEST FAILURE               03660000
+         B     RETURN             RETURN                                03670000
+                                                                        03680000
+RETURN   DS    0H                                                       03690000
+         #EXIT                                                          03700000
+                                                                        03710000
+         EJECT ,                                                        03720000
+***************************************************************         03730000
+*                                                                       03740000
+* ROUTINE: INITXPBF - Initialize Operator Cmd/Mon Resp XPBUFR           03750000
+*                                                                       03760000
+* DESCRIPTION:                                                          03770000
+*                                                                       03780000
+*    This routine will initialize the XPBUFR used for the               03790000
+*    the operator command or monitor response buffer.  Areas            03800000
+*    of the buffer are reserved for the conversational                  03810000
+*    transaction header and operator response header.                   03820000
+*                                                                       03830000
+***************************************************************         03840000
+INITXPBF DS    0H                                                       03850000
+         STM   R0,R15,REGSAVE     SAVE CALLER'S REGISTERS               03860000
+                                                                        03870000
+         L     R2,=A(#XPSIZE)     ASSUME DEFAULT XPBUFR SIZE            03880000
+         ICM   R1,15,OPCMRU@      RU ENTRY ADDRESS AVAILABLE            03890000
+         BZ    INIT_BUF           NO, USE DEFAULT                       03900000
+         USING RUENTRY,R1         TEMPORARY ADDRESSABILITY              03910000
+                                                                        03920000
+         ICM   R0,15,RUETXPLN     BUFFER SIZE SPECIFIED IN RUENTRY      03930000
+         BZ    INIT_BUF           NO, USE DEFAULT                       03940000
+         BM    INIT_BLK           BULK DATA SIZE RECOMMENDED            03950000
+         LR    R2,R0              USE RUENTRY DEFINED SIZE              03960000
+         B     INIT_BUF           CONTINUE WITH XPBUFR INITIALIZATION   03970000
+                                                                        03980000
+         DROP  R1                 RUENTRY                               03990000
+                                                                        04000000
+INIT_BLK DS    0H                                                       04010000
+         @CALL IXRURSIZ,CTYPE=CVT ACQUIRE RESPONSE BUFR RECOMMENDATIONS 04020000
+         LR    R2,R1              XPBUFR SIZE RECOMMENDATION            04030000
+                                                                        04040000
+INIT_BUF DS    0H                                                       04050000
+         $XPBUFR INIT,            INITIALIZE XPORT BUFFER              +04060000
+               SIZE=(R2),                                              +04070000
+               XH=OPCM@XH,                                             +04080000
+               MF=(E,MFE_LIST)                                          04090000
+         BNZ   INIT_RET           INITIALIZATION FAILURE                04100000
+                                                                        04110000
+*--------------------------------------------------------------         04120000
+* Reserve / Initialize Conversation transaction header                  04130000
+*--------------------------------------------------------------         04140000
+         $XPBUFR ISRT,DATALEN=@XCVXELN,MF=(E,MFE_LIST)                  04150000
+         BNZ   INIT_RET           INITIALIZATION FAILURE                04160000
+                                                                        04170000
+         ST    R1,OPCMXCV@        ADDRESS OF CONV HDR IN BUFFER         04180000
+         USING @XCV,R1            TEMP ADDRESSABILITY                   04190000
+         MVC   @XCVPTKN,PCBENTKN  WORKUNIT TOKEN                        04200000
+         DROP  R1                 @XECONV                               04210000
+                                                                        04220000
+*--------------------------------------------------------------         04230000
+* Reserve / Initialize Operator Response Header                         04240000
+*--------------------------------------------------------------         04250000
+         $XPBUFR ISRT,DATALEN=YOPRRSPL,MF=(E,MFE_LIST)                  04260000
+         BNZ   INIT_RET           INITIALIZATION FAILURE                04270000
+                                                                        04280000
+         ST    R1,OPCMRSP@        ADDRESS OF RESP HDR IN BUFFER         04290000
+         LA    R15,RC00           NORMAL COMPLETION                     04300000
+                                                                        04310000
+INIT_RET DS    0H                                                       04320000
+         LM    R0,R14,REGSAVE     RESTORE CALLER'S REGISTERS            04330000
+         LTR   R15,R15            SET CONDITION CODE                    04340000
+         BR    R14                RETURN                                04350000
+                                                                        04360000
+         EJECT ,                                                        04370000
+*--------------------------------------------------------------         04380000
+* Constants and literals                                                04390000
+*--------------------------------------------------------------         04400000
+                                                                        04410000
+         LTORG ,                                                        04420000
+                                                                        04430000
+*--------------------------------------------------------------         04440000
+                                                                        04450000
+         PRINT NOGEN                                                    04460000
+         ICVT  ,                                                        04470000
+         ITASK ,                                                        04480000
+         IPCB  ,                                                        04490000
+         END   ,                                                        04500000

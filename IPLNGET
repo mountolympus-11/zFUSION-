@@ -1,0 +1,917 @@
+IPLNGET  TITLE '- ACQUIRE USE OF NAVIGATION PLAN OR TSL'                00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE: IPLNGET - Acquire use of navigation plan or TSL              00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This routine provides a mechanism for generating and               00080000
+*    maintaining navigation plans over a series of SQL requests         00090000
+*    reducing the need for reconstructing frequently used               00100000
+*    plans.                                                             00110000
+*                                                                       00120000
+*    A binary tree of RPN (plan reference) entries mapped by            00130000
+*    PLNREFNT is used to anchor both short and long term                00140000
+*    requests for navigation plans (PRJEXPTR).  RPNs serve as           00150000
+*    an anchor for the PLAN and PLANINFO blocks proper, as well         00160000
+*    as a collection point for plan access statistics, etc.             00170000
+*    The binary tree provides ordering and efficient searching          00180000
+*    by terminal state list and/or VDB table name and its               00190000
+*    associated SQL DML perspective.  RPNs are also enqueued in         00200000
+*    an unordered list (PRJEXPFQ) to simplify serial scan.              00210000
+*                                                                       00220000
+*    RPNs are anchored in the IPROJ and are intertask shared.           00230000
+*    Plans reside in IPROJ CSTGMGR storage.  The IPROJ MIL lock         00240000
+*    is held over any storage function directed against the             00250000
+*    IPROJ shared storage subpool.                                      00260000
+*                                                                       00270000
+*    Two types of requests are supported; (1) return terminal           00280000
+*    state list, and (2) return plan.  The plan return is               00290000
+*    further qualified by whether a RUN or REPOSITION plan is           00300000
+*    required.  In the first case, the plan is identified by            00310000
+*    VDB table name and SQL DML statement type.  In the second,         00320000
+*    the plan is identified by a TSL consisting of only the the         00330000
+*    originate and terminate states.  All successful requests           00340000
+*    (RC00) return the terminal state list.                             00350000
+*                                                                       00360000
+*    Locks are not required to scan the RPN tree/list because,          00370000
+*    once created, they exist for the life of the project.              00380000
+*    However, the usual CS/CDS logic is required to add to the          00390000
+*    structures and to attach and/or delete the associated VDB          00400000
+*    table definitions.                                                 00410000
+*                                                                       00420000
+*                                                                       00430000
+* NOTES:                                                                00440000
+*                                                                       00450000
+*    Refer to PLNREFNT for a discussion of RPN structure and            00460000
+*    ordering.                                                          00470000
+*                                                                       00480000
+*    PRJIRPLN, the current PLANCACHE value, must be updated             00490000
+*    anytime that an inactive entry is activated.                       00500000
+*                                                                       00510000
+*                                                                       00520000
+* ON ENTRY:                                                             00530000
+*                                                                       00540000
+*    R1  points to a parameter list described by the PLNGETP            00550000
+*        mapping                                                        00560000
+*                                                                       00570000
+*                                                                       00580000
+* ON EXIT:                                                              00590000
+*                                                                       00600000
+*    R15 and R0 contain a return code / reason code pair as             00610000
+*        described below                                                00620000
+*                                                                       00630000
+*        RC00 - PLAN and/or TSL returned.  For plan return              00640000
+*               requests, the completed PLAN and PLANINFO               00650000
+*               structures are copied into the return areas             00660000
+*               provided by the caller.                                 00670000
+*                                                                       00680000
+*               If a TSL (only) is returned, the caller does            00690000
+*               not need to formally return it.  If a plan is           00700000
+*               returned, IPLNDET must be invoked to release            00710000
+*               it.                                                     00720000
+*                                                                       00730000
+*        RC04 - invalid or incomplete request (plist in error)          00740000
+*                                                                       00750000
+*        RC08 - plan generation error                                   00760000
+*                                                                       00770000
+*               PLNBLD() returned a non-zero return code                00780000
+*               indicating that a valid plan could not be               00790000
+*               constructed.  The PLAN and PLANINFO data areas          00800000
+*               provided contain diagnostic information.  The           00810000
+*               resources attached to PLAN must be released via         00820000
+*               PLNPURG() or an equivalent facility.                    00830000
+*                                                                       00840000
+*                  R0 - PLNBLD() return code (consult NAV.H)            00850000
+*                                                                       00860000
+*        RC12 - unable to consolidate the generated plan into           00870000
+*               IPROJ managed storage, a likely programming error       00880000
+*                                                                       00890000
+*                  R0 - IPLNLOAD return code                            00900000
+*                                                                       00910000
+*        RC16 - storage not available                                   00920000
+*                                                                       00930000
+*        RC20 - terminal state list construction (PLNTSL) error         00940000
+*                                                                       00950000
+*                  R0 - PLNTSL() return code (consult NAV.H)            00960000
+*                                                                       00970000
+**<DOC-OFF>****************************************************         00980000
+                                                                        00990000
+         EJECT                                                          01000000
+***************************************************************         01010000
+*                                                                       01020000
+* MAINTENANCE:                                                          01030000
+*                                                                       01040000
+*    08/28/95 R. Turgeon                                                01050000
+*             Initial version                                           01060000
+*                                                                       01070000
+*    01/24/96 R. Turgeon                                                01080000
+*             Because PLANBLD() may append to the end of the            01090000
+*             terminal state list provided on input, it must            01100000
+*             be passed a copy of the TSL, not the extraction           01110000
+*             appended to the RPN.                                      01120000
+*                                                                       01130000
+*    01/30/96 R. Turgeon        Rel 2.1 Beta 1                          01140000
+*             VDB definitions that span multiple applications           01150000
+*             generate and update terminal state lists (TSLs)           01160000
+*             earlier than for single application VDBs. Inherit         01170000
+*             the modified multi-application TSL if available.          01180000
+*                                                                       01190000
+***************************************************************         01200000
+                                                                        01210000
+         EJECT                                                          01220000
+         #WORK ,                                                        01230000
+                                                                        01240000
+FLAGS    DS    X             FLAG BYTE                                  01250000
+F$RNALO  EQU   X'80'            PLNREFNT ALLOCATED                      01260000
+F$RNUSE  EQU   X'40'            PLNREFNT USED (POSTED TO IPROJ)         01270000
+F$PLNGEN EQU   X'20'            PLAN GENERATED                          01280000
+F$LOCKAQ EQU   X'02'            RUNNING UNDER IPROJ MIL LOCK            01290000
+F$LOCKH  EQU   X'01'            IPROJ MIL LOCK ACQUIRED                 01300000
+                                                                        01310000
+@RNODE   DS    A             CANDIDATE PLNREFNT NODE ADDR               01320000
+@RPNKEY  DS    0XL(RPNKEYL)  RPN CANDIDATE KEY CONSTRUCTION AREA        01330000
+                                                                        01340000
+@PLAN    DS    0F,XL(PLANLN)    LOCAL PLAN RETURN AREA                  01350000
+@PINFO   DS    0F,XL(PINFOLN)   LOCAL PLAN INFORMATION RETURN AREA      01360000
+@PLNLRET DS    0F,XL(PRLDLN)    IPLNLOAD PLNLOADR RETURN AREA           01370000
+                                                                        01380000
+TSLORG   DS    F             TERMINAL STATE LIST ORIGIN                 01390000
+TSLSIZE  DS    F             TERMINAL STATE LIST ENTRY COUNT            01400000
+TSL      DS    (STNMAX)F     TERMINAL STATE LIST CONSTRUCTION / RETURN  01410000
+                                                                        01420000
+RETREGS  DS    3F            R15-R1 STAGED FOR RETURN                   01430000
+REGSAVE  DS    16F           LOCAL REGISTER SAVEAREA                    01440000
+                                                                        01450000
+         #ENDWORK ,                                                     01460000
+                                                                        01470000
+         EJECT                                                          01480000
+         PLNGETP ,           REQUEST LIST                               01490000
+                                                                        01500000
+         EJECT                                                          01510000
+         PLNREFNT ,          VDB TABLE DEF REFERENCE ENTRY              01520000
+                                                                        01530000
+         EJECT                                                          01540000
+         PLNLOADP ,          PLAN CONSOLIDATION REQUEST PLIST           01550000
+                                                                        01560000
+         EJECT                                                          01570000
+         IPROJ ,             PROJECT                                    01580000
+                                                                        01590000
+         EJECT                                                          01600000
+         NAV  ,              NAVIGATION PLAN STRUCTURES                 01610000
+                                                                        01620000
+         EJECT                                                          01630000
+         ABCODES ,                                                      01640000
+                                                                        01650000
+         EQUS ,                                                         01660000
+                                                                        01670000
+         EJECT                                                          01680000
+IPLNGET  #ENTER BASE=R12,PREG=R8                                        01690000
+                                                                        01700000
+         USING ITASK,R10          ITASK ADDRESSABILITY                  01710000
+                                                                        01720000
+         EJECT                                                          01730000
+***************************************************************         01740000
+*                                                                       01750000
+*   General initialization, locate the IPROJ                            01760000
+*                                                                       01770000
+***************************************************************         01780000
+                                                                        01790000
+         USING PLNGETP,R8         ENTRANCE LIST                         01800000
+                                                                        01810000
+         L     R2,TSKPCBC         ADDRESS OF CURRENT PCB                01820000
+         USING IPCB,R2            IPCB ADDRESSABILITY                   01830000
+                                                                        01840000
+         L     R9,PCBUSER         ADDRESS OF IUSER BLOCK                01850000
+         USING IUSER,R9           LIFE OF FUNCTION                      01860000
+                                                                        01870000
+         L     R7,USRPROJ         ADDRESS OF IPROJ                      01880000
+         USING IPROJ,R7           LIFE OF FUNCTION                      01890000
+         DROP  R2,R9              IPCB, IUSER                           01900000
+                                                                        01910000
+         ICM   R15,15,GPLNRTSC    TSL ENTRY COUNT RETURN AREA           01920000
+         BZ    *+10               SKIP IF NOT PROVIDED                  01930000
+         XC    0(4,R15),0(R15)    CLEAR                                 01940000
+                                                                        01950000
+         ICM   R15,15,GPLNRTSL    TSL ORIGIN RETURN AREA                01960000
+         BZ    *+10               SKIP IF NOT PROVIDED                  01970000
+         XC    0(4,R15),0(R15)    CLEAR                                 01980000
+                                                                        01990000
+***************************************************************         02000000
+*                                                                       02010000
+*   Generate candidate RPN key based on request code                    02020000
+*                                                                       02030000
+***************************************************************         02040000
+                                                                        02050000
+         XC    @RPNKEY,@RPNKEY    RPN KEY CONSTRUCTION AREA             02060000
+K        USING RPNKEY,@RPNKEY     FORMAT THE CANDIDATE KEY              02070000
+                                                                        02080000
+         L     R2,GPLNAAP         LOCATE THE AAP                        02090000
+         USING AAP,R2             APPLICATION ACTION BLOCK              02100000
+         MVC   K.RPNKAPPL,AAPANAME   APPLICATION NAME                   02110000
+         MVC   K.RPNKLOGM,AAPLOGMD   LOGMODE                            02120000
+         DROP  R2                 AAP                                   02130000
+                                                                        02140000
+         CLC   GPLNREQ,=A(GPLN_REP)                                     02150000
+         BE    KEYREPOS           KEY IN REPOSITION PLAN REQ FORMAT     02160000
+                                                                        02170000
+         MVI   K.RPNKTYPE,FF      UNIQUELY IDENTIFY KEY FORMAT          02180000
+         ICM   R3,15,GPLNTBNM     VDB TABLE NAME                        02190000
+         BZ    ERR_REQ            NOT PROVIDED, MUST BE OTHER TYPE      02200000
+         MVC   K.RPNKTBNM,0(R3)                                         02210000
+                                                                        02220000
+         ICM   R3,15,GPLNDMLC     SQL DML STATEMENT CODE                02230000
+         BZ    *+8                SKIP IF OMITTED                       02240000
+         MVC   K.RPNKDMLC,0(R3)                                         02250000
+         B     KEYFIN                                                   02260000
+                                                                        02270000
+*--------------------------------------------------------------         02280000
+*   Reposition plan identified by two terminal states                   02290000
+*--------------------------------------------------------------         02300000
+                                                                        02310000
+KEYREPOS DS    0H                 REPOSITION PLAN REQUEST               02320000
+         MVC   K.RPNKFSTN,GPLNFSTN   ORIGINATE (FIRST) STN ADDR         02330000
+         MVC   K.RPNKLSTN,GPLNLSTN   TERMINATE (LAST) STN ADDR          02340000
+                                                                        02350000
+KEYFIN   DS    0H                                                       02360000
+         DROP  K                  RPN CANDIDATE KEY CONSTRUCTION CPT    02370000
+                                                                        02380000
+         EJECT                                                          02390000
+***************************************************************         02400000
+*                                                                       02410000
+*   If no RPNs have yet been created, this is the first plan            02420000
+*   request directed against the current project.  Handling             02430000
+*   this special case out-of-line simplifies the logic                  02440000
+*   throughout.                                                         02450000
+*                                                                       02460000
+***************************************************************         02470000
+                                                                        02480000
+         ICM   R5,15,PRJEXPTR     PREPARE FOR RPN ENTRY TRAVERSAL       02490000
+         BNZ   INITIAL            BASE NODE LOCATED                     02500000
+                                                                        02510000
+         LA    R0,@RPNKEY         R0 <== CANDIDATE RPN KEY              02520000
+         BAS   R14,ALLOCRPN       ALLOCATE & INITIALIZE AN RPN          02530000
+         B     *+4(R15)           ANALYZE COMPLETION                    02540000
+         B     R1ALOCPT              RPN ALLOCATION COMPLETE            02550000
+         B     ERR_TSL               TERMINAL STATE LIST GENERATE ERROR 02560000
+         B     ERR_STG               STORAGE FAILURE                    02570000
+                                                                        02580000
+R1ALOCPT DS    0H                                                       02590000
+         ST    R1,@RNODE          RETAIN PTR TO ACQUIRED STORAGE        02600000
+         OI    FLAGS,F$RNALO      INDICATE RPN ALLOCATE OCCURRED        02610000
+                                                                        02620000
+         CS    R5,R1,PRJEXPTR     PLANT THE FIRST RPN                   02630000
+         BNE   INITIAL            BEAT TO THE DRAW                      02640000
+         OI    FLAGS,F$RNUSE      RPN IS THE BTREE ROOT                 02650000
+                                                                        02660000
+         USING PLNREFNT,R1        TEMPORARY ADDRESSABILITY              02670000
+         L     R0,PRJEXPFQ        ANCHOR OF UNORDERED RPN LIST          02680000
+         ST    R0,RPNNEXT         ADD TO FRONT OF LIST                  02690000
+         CS    R0,R1,PRJEXPFQ     UPDATE ANCHOR ACCORDINGLY             02700000
+         BNE   *-8                UNTIL IT STICKS                       02710000
+         DROP  R1                 PLNREFNT                              02720000
+                                                                        02730000
+         L     R15,PRJEXPCT       RPN COUNTER                           02740000
+         LA    R14,1(,R15)        ACCOUNT FOR ADDITION                  02750000
+         CS    R15,R14,PRJEXPCT   INCREMENT REFERENCED PLAN COUNT       02760000
+         BNE   *-8                PERSISTENT UPDATE                     02770000
+                                                                        02780000
+INITIAL  DS    0H                                                       02790000
+                                                                        02800000
+         EJECT                                                          02810000
+***************************************************************         02820000
+*                                                                       02830000
+*   Locate the RPN (ref PLNREFNT) that represents the plan or           02840000
+*   TSL requested.  If not found, a new RPN is created and              02850000
+*   enqueued in the proper position in the btree and in the             02860000
+*   unordered list.                                                     02870000
+*                                                                       02880000
+***************************************************************         02890000
+                                                                        02900000
+RPN_SCAN DS    0H                                                       02910000
+         L     R1,PRJEXPTR        R1 <== RPN TREE ROOT                  02920000
+         LA    R0,@RPNKEY         R0 <== RPN CANDIDATE KEY              02930000
+         BAS   R14,LOCRPN         RETURN MATCHING RPN ENTRY IN R1       02940000
+         BZ    MATCHED            RPN LOCATED                           02950000
+                                                                        02960000
+*--------------------------------------------------------------         02970000
+*   RPN key not matched, create a new RPN                               02980000
+*--------------------------------------------------------------         02990000
+                                                                        03000000
+         LR    R3,R1              RETAIN RPN ANCHOR ADDRESS (**RPN)     03010000
+                                                                        03020000
+         TM    FLAGS,F$RNALO+F$RNUSE                                    03030000
+         BM    REUSERPN           RPN ALLOCATED BUT NOT YET USED        03040000
+                                                                        03050000
+         LA    R0,@RPNKEY         R0 <== CANDIDATE RPN KEY              03060000
+         BAS   R14,ALLOCRPN       ALLOCATE AN RPN                       03070000
+         B     *+4(R15)           ANALYZE COMPLETION                    03080000
+         B     R2ALOCPT              RPN ALLOCATION COMPLETE            03090000
+         B     ERR_TSL               TERMINAL STATE LIST GENERATE ERROR 03100000
+         B     ERR_STG               STORAGE FAILURE                    03110000
+                                                                        03120000
+R2ALOCPT DS    0H                                                       03130000
+         ST    R1,@RNODE          RETAIN PTR TO ACQUIRED STORAGE        03140000
+         OI    FLAGS,F$RNALO      INDICATE RPN ALLOCATE OCCURRED        03150000
+                                                                        03160000
+REUSERPN DS    0H                                                       03170000
+                                                                        03180000
+*--------------------------------------------------------------         03190000
+*   Add the new RPN into the approp subtree and unordered list          03200000
+*--------------------------------------------------------------         03210000
+                                                                        03220000
+         SR    R0,R0              MUST ENSURE WE STILL OWN THE SUBTREE  03230000
+         CS    R0,R1,0(R3)        INSERT OURSELF IN DESIGNATED POSITION 03240000
+         BNE   RPN_SCAN           COLLISION, TRY AGAIN FROM TOP         03250000
+         OI    FLAGS,F$RNUSE      RPN ADDED TO BTREE                    03260000
+                                                                        03270000
+R        USING PLNREFNT,R1        TEMPORARY ADDRESSABILITY              03280000
+         L     R0,PRJEXPFQ        ANCHOR OF UNORDERED RPN LIST          03290000
+         ST    R0,R.RPNNEXT       ADD TO FRONT OF LIST                  03300000
+         CS    R0,R1,PRJEXPFQ     UPDATE ANCHOR ACCORDINGLY             03310000
+         BNE   *-8                UNTIL IT STICKS                       03320000
+         DROP  R                  PLNREFNT                              03330000
+                                                                        03340000
+         L     R15,PRJEXPCT       RPN COUNTER                           03350000
+         LA    R14,1(,R15)        ACCOUNT FOR ADDITION                  03360000
+         CS    R15,R14,PRJEXPCT   INCREMENT REFERENCED PLAN COUNT       03370000
+         BNE   *-8                PERSISTENT UPDATE                     03380000
+                                                                        03390000
+MATCHED  DS    0H                 MATCHING RPN DELIVERED IN R1          03400000
+                                                                        03410000
+***************************************************************         03420000
+*                                                                       03430000
+*   If the request is for the terminal state list (TSL) only,           03440000
+*   it can now be returned without inspecting or generating the         03450000
+*   associated navigation plan.                                         03460000
+*                                                                       03470000
+***************************************************************         03480000
+                                                                        03490000
+         LR    R9,R1              COMMON RPN ACCESS                     03500000
+         USING PLNREFNT,R9                                              03510000
+                                                                        03520000
+         CLC   GPLNREQ,=A(GPLN_TSL)   REQUEST FOR TSL ONLY?             03530000
+         BE    TSL_RET            DONE IF SO                            03540000
+                                                                        03550000
+         EJECT                                                          03560000
+***************************************************************         03570000
+*                                                                       03580000
+*   The appropriate RPN representing the desired plan has               03590000
+*   been located or constructed.  If a plan is attached,                03600000
+*   simply bump the use count and exit.  Otherwise, a plan              03610000
+*   must be generated from the terminal state list attached             03620000
+*   to the RPN.                                                         03630000
+*                                                                       03640000
+***************************************************************         03650000
+                                                                        03660000
+         SR    R15,R15            PREPARE FOR RX CLEAR OF UIC           03670000
+         ST    R15,RPNELRU        NOW IS VERY RECENT USE                03680000
+                                                                        03690000
+         L     R1,RPNREFS         NUMBER OF TABLE REFERENCES            03700000
+         LA    R0,1(,R1)          ACCOUNT FOR THIS REFERENCE            03710000
+         CS    R1,R0,RPNREFS      SWAP IT IN                            03720000
+         BNE   *-8                PERSISTENCE                           03730000
+                                                                        03740000
+*--------------------------------------------------------------         03750000
+*   attempt shared access of previously generated plan                  03760000
+*--------------------------------------------------------------         03770000
+                                                                        03780000
+LOCKER   DS    0H                                                       03790000
+         ICM   R1,15,RPNEPLAN     PLAN ATTACHED TO RPN?                 03800000
+         BZ    PLANGEN            GENERATE REQUIRED IF NOT              03810000
+                                                                        03820000
+         L     R0,RPNEUSE         CURRENT USE COUNT                     03830000
+         LR    R2,R0              ACCOUNT FOR THIS USE                  03840000
+         LA    R2,1(,R2)                                                03850000
+         LR    R3,R1                                                    03860000
+         CDS   R0,R2,RPNESYNC     NONZERO USE LOCKS THE PLAN            03870000
+         BNE   LOCKER             COLLISIONS SHOULD DRAIN QUICKLY       03880000
+                                                                        03890000
+*---------------------------------------------------------------        03900000
+*   if inactive entry is activated update PLANCACHE statistics          03910000
+*---------------------------------------------------------------        03920000
+                                                                        03930000
+         LTR   R0,R0              INACTIVE ENTRY BECOMES ACTIVE?        03940000
+         BNZ   PLAN_RET           SKIP IF REUSE                         03950000
+                                                                        03960000
+ACTIVATE DS    0H                                                       03970000
+         L     R2,PRJIRPLN        CURRENT PLANCACHE STG COMMITMENT      03980000
+         LR    R0,R2              PREPARE FOR UPDATE                    03990000
+         S     R0,RPNEPSIZ        ACCOUNT FOR CURRENT AS NEWLY ACTIVE   04000000
+         CS    R2,R0,PRJIRPLN     UPDATE TOTAL INACTIVE                 04010000
+         BNE   ACTIVATE           PERSISTENT UPDATE                     04020000
+         B     PLAN_RET           DONE                                  04030000
+                                                                        04040000
+         EJECT                                                          04050000
+****************************************************************        04060000
+*                                                                       04070000
+*   Generate a plan, then determine whether it is still needed.         04080000
+*   Plan generation can be a lengthy process and another WU             04090000
+*   could have easily slipped one in the meantime.                      04100000
+*                                                                       04110000
+****************************************************************        04120000
+                                                                        04130000
+PLANGEN  DS    0H                                                       04140000
+         TM    FLAGS,F$PLNGEN     PLANGEN PERFORMED PREVIOUSLY?         04150000
+         BO    PLANLOAD           PROMOTE TO IPROJ STORAGE IF SO        04160000
+                                                                        04170000
+         L     R1,RPNPCALL        NUMBER OF PLANGEN REQUESTS            04180000
+         LA    R0,1(,R1)          ACCOUNT FOR THIS REQUEST              04190000
+         CS    R1,R0,RPNPCALL     UPDATE STATISTICS                     04200000
+         BNE   *-8                PERSISTENCE                           04210000
+                                                                        04220000
+*---------------------------------------------------------------        04230000
+*   create a modifiable copy of the terminal state list (TSL)           04240000
+*---------------------------------------------------------------        04250000
+                                                                        04260000
+         L     R1,RPNETSLC        TSL ENTRY COUNT                       04270000
+         ST    R1,TSLSIZE         PLNBLD PARAMETER                      04280000
+         SLL   R1,2               EACH ENTRY AN STN ENTRY POINTER       04290000
+         LA    R0,TSL             MODIFIABLE TERMINAL STATE LIST        04300000
+         L     R14,RPNETSLA       CACHED TSL                            04310000
+         LR    R15,R1             TSL BYTE LENGTH                       04320000
+         MVCL  R0,R14             WORKING COPY                          04330000
+                                                                        04340000
+*---------------------------------------------------------------        04350000
+*   generate the navigation plan                                        04360000
+*---------------------------------------------------------------        04370000
+                                                                        04380000
+         $CLINK FUNC=PLNBLD,                                           X04390000
+               (LONG,GPLNCOPT),   COST CONSTRAINTS                     X04400000
+               (LONG,GPLNAAP),    APPLICATION ACTION BLOCK             X04410000
+               (STRUCT*,@PLAN),   GENERATE PLAN IN LOCAL STORAGE       X04420000
+               (STRUCT*,@PINFO),  PLAN INFO RETURN IN LOCAL STORAGE    X04430000
+               (LONG,GPLNNAVP),   STATE/COL/VAR NAVIGATION PARMS       X04440000
+               (LONG,GPLNCURR),   CURRENT STATE OR ZERO (RUN PLAN)     X04450000
+               (LONG,TSLSIZE),    NUMBER OF TSL ENTRIES                X04460000
+               (STRUCT*,TSL),     MODIFIABLE TSL PROPER                X04470000
+               (LONG,GPLNQH)      USER STORAGE SUBPOOL QH ADDRESS       04480000
+                                                                        04490000
+         LTR   R15,R15            NORMAL COMPLETION?                    04500000
+         BNZ   ERR_PGEN           PLAN GENERATION ERROR OTHERWISE       04510000
+                                                                        04520000
+         OI    FLAGS,F$PLNGEN     NOTE PLAN GENERATED                   04530000
+         B     LOCKER             ENSURE PLAN STILL NEEDED              04540000
+                                                                        04550000
+         EJECT                                                          04560000
+****************************************************************        04570000
+*                                                                       04580000
+*   Load the plan into a single IPROJ owned storage extent.             04590000
+*   The IPROJ MIL lock is acquired to serialize use of the              04600000
+*   IPROJ CSTGMGR storage subpool during plan consolidation             04610000
+*   and to ensure that the RPN can be safely updated with               04620000
+*   PLAN and PLANINFO data.                                             04630000
+*                                                                       04640000
+****************************************************************        04650000
+                                                                        04660000
+PLANLOAD DS    0H                                                       04670000
+         BAS   R14,GETLOCK        ACQUIRE IPROJ MIL LOCK                04680000
+                                                                        04690000
+         ICM   R0,15,RPNEPLAN     PLAN POSTED BY COMPETING WU?          04700000
+         BZ    PLOAD              CONTINUE IF NOT                       04710000
+                                                                        04720000
+         BAS   R14,RETLOCK        RELEASE IPROJ MIL LOCK                04730000
+         B     LOCKER                                                   04740000
+                                                                        04750000
+*---------------------------------------------------------------        04760000
+*   consolidate the plan in IPROJ owned storage                         04770000
+*---------------------------------------------------------------        04780000
+                                                                        04790000
+PLOAD    DS    0H                                                       04800000
+         @CALL IPLNLOAD,(@PLAN,@PINFO,PRJEXSTG,@PLNLRET),              X04810000
+               MF=(E,MFE_LIST)                                          04820000
+                                                                        04830000
+         B     *+4(R15)           ANALYZE COMPLETION STATUS             04840000
+         B     PLOADCPT              COMPLETE, RESULTS IN @PLNLRET      04850000
+         B     ERR_LOAD              RC04 - RESERVED                    04860000
+         B     ERR_LOAD              RC08 - RESERVED                    04870000
+         B     ERR_LOAD              RC12 - REQUEST IN ERROR            04880000
+         B     ERR_REQ               RC16 - STORAGE MANAGEMENT FAILURE  04890000
+                                                                        04900000
+PLOADCPT DS    0H                                                       04910000
+                                                                        04920000
+*---------------------------------------------------------------        04930000
+*   promote plan info into the RPN                                      04940000
+*---------------------------------------------------------------        04950000
+                                                                        04960000
+         USING PLNLOADR,@PLNLRET                                        04970000
+                                                                        04980000
+         L     R2,PRLDPLAN        RELOCATED PLAN SUMMARY                04990000
+PL       USING PLAN,R2                                                  05000000
+                                                                        05010000
+         L     R3,PRLDPINF        RELOCATED PLAN INFORMATION            05020000
+PI       USING PLANINFO,R3                                              05030000
+                                                                        05040000
+         ST    R9,PL.PLTOKEN         PLAN TOKEN IS RPN POINTER          05050000
+         MVC   RPNECOST,PI.PIRTCOST  COST OF PLAN GENERATION            05060000
+         MVC   RPNEPSIZ,PRLDSTGL     SIZE OF CONSOLIDATED PLAN          05070000
+                                                                        05080000
+         LA    R1,1               ONLY USER OF PLAN                     05090000
+         STM   R1,R2,RPNESYNC     POST USAGE AND PLAN PTR               05100000
+         ST    R3,RPNEPINF        PLAN INFORMATION BLOCK                05110000
+         DROP  PI,PL              CONSOLIDATED PLANINFO, PLAN           05120000
+                                                                        05130000
+         EJECT                                                          05140000
+****************************************************************        05150000
+*                                                                       05160000
+*   Return the RPN-attached PLAN and PLANINFO to user areas             05170000
+*                                                                       05180000
+****************************************************************        05190000
+                                                                        05200000
+PLAN_RET DS    0H                 PLAN RETURN REQUESTED                 05210000
+         L     R14,RPNEPLAN       PLAN SUMMARY                          05220000
+         L     R15,GPLNPLAN       USERS COPY                            05230000
+         MVC   0(PLANLN,R15),0(R14)                                     05240000
+                                                                        05250000
+         L     R14,RPNEPINF       PLAN INFORMATION                      05260000
+         L     R15,GPLNPINF       USERS COPY                            05270000
+         MVC   0(PINFOLN,R15),0(R14)                                    05280000
+                                                                        05290000
+TSL_RET  DS    0H                                                       05300000
+         L     R0,RPNETSLC        TSL ENTRY COUNT                       05310000
+         ICM   R15,15,GPLNRTSC    CALLERS RETURN AREA                   05320000
+         BZ    *+8                SKIP IF NOT PROVIDED                  05330000
+         ST    R0,0(,R15)                                               05340000
+                                                                        05350000
+         L     R1,RPNETSLA        TSL ARRAY ORIGIN                      05360000
+         ICM   R15,15,GPLNRTSL    CALLERS RETURN AREA                   05370000
+         BZ    *+8                SKIP IF NOT PROVIDED                  05380000
+         ST    R1,0(,R15)                                               05390000
+                                                                        05400000
+         LA    R15,RC00           NORMAL COMPLETE                       05410000
+         B     EXIT               DONE                                  05420000
+         DROP  R9                 PLNREFNT                              05430000
+                                                                        05440000
+         EJECT                                                          05450000
+****************************************************************        05460000
+*                                                                       05470000
+*   Normal and abnormal termination                                     05480000
+*                                                                       05490000
+****************************************************************        05500000
+                                                                        05510000
+ERR_REQ  DS    0H                 INVALID/INCOMPLETE REQUEST            05520000
+         LA    R15,RC04           PROGRAMMING ERROR                     05530000
+         SR    R0,R0              REASON CODE NOT DEFINED               05540000
+         B     EXIT                                                     05550000
+                                                                        05560000
+ERR_PGEN DS    0H                 PLAN GENERATION ERROR                 05570000
+         LR    R0,R15             PRESERVE PLNBLD() ERROR CODE          05580000
+         LA    R15,RC08           NOT COMPLETELY UNEXPECTED             05590000
+                                                                        05600000
+         L     R1,GPLNPLAN        USERS PLAN RETURN AREA                05610000
+         MVC   0(PLANLN,R1),@PLAN                                       05620000
+         L     R1,GPLNPINF        USERS PLAN INFORMATION RETURN AREA    05630000
+         MVC   0(PINFOLN,R1),@PINFO                                     05640000
+         B     EXIT                                                     05650000
+                                                                        05660000
+ERR_LOAD DS    0H                 PLAN LOAD ERROR                       05670000
+         LR    R0,R15             PRESERVE IPLNLOAD ERROR CODE          05680000
+         LA    R15,RC12           REFLECT ERROR                         05690000
+         B     EXIT                                                     05700000
+                                                                        05710000
+ERR_STG  DS    0H                 STORAGE NOT AVAILABLE                 05720000
+         LR    R0,R15             STORAGE SERVICE RETCODE AS RSNCODE    05730000
+         LA    R15,RC16           VDBLOAD COMPATIBLE FAILURE INDICATOR  05740000
+         B     EXIT                                                     05750000
+                                                                        05760000
+ERR_TSL  DS    0H                 TERM STATE LIST GENERATION ERROR      05770000
+         LA    R15,RC20           R0 CONTAINS PLNTSL() ERROR CODE       05780000
+         B     EXIT                                                     05790000
+                                                                        05800000
+*--------------------------------------------------------------         05810000
+*   Release residual storage, etc.                                      05820000
+*--------------------------------------------------------------         05830000
+                                                                        05840000
+EXIT     DS    0H                                                       05850000
+         STM   R15,R1,RETREGS                                           05860000
+                                                                        05870000
+         TM    FLAGS,F$RNALO+F$RNUSE                                    05880000
+         BNM   FREERPN            SKIP IF NO RESIDUAL RPN               05890000
+                                                                        05900000
+         $RETSTOR *@RNODE,QHDR=0                                        05910000
+                                                                        05920000
+FREERPN  DS    0H                                                       05930000
+                                                                        05940000
+         TM    FLAGS,F$PLNGEN     RELEASE SOURCE PLAN IF GENERATED      05950000
+         BNO   FREEPLAN                                                 05960000
+                                                                        05970000
+         $CLINK FUNC=PLNPURG,                                          X05980000
+               (STRUCT*,@PLAN),                                        X05990000
+               (LONG,GPLNQH)                                            06000000
+                                                                        06010000
+FREEPLAN DS    0H                                                       06020000
+                                                                        06030000
+*--------------------------------------------------------------         06040000
+*   Return completion status to caller                                  06050000
+*--------------------------------------------------------------         06060000
+                                                                        06070000
+         BAS   R14,RETLOCK        RELEASE IPROJ LOCK                    06080000
+                                                                        06090000
+         LM    R15,R1,RETREGS     RESTORE STATUS REGS                   06100000
+                                                                        06110000
+         #EXIT                                                          06120000
+                                                                        06130000
+         EJECT                                                          06140000
+***************************************************************         06150000
+*                                                                       06160000
+* ROUTINE:  LOCRPN - Search RPN tree by DML type & table name           06170000
+*                                                                       06180000
+* DESCRIPTION:                                                          06190000
+*                                                                       06200000
+*    This routine is used to search an RPN (ref PLNREFNT)               06210000
+*    subtree for the occurrence of the SQL DML statement type           06220000
+*    and VDB table name presented in the PLNGETP parameter              06230000
+*    list.                                                              06240000
+*                                                                       06250000
+*    The RPN tree is a binary tree.  The left subtree of the            06260000
+*    the current RPN contains entries for DML / tables whose            06270000
+*    concatentated identifier strings are "smaller" than the            06280000
+*    current.  The right subtree contains entries for those             06290000
+*    table names "bigger" than the current, etc.                        06300000
+*                                                                       06310000
+*                                                                       06320000
+* ON ENTRY:                                                             06330000
+*                                                                       06340000
+*    R1  contains the address of the root RPN entry (PLNREFNT)          06350000
+*    R0  contains the address of the candidate RPN key                  06360000
+*                                                                       06370000
+*                                                                       06380000
+* ON EXIT:                                                              06390000
+*                                                                       06400000
+*    R15 contains one of the following return codes                     06410000
+*        The condition code is set accordingly                          06420000
+*                                                                       06430000
+*        RC00 - RPN (PLNREFNT) located and returned via R1              06440000
+*                                                                       06450000
+*        RC04 - RPN entry not matched                                   06460000
+*                                                                       06470000
+*               R1 contains the address of the left or right            06480000
+*                  RPN subtree ptr to which a new RPN can be            06490000
+*                  attached                                             06500000
+*                                                                       06510000
+***************************************************************         06520000
+                                                                        06530000
+LOCRPN   DS    0H                                                       06540000
+         STM   R0,R14,REGSAVE     PRESERVE MAINLINE REGS                06550000
+                                                                        06560000
+         LR    R2,R1              SUBTREE ROOT ADDRESS                  06570000
+R        USING PLNREFNT,R1        CURRENT ENTRY                         06580000
+                                                                        06590000
+         LR    R4,R0              CANDIDATE RPN KEY                     06600000
+         LA    R15,RC00           PRESUME SUCCESS                       06610000
+                                                                        06620000
+*--------------------------------------------------------------         06630000
+*   Search the ordered btree for a matching RPN entry                   06640000
+*--------------------------------------------------------------         06650000
+                                                                        06660000
+LOCSRCH  DS    0H                                                       06670000
+         CLC   R.RPNKEY(RPNKEYL),0(R4)   MATCHING RPN FOUND?            06680000
+         BE    LOCXIT             RETURN IT IF SO                       06690000
+                                                                        06700000
+         LA    R2,R.RPNLEFT       ASSUME LEFT SUBTREE                   06710000
+         BH    *+8                IT CONTAINS THE SMALLER NAMES         06720000
+         LA    R2,R.RPNRIGHT      ELSE RIGHT SUBTREE FOR BIGGER NAMES   06730000
+                                                                        06740000
+         ICM   R1,15,0(R2)        ADVANCE DOWN THE APPROPRIATE SUBTREE  06750000
+         BNZ   LOCSRCH            AND CONTINUE THE SEARCH               06760000
+         LR    R1,R2              RETURN SUBTREE ANCHOR WORD            06770000
+         LA    R15,RC04           INDICATE NOMATCH                      06780000
+                                                                        06790000
+*--------------------------------------------------------------         06800000
+*   Return matching RPN (*RPN) or RPN subtree root addr (**RPN)         06810000
+*--------------------------------------------------------------         06820000
+                                                                        06830000
+LOCXIT   DS    0H                                                       06840000
+         LM    R2,R14,REGSAVE+8   RESTORE MAINLINE REGS                 06850000
+         LTR   R15,R15            REFLECT COMPLETION STATUS VIA CC      06860000
+         BR    R14                RETURN                                06870000
+         DROP  R                  PLNREFNT                              06880000
+                                                                        06890000
+         EJECT                                                          06900000
+***************************************************************         06910000
+*                                                                       06920000
+* ROUTINE:  ALLOCRPN - Allocate and format an RPN entry                 06930000
+*                                                                       06940000
+* DESCRIPTION:                                                          06950000
+*                                                                       06960000
+*    This routine is used to allocate and format a PLNREFNT             06970000
+*    entry (RPN).  Storage is acquired via $GETSTOR and is              06980000
+*    unowned.                                                           06990000
+*                                                                       07000000
+*                                                                       07010000
+* NOTES:                                                                07020000
+*                                                                       07030000
+*    The RPN contains a terminal state list (TSL) used to               07040000
+*    generate and possibly regenerate the associated plan.              07050000
+*    Generally, the TSL is acquired locally from PLNTSL().              07060000
+*    However, multi-application pre-planning (PLNAPP()) will            07070000
+*    cause a terminal state list to be built early, extended,           07080000
+*    and posted in AAPTSTN*.  In this case, that TSL is                 07090000
+*    simply copied.                                                     07100000
+*                                                                       07110000
+*                                                                       07120000
+* ON ENTRY:                                                             07130000
+*                                                                       07140000
+*    R0  contains the address of the candidate RPN key value            07150000
+*                                                                       07160000
+*    PLNGETP is addressable                                             07170000
+*                                                                       07180000
+*                                                                       07190000
+* ON EXIT:                                                              07200000
+*                                                                       07210000
+*    R15 contains one of the following return codes                     07220000
+*        The condition code is set accordingly                          07230000
+*                                                                       07240000
+*        RC00 - RPN entry returned via R1                               07250000
+*                                                                       07260000
+*        RC04 - terminal state list generation error                    07270000
+*                                                                       07280000
+*               R0 - PLNTSL() return code                               07290000
+*                                                                       07300000
+*        RC08 - storage management error                                07310000
+*                                                                       07320000
+*               R0 - $GETSTOR return code                               07330000
+*                                                                       07340000
+***************************************************************         07350000
+                                                                        07360000
+ALLOCRPN DS    0H                                                       07370000
+         STM   R0,R14,REGSAVE     PRESERVE CALLERS REGS                 07380000
+         LR    R6,R0              CANDIDATE RPN KEY                     07390000
+                                                                        07400000
+         SR    R4,R4              SIZE OF TSL RPN APPENDAGE             07410000
+         CLC   GPLNREQ,=A(GPLN_REP)   REPOSITION PLAN REQUEST?          07420000
+         BE    ALLOCSTG           TSL EXPLICITLY PROVIDED IF SO         07430000
+                                                                        07440000
+*--------------------------------------------------------------         07450000
+*   inherit a terminal state list (multiple application VDB)            07460000
+*--------------------------------------------------------------         07470000
+                                                                        07480000
+         L     R3,GPLNAAP         LOCATE THE AAP                        07490000
+         USING AAP,R3             APPLICATION ACTION BLOCK              07500000
+         ICM   R4,15,AAPTSTNS     TSL ENTRIES PREVIOUSLY POSTED?        07510000
+         BZ    ALLOCTSL           GENERATION REQUIRED IF NOT            07520000
+         ST    R4,TSLSIZE         RETAIN ITS SIZE                       07530000
+         SLL   R4,2               BYTE LENGTH OF TSL                    07540000
+         MVC   TSLORG,AAPTSTNL    TSL ORIGIN ADDRESS                    07550000
+         B     ALLOCSTG           BYPASS TSL GENERATION                 07560000
+         DROP  R3                 AAP                                   07570000
+                                                                        07580000
+*--------------------------------------------------------------         07590000
+*   generate a terminal state list (single application VDB)             07600000
+*--------------------------------------------------------------         07610000
+                                                                        07620000
+ALLOCTSL DS    0H                 GENERATE A TSL                        07630000
+         L     R2,GPLNNAVP        NAVPARM CONTAINING COL/VAR LINKAGES   07640000
+         L     R3,GPLNAAP         APPLICATION ACTION BLOCK              07650000
+                                                                        07660000
+         $CLINK FUNC=PLNTSL,      ACQUIRE A TERMINAL STATE LIST        X07670000
+               (STRUCT*,(R2)),    NAVPARM                              X07680000
+               (STRUCT*,(R3)),    APPL ACTION BLOCK                    X07690000
+               (STRUCT*,TSL)      TSL RETURN AREA                       07700000
+                                                                        07710000
+         LTR   R4,R15             TSL SUCCESSFULLY CONSTRUCTED?         07720000
+         BNP   AER_TSL            ERROR OTHERWISE                       07730000
+                                                                        07740000
+         LA    R0,TSL             ORIGIN OF TSL                         07750000
+         ST    R0,TSLORG          MAINTAIN POINTER TO TSL INDIRECTLY    07760000
+         ST    R4,TSLSIZE         RETAIN # OF TSL ENTRIES               07770000
+         SLL   R4,2               BYTE LENGTH OF TSL                    07780000
+                                                                        07790000
+*--------------------------------------------------------------         07800000
+*   acquire storage for RPN and appendages                              07810000
+*--------------------------------------------------------------         07820000
+                                                                        07830000
+ALLOCSTG DS    0H                 R4 CONTAINS TSL LENGTH OR ZERO        07840000
+         LA    R5,RPNBREFL(,R4)   SIZE OF RPN PLUS APPENDAGES           07850000
+                                                                        07860000
+         $GETSTOR (R5),QHDR=0,COND=YES                                  07870000
+                                                                        07880000
+         BNZ   AER_STG            STORAGE NOT AVAILABLE, ETC.           07890000
+                                                                        07900000
+*--------------------------------------------------------------         07910000
+*   RPN basic initialization                                            07920000
+*--------------------------------------------------------------         07930000
+                                                                        07940000
+R        USING PLNREFNT,R1                                              07950000
+         STH   R5,R.RPNLENG       LENGTH OF RPN                         07960000
+         MVC   R.RPNEYE,=C'RPN '  EYECATCHER                            07970000
+         MVC   R.RPNKEY(RPNKEYL),0(R6)                                  07980000
+                                                                        07990000
+         LTR   R4,R4              IDENTIFY REQUEST TYPE                 08000000
+         BNZ   ALLOTSL            TSL APPENDAGE REQUIRED                08010000
+                                                                        08020000
+         MVC   R.RPNTYPE,=CL4'TSL'      REPOSITION PLAN ENTRY           08030000
+         LA    R0,R.RPNKEY        TSL IMBEDDED IN RPN KEY               08040000
+         ST    R0,R.RPNETSLA                                            08050000
+         LA    R0,2               TSL ENTRY COUNT                       08060000
+         ST    R0,R.RPNETSLC                                            08070000
+         B     ALTSLFIN           TSL COMPLETE                          08080000
+                                                                        08090000
+ALLOTSL  DS    0H                 TERMINAL STATE LIST GENERATED         08100000
+         MVC   R.RPNTYPE,=CL4'VDB'      VDB TABLE TSL / PLAN ENTRY      08110000
+         MVC   R.RPNETSLC,TSLSIZE       TSL ENTRY COUNT                 08120000
+         LA    R2,R.PLNREFNT+RPNBREFL   VARIABLE LENGTH RPN SUFFIX      08130000
+         ST    R2,R.RPNETSLA      TSL ORIGIN                            08140000
+         LR    R3,R4              TSL LENGTH                            08150000
+         L     R14,TSLORG         TSL SOURCE                            08160000
+         LR    R15,R3             SOURCE LENGTH = TARGET LENGTH         08170000
+         MVCL  R2,R14             APPEND TSL TO END OF RPN              08180000
+                                                                        08190000
+ALTSLFIN DS    0H                                                       08200000
+         DROP  R                  PLNREFNT                              08210000
+                                                                        08220000
+*--------------------------------------------------------------         08230000
+*   Return initial RPN to caller                                        08240000
+*--------------------------------------------------------------         08250000
+                                                                        08260000
+         SR    R15,R15            INDICATE SUCCESS                      08270000
+         B     ALLOCXIT           R1 RETURNS INITIALIZED RPN            08280000
+                                                                        08290000
+AER_TSL  DS    0H                 TSL GENERATION FAILED                 08300000
+         LR    R0,R15             SERVICE RETCODE AS RSNCODE            08310000
+         LA    R15,RC04           FAIL                                  08320000
+         B     ALLOCXIT                                                 08330000
+                                                                        08340000
+AER_STG  DS    0H                 STORAGE MANAGEMENT ERROR              08350000
+         LA    R0,R15             STORAGE SERVICE RETCODE AS RSNCODE    08360000
+         LA    R15,RC08           FAIL                                  08370000
+                                                                        08380000
+ALLOCXIT DS    0H                                                       08390000
+         LM    R2,R14,REGSAVE+8   RESTORE CALLERS REGS                  08400000
+         LTR   R15,R15            REFLECT COMPLETION STATUS VIA CC      08410000
+         BR    R14                RETURN                                08420000
+                                                                        08430000
+         EJECT                                                          08440000
+****************************************************************        08450000
+*                                                                       08460000
+* ROUTINE:  GETLOCK - Acquire IPROJ lock                                08470000
+*                                                                       08480000
+****************************************************************        08490000
+                                                                        08500000
+GETLOCK  DS    0H                                                       08510000
+         STM   R0,R14,REGSAVE     PRESERVE MAINLINE REGS                08520000
+                                                                        08530000
+         TM    FLAGS,F$LOCKAQ+F$LOCKH                                   08540000
+         BNZ   GETLKX             LOCK PREV VERIFIED OR ACQUIRED        08550000
+                                                                        08560000
+         OI    FLAGS,F$LOCKAQ     ACQUISITION ATTEMPTED                 08570000
+                                                                        08580000
+         $SER  OBTAIN,LOCKPTR=PRJMILK                                   08590000
+                                                                        08600000
+         CH    R15,=AL2(RC04)     LOCK ACQUIRED?                        08610000
+         BE    GETLKX             ONWARD IF NOT                         08620000
+         BH    ABN_LOCK           SERIOUS PROBLEM                       08630000
+                                                                        08640000
+         OI    FLAGS,F$LOCKH      LOCK IS HELD                          08650000
+                                                                        08660000
+GETLKX   DS    0H                                                       08670000
+         LM    R0,R14,REGSAVE     RESTORE MAINLINE REGS                 08680000
+         BR    R14                RETURN                                08690000
+                                                                        08700000
+         EJECT                                                          08710000
+****************************************************************        08720000
+*                                                                       08730000
+* ROUTINE:  RETLOCK - Release IPROJ lock                                08740000
+*                                                                       08750000
+****************************************************************        08760000
+                                                                        08770000
+RETLOCK  DS    0H                                                       08780000
+         STM   R0,R14,REGSAVE     PRESERVE MAINLINE REGS                08790000
+                                                                        08800000
+         TM    FLAGS,F$LOCKH      LOCK ACQUIRED LOCALLY?                08810000
+         BNO   RETLKX             DONE IF NOT                           08820000
+                                                                        08830000
+         NI    FLAGS,FF-F$LOCKAQ-F$LOCKH                                08840000
+                                                                        08850000
+         $SER  RELEASE,LOCKPTR=PRJMILK                                  08860000
+                                                                        08870000
+RETLKX   DS    0H                                                       08880000
+         LM    R0,R14,REGSAVE     RESTORE MAINLINE REGS                 08890000
+         BR    R14                RETURN                                08900000
+                                                                        08910000
+         EJECT                                                          08920000
+***************************************************************         08930000
+*                                                                       08940000
+*   catastrophic failures                                               08950000
+*                                                                       08960000
+***************************************************************         08970000
+                                                                        08980000
+ABN_LOCK $ABEND ABE_PROJLOCK,                                          X08990000
+               TITLE='PROJECT MIL LOCK ACQUIRE/RELEASE ERROR'           09000000
+                                                                        09010000
+         EJECT                                                          09020000
+***************************************************************         09030000
+*                                                                       09040000
+*   Local read only storage                                             09050000
+*                                                                       09060000
+***************************************************************         09070000
+                                                                        09080000
+         LTORG ,                                                        09090000
+                                                                        09100000
+         EJECT                                                          09110000
+         PRINT NOGEN                                                    09120000
+         ICVT  ,                                                        09130000
+         ITASK ,                                                        09140000
+         IPCB  ,                                                        09150000
+         IUSER ,                                                        09160000
+         END   ,                                                        09170000

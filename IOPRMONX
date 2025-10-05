@@ -1,0 +1,1078 @@
+IOPRMONX TITLE ' - Operator Message Monitor RU Processor'               00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE: IOPRMONX - Operator Message Monitor RU Processor             00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*   This routine supports the cooperative process for operator          00080000
+*   monitor requests.  The long running process which this              00090000
+*   routine is running under is created on the first operator           00100000
+*   monitor request from a monitor window in the Helpdesk utility.      00110000
+*   During normal execution,  when the monitor window is closed,        00120000
+*   a request is sent to the associated long running process            00130000
+*   to terminate the conversation.                                      00140000
+*                                                                       00150000
+* METHOD:                                                               00160000
+*                                                                       00170000
+*   Monitor requests received from the cooperative processes            00180000
+*   are converted into the appropiate $MSGMON request.  $MSG            00190000
+*   services determine if a workunit is being WATCHED when              00200000
+*   a message is issued and TSENDs a message containing the             00210000
+*   message buffer.                                                     00220000
+*                                                                       00230000
+*   Message buffers received by the monitor workunit are                00240000
+*   reformatted and added to the OPRRESP message queue.  When           00250000
+*   the XPBUFR is exhausted the message buffer is transmitted           00260000
+*   to the associated cooperative process.                              00270000
+*                                                                       00280000
+*   A refresh interval (in seconds) is provided in the Monitor          00290000
+*   request packet.  This refresh rate is used to initialize a          00300000
+*   $TIMER.  When a Timer expiration event message occurs, if           00310000
+*   messages are pending transmission,  the buffer is sent.             00320000
+*                                                                       00330000
+*                                                                       00340000
+* ON ENTRY:  On entry R1 contains the address of the IXRUTAB            00350000
+*            entry mapped by the $RU macro.                             00360000
+*                                                                       00370000
+*            Standard environment is assumed.                           00380000
+*                                                                       00390000
+*            Requests are received via $TRECV facility.                 00400000
+*                                                                       00410000
+* ON EXIT:   On exit R15 will contain one of the following              00420000
+*            return codes:                                              00430000
+*                                                                       00440000
+*               RC00 - Normal completion of conversational RU           00450000
+*                                                                       00460000
+*               RC08 - Operator Message monitor request failure         00470000
+*                                                                       00480000
+*                      RSN04 - Not authorized for Msg Monitor           00490000
+*                                                                       00500000
+*               RC12 - Service Failure                                  00510000
+*                                                                       00520000
+*                      RSN04 - Message monitor request failure          00530000
+*                      RSN08 - Operator response failure                00540000
+*                                                                       00550000
+*               RC16 - Request Failure                                  00560000
+*                      RSN04 - Invalid RU type                          00570000
+*                                                                       00580000
+*                      R1 contains the return code from the             00590000
+*                      failing service.                                 00600000
+*                                                                       00610000
+**<DOC-OFF>****************************************************         00620000
+                                                                        00630000
+***************************************************************         00640000
+*                                                                       00650000
+* MAINTENANCE:                                                          00660000
+*                                                                       00670000
+*    03/14/95  Ron Colmone                                              00680000
+*              Initial Version                                          00690000
+*                                                                       00700000
+***************************************************************         00710000
+         EJECT ,                                                        00720000
+         EQUS  ,                  STANDARD REGISTER EQUATES             00730000
+                                                                        00740000
+         EJECT ,                                                        00750000
+         TMSG  ,                  INTER-TASK SERVICES                   00760000
+                                                                        00770000
+         EJECT ,                                                        00780000
+         $TASK    DSECT=YES       TASK SERVICES                         00790000
+                                                                        00800000
+         EJECT ,                                                        00810000
+         $TIMER   DSECT=YES       TIMER SERVICES                        00820000
+                                                                        00830000
+         EJECT ,                                                        00840000
+         $MSGMON  DSECT=YES       MESSAGE MONITOR SERVICE               00850000
+                                                                        00860000
+         EJECT ,                                                        00870000
+         $OPRRESP DSECT=YES       OPERATOR RESPONSE SERVICES            00880000
+                                                                        00890000
+         EJECT ,                                                        00900000
+         REQHDR ,                 RU REQUEST HEADER                     00910000
+         XOPRMON  DSECT=YES       OPERATOR MONITOR REQUEST BLOCK        00920000
+                                                                        00930000
+         EJECT ,                                                        00940000
+         YOPRRESP DSECT=YES       OPERATOR RESPONCE BLOCK               00950000
+                                                                        00960000
+         EJECT ,                                                        00970000
+         @XECONV  TYPE=DSECT      CONVERSATIONAL RU HEADER              00980000
+                                                                        00990000
+         EJECT ,                                                        01000000
+         EVCODES  ,               EVENT CODES                           01010000
+*                                                                       01020000
+         MSGCODES ,               TSEND MESSAGE CODES                   01030000
+                                                                        01040000
+         $MSGDFT PREFIX=ICTPID,COMPID='OPR',TABLE=*#MSGS,              +01050000
+               CONID=*ICTCONID,CONNAME=ICTCONNM,                       +01060000
+               MSGQA=LCLMSGQ,STGQH=PCBSTG,DEST=$IMSGQ+$BUFFER,         +01070000
+               PRINT=GEN,MF=(E,$MSG_MFL)                                01080000
+                                                                        01090000
+         EJECT ,                                                        01100000
+*--------------------------------------------------------------         01110000
+* Read/Write workarea                                                   01120000
+*--------------------------------------------------------------         01130000
+WORKAREA #WORK ,                                                        01140000
+REGSAVE  DS    16F                REGISTER SAVEAREA                     01150000
+                                                                        01160000
+TIMEVENT DS    D                  TIMER EVENT IDENTIFIER                01170000
+TIMINTVL DS    F                  REFRESH INTERVAL TIMER VALUE          01180000
+                                                                        01190000
+RETINFO  DS    0F                 RETURN INFORMATION                    01200000
+RETCODE  DS    F                  RETURN CODE                           01210000
+RSNCODE  DS    F                  REASON CODE                           01220000
+INFCODE  DS    F                  INFO   CODE                           01230000
+                                                                        01240000
+SRVINFO  DS    0F                 RETURN INFORMATION                    01250000
+SRVRETC  DS    F                  RETURN CODE                           01260000
+SRVRSNC  DS    F                  REASON CODE                           01270000
+SRVINFC  DS    F                  INFO   CODE                           01280000
+                                                                        01290000
+CLASMASK DS    XL(C'Z'-C'A'+1)    CLASS MASK CONSTRUCTION ARRAY         01300000
+RSRCAUTH DS    X                  RESOURCE AUTHORIZATION MASK           01310000
+                                                                        01320000
+FLAGS    DS    X                  PROCESSING FLAGS                      01330000
+$RSPINIT EQU   X'80'                OPRRESP INITIALIZED                 01340000
+$RSPXMIT EQU   X'40'                OPRRESP HAS BEEN SENT               01350000
+$TIMER   EQU   X'20'                TIMER ACTIVE                        01360000
+$TIMEEXP EQU   X'10'                TIMER HAS EXPIRED                   01370000
+$MONACTV EQU   X'08'                MONITOR ALREADY ACTIVE?             01380000
+$XMREADY EQU   X'04'                READY TO TRANSMIT BUFFER?           01390000
+         DS    XL1                RESERVED                              01400000
+                                                                        01410000
+FMTOPTS  DS    X                  MESSAGE FORMATING OPTIONS             01420000
+FMTMSGID DS    F                  MESSAGE FORMATING MSGID               01430000
+FMTTSKNM DS    CL8                TASKNAME FOR MESSAGE FORMATTING       01440000
+                                                                        01450000
+$RU@     DS    A                  ADDRESS OF $RU ENTRY                  01460000
+$XH@     DS    A                  ADDRESS OF TRANSACTION HEADER         01470000
+TMSG@    DS    A                  ADDRESS OF MESSAGE AREA               01480000
+TMSGLEN  DS    F                  LENGTH  OF MESSAGE AREA               01490000
+LCLMSGQ  DS    A                  LOCAL MESSAGE QUEUE                   01500000
+RPLYEPB@ DS    A                  ADDRESS OF REQUEST EPB TO POST        01510000
+                                                                        01520000
+TSKSCOPE DS    A                  ADDRESS OF TASK SCOPE OR ZERO         01530000
+TASKNAME DS    CL8                TASK NAME SCOPE                       01540000
+TASKSAVE DS    CL8                SAVE ORIGINAL TASK NAME               01550000
+                                                                        01560000
+         OPRCOMM  DSECT=NO        OPRRESP COMMUNICATION AREA            01570000
+                                                                        01580000
+LCLCONV  @XECONV  TYPE=D,PREFIX=LCL CONVERSATIONAL TRANSACTION HDR      01590000
+                                                                        01600000
+$TSK_MFL $TASK    MF=(L,*)        $TASK    PLIST CONSTRUCTION AREA      01610000
+$RCV_MFL $TRECV   MF=(L,*)        $TRECV   PLIST CONSTRUCTION AREA      01620000
+$OPR_MFL $OPRRESP MF=(L,*)        $OPRRESP PLIST CONSTRUCTION AREA      01630000
+$MON_MFL $MSGMON  MF=(L,*)        $MSGMON  PLIST CONSTRUCTION AREA      01640000
+$TMR_MFL $TIMER   MF=(L,*)        $TIMER   PLIST CONSTRUCTION AREA      01650000
+$MSG_MFL $MSG     MF=(L,*),FIELDS=(,,,,)   PLIST CONSTRUCTION AREA      01660000
+                                                                        01670000
+         #ENDWORK                                                       01680000
+                                                                        01690000
+         EJECT ,                                                        01700000
+***************************************************************         01710000
+*                                                                       01720000
+*  Operator Message Monitor Cooperative Process                         01730000
+*                                                                       01740000
+***************************************************************         01750000
+IOPRMONX #ENTER PREG=R8                                                 01760000
+                                                                        01770000
+         USING ITASK,R10          ITASK ADDRESSABILITY                  01780000
+         USING IPCB,R9            IPCB  ADDRESSABILITY                  01790000
+         L     R9,TSKPCBC         STANDARD ENVIRONMENT                  01800000
+         ST    R8,$RU@            ADDRESS OF $RU ENTRY                  01810000
+                                                                        01820000
+         L     R1,PCBUSER         ADDRESS OF IUSER                      01830000
+         USING IUSER,R1           TEMP ADDRESSABILITY                   01840000
+         MVC   RSRCAUTH,USRVALHI  COPY RESOURCE VALIDATION HIST         01850000
+         DROP  R1                 IUSER                                 01860000
+                                                                        01870000
+         B     MSG_PROC           INITIALIZE MESSAGE EPB                01880000
+                                                                        01890000
+         EJECT ,                                                        01900000
+*--------------------------------------------------------------         01910000
+*  Wait for event completion                                            01920000
+*--------------------------------------------------------------         01930000
+CMD_WAIT DS    0H                                                       01940000
+         $TASK WAIT,              WAIT FOR EVENT COMPLETION            +01950000
+               MESSAGE=MSG_PROC,                                       +01960000
+               EVENT=EVN_PROC,                                         +01970000
+               STOP=RETURN,                                            +01980000
+               CANCEL=RETURN,                                          +01990000
+               MF=(E,$TSK_MFL)                                          02000000
+                                                                        02010000
+         EJECT ,                                                        02020000
+*--------------------------------------------------------------         02030000
+*  Process event notification                                           02040000
+*--------------------------------------------------------------         02050000
+EVN_PROC DS    0H                                                       02060000
+         C     R15,=A(EC$HXP_NFY) SEND NOTIFICATION EVENT               02070000
+         BE    EVN_SNFY           YES, PROCESS EVENT                    02080000
+         B     CMD_WAIT           WAIT FOR NEXT EVENT                   02090000
+                                                                        02100000
+*--------------------------------------------------------------         02110000
+*  Xport send notification event                                        02120000
+*--------------------------------------------------------------         02130000
+EVN_SNFY DS    0H                                                       02140000
+         L     R1,OPCMSND#        CURRENT SEND IN PROG COUNT            02150000
+         BCTR  R1,0               DECREMENT COUNT                       02160000
+         ST    R1,OPCMSND#        SAVE UPDATED COUNT                    02170000
+         B     PEND_RSP           CHECK FOR PENDING RESPONSE            02180000
+                                                                        02190000
+         EJECT ,                                                        02200000
+*--------------------------------------------------------------         02210000
+*  Initialize message EPB                                               02220000
+*--------------------------------------------------------------         02230000
+MSG_PROC DS    0H                                                       02240000
+         $TASK SETEPB,            INITIALIZE MESSAGE EPB               +02250000
+               EPB=PCBMEPB,                                            +02260000
+               ECODE=EC$MSG,                                           +02270000
+               SCOPE=LOCAL,                                            +02280000
+               MF=(E,$TSK_MFL)                                          02290000
+                                                                        02300000
+*--------------------------------------------------------------         02310000
+*  Retrieve message                                                     02320000
+*--------------------------------------------------------------         02330000
+MSG_NEXT DS    0H                                                       02340000
+         BAS   R14,GETMSG         RETRIEVE NEXT MESSAGE                 02350000
+         BZ    MSG_AVAL           CONTINUE WITH MESSAGE PROC            02360000
+                                                                        02370000
+         TM    FLAGS,$XMREADY     BUFFER READY TO SEND TO COOP          02380000
+         BO    FMT_XMIT           YES, CONTINUE WITH SEND               02390000
+         B     CMD_WAIT           MESSAGE NOT AVAILABLE                 02400000
+                                                                        02410000
+MSG_AVAL DS    0H                                                       02420000
+         LR    R5,R1              ADDRESS OF TMSG BUFFER                02430000
+         USING TMSGSTD,R5         ADDRESSABILITY                        02440000
+                                                                        02450000
+         L     R1,TMSGTYPE        MESSAGE TYPE                          02460000
+                                                                        02470000
+         CH    R1,=AL2(ITM_XRU_CONV)      MONITOR RU RECEIVED           02480000
+         BE    MON_REQ            PROCESS MONITOR REQUEST               02490000
+                                                                        02500000
+         CH    R1,=AL2(ITM_LOG_DATA)      MONITORED MSGS RECV           02510000
+         BE    MSG_DATA           PROCESS MSGS                          02520000
+                                                                        02530000
+         CH    R1,=AL2(ITM_$TIMER_EXP)    TIMER EXPIRATION RECEIVED     02540000
+         BE    TIMR_EXP           PROCESS TIMER REQUEST                 02550000
+                                                                        02560000
+         $TMSGDFT (R5)            DEFAULT MESSAGE PROCESSING            02570000
+         B     MSG_NEXT           UNSUPPORTED MESSAGE, RECEIVE NEXT     02580000
+                                                                        02590000
+         EJECT ,                                                        02600000
+***************************************************************         02610000
+*                                                                       02620000
+*  Timer event message received                                         02630000
+*                                                                       02640000
+***************************************************************         02650000
+TIMR_EXP DS    0H                                                       02660000
+         NI    FLAGS,FF-$TIMER    RESET TIMER ACTIVE FLAG               02670000
+         OI    FLAGS,$TIMEEXP     INDICATE TIMER EXPIRED                02680000
+                                                                        02690000
+         LA    R0,RC00            TIMER MESSAGE PROCESSED               02700000
+         LA    R1,TMSGSTD         ADDRESS OF MESSAGE                    02710000
+         BAS   R14,MSGNTFY        NOTIFY MESSAGE REQUESTER              02720000
+                                                                        02730000
+*--------------------------------------------------------------         02740000
+*  Restablish timer                                                     02750000
+*--------------------------------------------------------------         02760000
+         ICM   R1,15,TIMINTVL     TIMER INTERVAL AVAILABLE              02770000
+         BZ    PEND_RSP           NO, CHECK FOR PENDING RESP            02780000
+         MH    R1,=AL2(1000)      CONVERT TO MILLISECONDS               02790000
+         BAS   R14,TIMERSET       REESTABLISH REFRESH INTERVAL          02800000
+         OI    FLAGS,$TIMER       SET TIMER ACTIVE FLAG                 02810000
+         B     PEND_RSP           CHECK FOR PENDING RESPONSE            02820000
+                                                                        02830000
+         EJECT ,                                                        02840000
+***************************************************************         02850000
+*                                                                       02860000
+*  Operator monitor request received from cooperative process           02870000
+*                                                                       02880000
+***************************************************************         02890000
+MON_REQ  DS    0H                                                       02900000
+         L     R8,TMSGW1          ADDRESS OF INBOUND RU                 02910000
+         USING XOPRMON,R8         ADDRESSABILITY                        02920000
+                                                                        02930000
+         CLC   XOMFUNC,=A(OPER)   OPERATOR RU?                          02940000
+         BNE   ERR_REQ            INVALID RU TYPE                       02950000
+         CLC   XOMSFNC,=A(OP$MON) MONITOR  RU SUNFUNCTION?              02960000
+         BNE   ERR_REQ            INVALID RU TYPE                       02970000
+                                                                        02980000
+         ST    R8,$XH@            ADDRESS OF REQUEST TRANSACT HDR       02990000
+         L     R1,TMSGW3          ADDRESS OF INBOUND CONV HDR           03000000
+         MVC   LCLCONV(LCLXELN),0(R1)  COPY CONVSATIONAL RU HEADER      03010000
+         MVC   RPLYEPB@,TMSGEPB   COPY REPLY EPB ADDRESS                03020000
+                                                                        03030000
+*--------------------------------------------------------------         03040000
+*  Initialize operator response common area                             03050000
+*--------------------------------------------------------------         03060000
+         TM    FLAGS,$RSPINIT     OPRRESP INITIALIZED?                  03070000
+         BO    MON_VERF           YES, CONTINUE WITH VERIFY             03080000
+         OI    FLAGS,$RSPINIT     OPRRESP INITIALIZED                   03090000
+                                                                        03100000
+         $OPRRESP INIT,           INITIALIZE OPER RESPONSE COMMAREA    +03110000
+               OPCOMM=OPRCOMM,                                         +03120000
+               QH=PCBSTG,                                              +03130000
+               XH=*$XH@,                                               +03140000
+               RUENTRY=*$RU@,                                          +03150000
+               MF=(E,$OPR_MFL)                                          03160000
+                                                                        03170000
+         EJECT ,                                                        03180000
+*--------------------------------------------------------------         03190000
+*  Verify monitor authorization and issue requested command             03200000
+*--------------------------------------------------------------         03210000
+MON_VERF DS    0H                                                       03220000
+         TM    XOMSTAT,XOMSFIN    CONVERSATION ENDED?                   03230000
+         BNZ   CONV_END           PARTNER TERMINATED CONV               03240000
+                                                                        03250000
+         TM    RSRCAUTH,USRVHOPR  AUTHORIZED FOR OPER FACILITY          03260000
+         BZ    ERR_AUTH           AUTHoRIZATION REQUIRED                03270000
+                                                                        03280000
+*--------------------------------------------------------------         03290000
+*  Reset refresh interval if changed from last request                  03300000
+*--------------------------------------------------------------         03310000
+         SR    R1,R1              PREPARE FOR INSERT                    03320000
+         IC    R1,XOMFMT          RETRIEVE FORMATTING OPTIONS           03330000
+         STC   R1,FMTOPTS         RETAIN FORMATTING OPTIONS             03340000
+                                                                        03350000
+         BAS   R14,GETFMTID       GET FORMATTING MESSAGE SKEL           03360000
+         ST    R15,FMTMSGID       RETAIN FORMATTING MESSAGE ID          03370000
+                                                                        03380000
+         CLC   TIMINTVL,XOMREFR   REFRESH INTERVAL CHANGED?             03390000
+         BE    MON_TIMX           NO, CONTINUE                          03400000
+         MVC   TIMINTVL,XOMREFR   COPY REFRESH INTERVAL (SECONDS)       03410000
+                                                                        03420000
+         TM    FLAGS,$TIMER       IS TIMER ALREADY ACTIVE?              03430000
+         BZ    MON_TIME           NO, SET TIMER                         03440000
+         BAS   R14,TIMERCNL       CANCEL TIMER                          03450000
+         NI    FLAGS,FF-$TIMER    RESET TIMER ACTIVE FLAG               03460000
+                                                                        03470000
+MON_TIME DS    0H                                                       03480000
+         ICM   R1,15,TIMINTVL     TIMER INTERVAL AVAILABLE              03490000
+         BZ    MON_TIMX           NO, CONTINUE                          03500000
+         MH    R1,=AL2(1000)      CONVERT TO MILLISECONDS               03510000
+         BAS   R14,TIMERSET       REESTABLISH REFRESH INTERVAL          03520000
+         OI    FLAGS,$TIMER       SET TIMER ACTIVE FLAG                 03530000
+                                                                        03540000
+MON_TIMX DS    0H                                                       03550000
+                                                                        03560000
+*--------------------------------------------------------------         03570000
+*  Initialize monitor request scope.  If the user does not have         03580000
+*  SYSOPER authority or the request is scoped to the current            03590000
+*  task, then set the scope task name to the current ITASK.             03600000
+*  If the request is for another task,  set the scope to the            03610000
+*  target task.  Otherwise, set the scope task address to zero          03620000
+*  global (all tasks) monitoring.                                       03630000
+*--------------------------------------------------------------         03640000
+         LA    R1,TASKNAME        ADDRESS OF SCOPED TASK NAME           03650000
+         MVC   TASKSAVE,TASKNAME  SAVE PREVIOUS MONITORED TASKNAME      03660000
+         MVC   TASKNAME,TSKNAME   ASSUME SCOPED USER                    03670000
+                                                                        03680000
+         TM    RSRCAUTH,USRVHOPS  SYSTEM OPERATOR?                      03690000
+         BZ    SCOP_SET           NO,  CONTINUE                         03700000
+         TM    XOMSCOPE,FF        SCOPED REQUEST?                       03710000
+         BNZ   SCOP_SET           YES, SET LOCAL TASK SCOPE             03720000
+                                                                        03730000
+         MVC   TASKNAME,XOMTASK   LOCAL COPY OF TASK NAME               03740000
+         TM    TASKNAME,BF        TASK NAME SUPPLIED?                   03750000
+         BNZ   SCOP_SET           YES, SET TASK SCOPE NAME              03760000
+         SR    R1,R1              FULL SCOPE REQUEST                    03770000
+         XC    TASKNAME,TASKNAME  CLEAR SCOPED TASKNAME                 03780000
+                                                                        03790000
+SCOP_SET DS    0H                                                       03800000
+         ST    R1,TSKSCOPE        SET TASK SCOPE OPTION                 03810000
+                                                                        03820000
+*--------------------------------------------------------------         03830000
+*  If a monitor was previous specified for another scope,               03840000
+*  issue a MSGMON delete request to remove the previous monitor.        03850000
+*--------------------------------------------------------------         03860000
+         TM    FLAGS,$MONACTV     MONITOR ALREADY ACTIVE?               03870000
+         BZ    CLASCNST           NO, CONSTRUCT CLASS MASK              03880000
+         CLC   TASKNAME,TASKSAVE  IS REQUEST FOR SAME TASK?             03890000
+         BE    CLASCNST           YES, CONTINUE WITH CLASS MASK         03900000
+                                                                        03910000
+         LA    R2,TASKSAVE        RETRIEVE PREVIOUS TASK NAME           03920000
+         TM    TASKSAVE,BF        WAS PREV REQUEST FOR ALL TASKS?       03930000
+         BNZ   *+6                NO, CONTINUE                          03940000
+         SR    R2,R2              YES,  CLEAR TASK NAME ADDRESS         03950000
+                                                                        03960000
+         IC    R3,RSRCAUTH        RETRIEVE RESOURCE AUTH FLAG           03970000
+         N     R3,=A(USRVHOPS)    R3 IS TRUE IF AUTHORIZED              03980000
+                                                                        03990000
+         $MSGMON DEL,             DEL PREV MONITOR IF SCOPE CHANGED    +04000000
+               SCOPE=(R2),                                             +04010000
+               AUTH=(R3),                                              +04020000
+               CLASS=0,DEST=0,                                         +04030000
+               MF=(E,$MON_MFL)                                          04040000
+                                                                        04050000
+         LTR   R3,R15             MONITOR REQUEST SUCCESSFUL?           04060000
+         BNZ   MON_DONE           NO,  INDICATE REQUEST FAILURE         04070000
+                                                                        04080000
+*--------------------------------------------------------------         04090000
+*  Construct class mask.  The monitor RU request contains a             04100000
+*  26-byte of Msg class code array.  Process this array and set         04110000
+*  the associated byte in the CLASS code array (EBCDIC 'A'-'Z'          04120000
+*  range) to true (class code value) for characters falling to          04130000
+*  the A-Z range.                                                       04140000
+*--------------------------------------------------------------         04150000
+CLASCNST DS    0H                                                       04160000
+         XC    CLASMASK,CLASMASK  RESET MESSAGE CLASS MASK              04170000
+         LA    R2,XOMCLASS        ADDRESS OF MESSAGE CLASS ARRAY        04180000
+         LA    R3,L'XOMCLASS      LENGTH  OF MESSAGE CLASS ARRAY        04190000
+         SR    R1,R1              PREPARE FOR INSERT                    04200000
+                                                                        04210000
+CLASCONV DS    0H                                                       04220000
+         IC    R1,0(R2)           GET MESSAGE CLASS                     04230000
+         CH    R1,=AL2(C'A')      CLASS IN RANGE                        04240000
+         BL    CLASNEXT           NO, PROCESS NEXT CLASS                04250000
+         CH    R1,=AL2(C'Z')      CLASS IN RANGE                        04260000
+         BH    CLASNEXT           NO, PROCESS NEXT CLASS                04270000
+                                                                        04280000
+         STC   R1,CLASMASK-C'A'(R1) SET MESSAGE CODE IN ARRAY           04290000
+                                                                        04300000
+CLASNEXT DS    0H                                                       04310000
+         LA    R2,1(,R2)          ADDRESS OF NEXT MESSAGE CODE          04320000
+         BCT   R3,CLASCONV        PROCESS NEXT MSG CLASS CODE           04330000
+                                                                        04340000
+*--------------------------------------------------------------         04350000
+*  Retreive User authorization mask and set TRUE if authorized          04360000
+*  for global requests.                                                 04370000
+*--------------------------------------------------------------         04380000
+         IC    R3,RSRCAUTH        RETRIEVE RESOURCE AUTH FLAG           04390000
+         N     R3,=A(USRVHOPS)    R3 IS TRUE IF AUTHORIZED              04400000
+                                                                        04410000
+         EJECT ,                                                        04420000
+*--------------------------------------------------------------         04430000
+*  Retrieve requested function code and call appropriate                04440000
+*  support routine.                                                     04450000
+*--------------------------------------------------------------         04460000
+         SR    R2,R2              PREPARE FOR INSERT                    04470000
+         IC    R2,XOMREQ          RETRIVE MONITOR REQUEST TYPE          04480000
+         BCTR  R2,0               CONVERT TO INDEX                      04490000
+         SLL   R2,2               CONVERT TO BRANCH OFFSET              04500000
+                                                                        04510000
+         B     *+4(R2)            BRANCH ON REQUEST CODE                04520000
+         B     MON_ADD            ADD MESSAGE MONITOR                   04530000
+         B     MON_REP            UPD MESSAGE MONITOR                   04540000
+         B     MON_DEL            DEL MESSAGE MONITOR                   04550000
+         EX    R0,*               UNDEFINED                             04560000
+         EX    R0,*               UNDEFINED                             04570000
+                                                                        04580000
+*--------------------------------------------------------------         04590000
+*  Message monitor ADD requested                                        04600000
+*--------------------------------------------------------------         04610000
+MON_ADD  DS    0H                                                       04620000
+         OC    CLASMASK,CLASMASK  ANY MSG CLASSES  SPECIFIED            04630000
+         BNZ   MON_ADDX           YES, CONTINUE WITH ADD REQ            04640000
+         OC    XOMDEST,XOMDEST    ANY DESTINATIONS SPECIFIED?           04650000
+         BNZ   MON_ADDX           YES, CONTINUE WITH ADD REQ            04660000
+                                                                        04670000
+         SR    R3,R3              ASSUME NORMAL COMPLETION              04680000
+         TM    FLAGS,$MONACTV     MONITOR REQUEST ALREADY ACTIVE?       04690000
+         BZ    MON_DONE           NO, CONTINUE                          04700000
+                                                                        04710000
+MON_ADDX DS    0H                                                       04720000
+         $MSGMON ADD,             ADD MESSAGE MONITOR REQUEST          +04730000
+               SCOPE=*TSKSCOPE,                                        +04740000
+               AUTH=(R3),                                              +04750000
+               CLASS=CLASMASK,                                         +04760000
+               DEST=XOMDEST,                                           +04770000
+               MF=(E,$MON_MFL)                                          04780000
+                                                                        04790000
+         LTR   R3,R15             ADD REQUEST SUCCESSFUL?               04800000
+         BNZ   MON_DONE           NO, CONTINUE WITH NOTIFICATION        04810000
+         OI    FLAGS,$MONACTV     ASSUME MONITOR ACTIVE                 04820000
+         B     MON_DONE                                                 04830000
+                                                                        04840000
+*--------------------------------------------------------------         04850000
+*  Message monitor REP requested                                        04860000
+*--------------------------------------------------------------         04870000
+MON_REP  DS    0H                                                       04880000
+         $MSGMON REP,             REP MESSAGE MONITOR REQUEST          +04890000
+               SCOPE=*TSKSCOPE,                                        +04900000
+               AUTH=(R3),                                              +04910000
+               CLASS=CLASMASK,                                         +04920000
+               DEST=XOMDEST,                                           +04930000
+               MF=(E,$MON_MFL)                                          04940000
+                                                                        04950000
+         LTR   R3,R15             ADD REQUEST SUCCESSFUL?               04960000
+         BNZ   MON_DONE           NO, CONTINUE WITH NOTIFICATION        04970000
+                                                                        04980000
+         OI    FLAGS,$MONACTV     MONITOR ACTIVE                        04990000
+         OC    CLASMASK,CLASMASK  ANY MSG CLASSES  SPECIFIED            05000000
+         BNZ   MON_DONE           YES, CONTINUE                         05010000
+         OC    XOMDEST,XOMDEST    ANY DESTINATIONS SPECIFIED?           05020000
+         BNZ   MON_DONE           YES, CONTINUE                         05030000
+         NI    FLAGS,FF-$MONACTV  MONITOR REQUEST DELETED               05040000
+                                                                        05050000
+         B     MON_DONE                                                 05060000
+                                                                        05070000
+*--------------------------------------------------------------         05080000
+*  Message monitor DEL requested                                        05090000
+*--------------------------------------------------------------         05100000
+MON_DEL  DS    0H                                                       05110000
+         $MSGMON DEL,             DEL MESSAGE MONITOR REQUEST          +05120000
+               SCOPE=*TSKSCOPE,                                        +05130000
+               AUTH=(R3),                                              +05140000
+               CLASS=CLASMASK,                                         +05150000
+               DEST=XOMDEST,                                           +05160000
+               MF=(E,$MON_MFL)                                          05170000
+                                                                        05180000
+         LTR   R3,R15             ADD REQUEST SUCCESSFUL?               05190000
+         BNZ   MON_DONE           NO, CONTINUE WITH NOTIFICATION        05200000
+         NI    FLAGS,FF-$MONACTV  MONITOR DEACTIVATED                   05210000
+                                                                        05220000
+*--------------------------------------------------------------         05230000
+*  Notify RU scheduler that the monitor request has been accepted       05240000
+*--------------------------------------------------------------         05250000
+MON_DONE DS    0H                                                       05260000
+         XC    RPLYEPB@,RPLYEPB@  RESET REPLY REQUIRED                  05270000
+                                                                        05280000
+         LR    R0,R3              MESSAGE MONITOR COMPLETION STATUS     05290000
+         LA    R1,TMSGSTD         ADDRESS OF MESSAGE                    05300000
+         BAS   R14,MSGNTFY        NOTIFY MESSAGE REQUESTER              05310000
+                                                                        05320000
+         LTR   R3,R3              SUCCESSFUL COMMAND COMPLETION?        05330000
+         BNZ   ERR_MON            $MONMSG REQUEST ERROR                 05340000
+                                                                        05350000
+         TM    FLAGS,$RSPXMIT     INITIAL RESPONSE SENT?                05360000
+         BO    MSG_NEXT           YES, PROCESS NEXT MESSAGE             05370000
+         OI    FLAGS,$RSPXMIT     INITIAL RESPONSE SENT                 05380000
+                                                                        05390000
+         $OPRRESP XMIT,           FORMAT INITIAL OPERATOR RESPONSE     +05400000
+               OPCOMM=OPRCOMM,                                         +05410000
+               CONV=LCLCONV,                                           +05420000
+               RETINFO=(RC00,RSN00,0),                                 +05430000
+               MF=(E,MFE_LIST)                                          05440000
+         BNZ   ERR_RESP           OPRRESP SERVICE FAILURE               05450000
+                                                                        05460000
+         B     MSG_NEXT           PROCESS NEXT MESSAGE                  05470000
+                                                                        05480000
+         DROP  R8                 XOPRMON                               05490000
+                                                                        05500000
+         EJECT ,                                                        05510000
+***************************************************************         05520000
+*                                                                       05530000
+*  Monitored message delivery, reformat and add messages                05540000
+*  to Operator response queue.                                          05550000
+*                                                                       05560000
+***************************************************************         05570000
+MSG_DATA DS    0H                                                       05580000
+         MVC   FMTTSKNM,TMSGW3    PARM WORDS 3 & 4 CONTAIN TASKNAME     05590000
+         LA    R1,TMSGINFO        ADDRESS OF MESSAGE AREA               05600000
+         L     R0,TMSGINFL        LENGTH  OF MESSAGE AREA               05610000
+         BAS   R14,REFORMAT       CONVERT OFFLINKS TO PTRS              05620000
+                                                                        05630000
+         $OPRRESP MSGADD,         ADD MESSAGE TO RESPONSE LCL QUEUE    +05640000
+               OPCOMM=OPRCOMM,                                         +05650000
+               MSGQ=*LCLMSGQ,                                          +05660000
+               MF=(E,$OPR_MFL)                                          05670000
+                                                                        05680000
+         LR    R4,R15             SAVE COMPLETION CODE                  05690000
+                                                                        05700000
+         $FREMSG LCLMSGQ          RELEASE MESSAGE QUEUE                 05710000
+                                                                        05720000
+         LR    R0,R4              OPRRESP COMPLETION STATUS             05730000
+         LA    R1,TMSGSTD         ADDRESS OF MESSAGE                    05740000
+         BAS   R14,MSGNTFY        NOTIFY MESSAGE REQUESTER              05750000
+                                                                        05760000
+         LTR   R15,R4             MSGADD SUCCESSFUL?                    05770000
+         BNZ   ERR_RESP           OPER RESPONSE SERVICE FAILURE         05780000
+         B     FMT_RESP           FORMAT RESPONSE BUFFER                05790000
+                                                                        05800000
+         EJECT ,                                                        05810000
+*--------------------------------------------------------------         05820000
+*  Determine if any messages are pending formatting                     05830000
+*--------------------------------------------------------------         05840000
+PEND_RSP DS    0H                                                       05850000
+         ICM   R1,15,OPCMMSGQ     ADDRESS OF MESSAGE QUEUE              05860000
+         BZ    PEND_FMT           NO MSG BUFFER, CHECK FOR FMTD MSGS    05870000
+         USING $MSGBUF,R1         TEMP ADDRESSABILITY                   05880000
+         SR    R0,R0              PREPARE FOR INSERT                    05890000
+         ICM   R0,3,$MSGCNT       MESSAGES PENDING FORMAT?              05900000
+         BNZ   FMT_RESP           YES,  FORMAT RESPONSE BUFFER          05910000
+         DROP  R1                 $MSGBUF                               05920000
+                                                                        05930000
+*--------------------------------------------------------------         05940000
+*  Determine if any messages are already formatted and pending          05950000
+*  transmission.                                                        05960000
+*--------------------------------------------------------------         05970000
+PEND_FMT DS    0H                                                       05980000
+         ICM   R1,15,OPCMRSP@     ADDRESS OF OPER RESP BUFFER           05990000
+         BZ    MSG_NEXT           WAIT FOR NEXT MESSAGE                 06000000
+         USING YOPRRESP,R1        TEMP ADDRESSABILITY                   06010000
+         SR    R0,R0              PREPARE FOR INSERT                    06020000
+         ICM   R0,3,YOPRMSGC      MESSAGES ALREADY FORMATTED?           06030000
+         BZ    MSG_NEXT           NO, RECEIVE NEXT MESSAGE              06040000
+         DROP  R1                 YOPRRESP                              06050000
+                                                                        06060000
+         EJECT ,                                                        06070000
+*--------------------------------------------------------------         06080000
+*  Format OPRRESP response buffer                                       06090000
+*--------------------------------------------------------------         06100000
+FMT_RESP DS    0H                                                       06110000
+         $OPRRESP FORMAT,         FORMAT OPR RESPONSE BUFFER           +06120000
+               OPCOMM=OPRCOMM,                                         +06130000
+               MF=(E,MFE_LIST)                                          06140000
+                                                                        06150000
+         B     *+4(R15)           BRANCH ON RETURN CODE                 06160000
+         B     FMT_DONE           NORMAL COMPLETION                     06170000
+         B     FMT_XMIT           BUFFER FULL, SEND RESPONSE            06180000
+         B     ERR_RESP           OPRRESP SERVICE FAILURE               06190000
+         B     ERR_RESP           OPRRESP SERVICE FAILURE               06200000
+                                                                        06210000
+*--------------------------------------------------------------         06220000
+*  Format complete, transimit response if timer has expired             06230000
+*--------------------------------------------------------------         06240000
+FMT_DONE DS    0H                                                       06250000
+         ICM   R0,15,OPCMSND#     ANY PENDING SEND REQUESTS             06260000
+         BNZ   MSG_NEXT           YES,  LET'S WAIT A WHILE              06270000
+                                                                        06280000
+         ICM   R0,15,TIMINTVL     REFRESH INTERVAL SPECIFIED?           06290000
+         BZ    FMT_REDY           NO,  INDICATE READY TO XMIT           06300000
+         TM    FLAGS,$TIMEEXP     HAS TIMER EXPIRED?                    06310000
+         BNO   MSG_NEXT           NO, CONTINUE WITH MESSAGE LOOP        06320000
+                                                                        06330000
+FMT_REDY DS    0H                                                       06340000
+         OI    FLAGS,$XMREADY     READY TO XMIT, FIRST CHECK FOR MORE   06350000
+         B     MSG_NEXT           WAIT FOR NEXT MESSAGE                 06360000
+                                                                        06370000
+*--------------------------------------------------------------         06380000
+*  Send formatted OPRRESP buffer                                        06390000
+*--------------------------------------------------------------         06400000
+FMT_XMIT DS    0H                                                       06410000
+         NI    FLAGS,FF-$TIMEEXP  RESET TIMER EXPIRATION FLAG           06420000
+         NI    FLAGS,FF-$XMREADY  RESET READY TO XMIT FLAG              06430000
+         OI    FLAGS,$RSPXMIT     INITIAL RESPONSE SENT                 06440000
+                                                                        06450000
+         $OPRRESP XMIT,           FORMAT OPR RESPONSE BUFFER           +06460000
+               OPCOMM=OPRCOMM,                                         +06470000
+               CONV=LCLCONV,                                           +06480000
+               NFYSEND=YES,                                            +06490000
+               RETINFO=(RC00,RSN00,0),                                 +06500000
+               MF=(E,MFE_LIST)                                          06510000
+         BNZ   ERR_RESP           OPRRESP SERVICE FAILURE               06520000
+                                                                        06530000
+         B     MSG_NEXT           PROCESS NEXT MESSAGE                  06540000
+                                                                        06550000
+         EJECT ,                                                        06560000
+***************************************************************         06570000
+*                                                                       06580000
+*  Errors exits                                                         06590000
+*                                                                       06600000
+***************************************************************         06610000
+ERR_REQ  DS    0H                                                       06620000
+         LA    R0,RSN04           INVALID RU TYPE                       06630000
+         LA    R15,RC16           RETURN COMMAND REQUEST FAILURE        06640000
+         LA    R2,113             FAILURE MESSAGE ID                    06650000
+         B     ERR_COMM           COMMON ERROR                          06660000
+                                                                        06670000
+ERR_AUTH DS    0H                                                       06680000
+         LA    R0,RSN04           NOT AUTHORIZED FOR REQUEST            06690000
+         LA    R15,RC08           RETURN COMMAND REQUEST FAILURE        06700000
+         LA    R2,001             FAILURE MESSAGE ID                    06710000
+         B     ERR_COMM           COMMON ERROR                          06720000
+                                                                        06730000
+ERR_MON  DS    0H                                                       06740000
+         STM   R15,R1,SRVINFO     SAVE SERVICE FAILURE INFO             06750000
+         LR    R1,R15             $MSGMON FAILURE RETURN CODE           06760000
+         LA    R0,RSN04           $MSGMON FAILURE                       06770000
+         LA    R15,RC12           RETURN SERVICE FAILURE                06780000
+         LA    R2,111             FAILURE MESSAGE ID                    06790000
+         B     ERR_COMM           COMMON ERROR                          06800000
+                                                                        06810000
+ERR_RESP DS    0H                                                       06820000
+         STM   R15,R1,SRVINFO     SAVE SERVICE FAILURE INFO             06830000
+         LR    R1,R15             $OPRRESP FAILURE RETURN CODE          06840000
+         LA    R0,RSN08           $OPRRESP FAILURE                      06850000
+         LA    R15,RC12           RETURN SERVICE FAILURE                06860000
+         LA    R2,112             FAILURE MESSAGE ID                    06870000
+         B     ERR_COMM           COMMON ERROR                          06880000
+                                                                        06890000
+*--------------------------------------------------------------         06900000
+*  Error Common exit,  Format message and post requester                06910000
+*--------------------------------------------------------------         06920000
+ERR_COMM DS    0H                                                       06930000
+         STM   R15,R1,RETINFO     SAVE ERROR INFORMATION                06940000
+                                                                        06950000
+X        USING @XCV,LCLCONV        TEMP ADDRESSABILITY                  06960000
+         OI    X.@XCVSTAT,@XCVSERR INDICATE ERROR TERMINATION           06970000
+         DROP  X                   @XECONV                              06980000
+                                                                        06990000
+         $MSG  (R2),              FORMAT ERROR MESSAGE                 +07000000
+               FIELDS=(SRVRETC,SRVRSNC,SRVINFO)                         07010000
+                                                                        07020000
+         ICM   R2,15,RPLYEPB@     MESSAGE REPLY REQUIRED                07030000
+         BZ    CONV_END           NO, CONTINUE WITH OPRRESP             07040000
+         XC    RPLYEPB@,RPLYEPB@  RESET REPLY REQUIRED                  07050000
+                                                                        07060000
+         $TASK POST,EPB=(R2),PCODE=*RETINFO,MF=(E,$TSK_MFL)             07070000
+                                                                        07080000
+         EJECT ,                                                        07090000
+*--------------------------------------------------------------         07100000
+*  Conversation has ended, send conversation ended RU response          07110000
+*--------------------------------------------------------------         07120000
+CONV_END DS    0H                                                       07130000
+         TM    FLAGS,$RSPINIT     OPRRESP INITIALIZED?                  07140000
+         BO    CONV_MSG           YES, FORMAT CONVERSATION MSGS         07150000
+                                                                        07160000
+         $OPRRESP INIT,           INITIALIZE OPER RESPONSE COMMAREA    +07170000
+               OPCOMM=OPRCOMM,                                         +07180000
+               QH=PCBSTG,                                              +07190000
+               XH=*$XH@,                                               +07200000
+               RUENTRY=*$RU@,                                          +07210000
+               MF=(E,$OPR_MFL)                                          07220000
+                                                                        07230000
+*--------------------------------------------------------------         07240000
+*  Format messages in operator response buffer                          07250000
+*--------------------------------------------------------------         07260000
+CONV_MSG DS    0H                                                       07270000
+         ICM   R0,15,LCLMSGQ      MESSAGES QUEUED FOR DELIVERY?         07280000
+         BZ    CONV_SND           NO, SEND CONVERSATION END MSG         07290000
+                                                                        07300000
+         $OPRRESP MSGADD,         ADD MESSAGE TO RESPONSE QUEUE        +07310000
+               OPCOMM=OPRCOMM,                                         +07320000
+               MSGQ=*LCLMSGQ,                                          +07330000
+               MF=(E,$OPR_MFL)                                          07340000
+                                                                        07350000
+         $OPRRESP FORMAT,         FORMAT OPER RESPONSE TERM            +07360000
+               OPCOMM=OPRCOMM,                                         +07370000
+               MF=(E,MFE_LIST)                                          07380000
+                                                                        07390000
+*--------------------------------------------------------------         07400000
+*  Send conversation ended response                                     07410000
+*--------------------------------------------------------------         07420000
+CONV_SND DS    0H                                                       07430000
+         $OPRRESP XMIT,           FORMAT OPER RESPONSE BUFFER          +07440000
+               OPCOMM=OPRCOMM,                                         +07450000
+               RETINFO=(RETCODE,RSNCODE,INFCODE),                      +07460000
+               CONV=LCLCONV,                                           +07470000
+               MF=(E,MFE_LIST)                                          07480000
+                                                                        07490000
+         $OPRRESP TERM,           RELEASE OPRRESP RESOURCES            +07500000
+               OPCOMM=OPRCOMM,                                         +07510000
+               MF=(E,MFE_LIST)                                          07520000
+                                                                        07530000
+         LM    R15,R1,RETINFO     RESTORE RETURN INFOMATION             07540000
+         B     RETURN                                                   07550000
+                                                                        07560000
+*--------------------------------------------------------------         07570000
+*  Terminate timer requests and exit                                    07580000
+*--------------------------------------------------------------         07590000
+RETURN   DS    0H                                                       07600000
+         BAS   R14,TIMERTRM       TERMINATE ACTIVE TIMER REQS           07610000
+         LM    R15,R1,RETINFO     RESTORE RETURN INFO                   07620000
+         #EXIT ,                  RETURN                                07630000
+                                                                        07640000
+         EJECT ,                                                        07650000
+***************************************************************         07660000
+*                                                                       07670000
+*  Routine: GETMSG - Receive message from local message queue           07680000
+*                                                                       07690000
+*  Description:                                                         07700000
+*                                                                       07710000
+*    This routine will receive the next available message               07720000
+*    from the current processes message queue.  A buffer                07730000
+*    will be allocated on the initial receive request large             07740000
+*    enough to accomadate the message.  This message buffer             07750000
+*    will be reallocated on subsequent receives if the                  07760000
+*    buffer is insufficient for the message to be received.             07770000
+*                                                                       07780000
+*  Entry: N/A                                                           07790000
+*                                                                       07800000
+*  Exit:  Upon exit R15 will contain one of the following               07810000
+*         return codes:                                                 07820000
+*                                                                       07830000
+*              RC00 - Message successfully received                     07840000
+*                     R1 - Address of message received                  07850000
+*                                                                       07860000
+*              RC04 - Message not available                             07870000
+*                                                                       07880000
+***************************************************************         07890000
+GETMSG   DS    0H                                                       07900000
+         STM   R0,R15,REGSAVE     SAVE CALLER'S REGISTERS               07910000
+                                                                        07920000
+         LA    R1,256             ASSUME DEFAULT BUFFER LENGTH          07930000
+         ICM   R2,15,TMSG@        ADDRESS OF MESSAGE BUFFER             07940000
+         BZ    MSG_REAL           ALLOCATE INITIAL MESSAGE BUFFER       07950000
+         L     R3,TMSGLEN         LENGTH OF MESSAGE BUFFER              07960000
+                                                                        07970000
+MSG_RECV DS    0H                                                       07980000
+         $TRECV ((R2),(R3)),      RECEIVE MESSAGE                      +07990000
+               SCOPE=PCB,                                              +08000000
+               MF=(E,MFE_LIST)                                          08010000
+                                                                        08020000
+         B     *+4(R15)           BRANCH ON RETURN CODE                 08030000
+         B     MSG_EXIT           RETURN - MESSAGE RECEIVED             08040000
+         B     MSG_EXIT           RETURN - MESSAGE NOT AVAILABLE        08050000
+         B     MSG_REAL           BUFFER TO SMALL,  REALLOCATE          08060000
+         EX    0,*                UNDEFINED                             08070000
+                                                                        08080000
+MSG_REAL DS    0H                                                       08090000
+         LR    R3,R1              REQUIRED BUFFER SIZE                  08100000
+         ICM   R1,15,TMSG@        MESSAGE BUFFER ALLOCATED              08110000
+         BZ    MSG_ALLC           NO, CONTINUE WITH MSGALLOC            08120000
+                                                                        08130000
+         $RETSTOR (R1)            RETURN CURRENT MESSAGE BUFFER         08140000
+                                                                        08150000
+MSG_ALLC DS    0H                                                       08160000
+         $GETSTOR (R3)            ALLOCATE MESSAGE BUFFER               08170000
+                                                                        08180000
+         LR    R2,R1              ADDRESS OF MESSAGE BUFFER             08190000
+         ST    R3,TMSGLEN         SAVE ADDRESS OF MESSAGE BUFFER        08200000
+         ST    R2,TMSG@           SAVE LENGTH  OF MESSAGE BUFFER        08210000
+         B     MSG_RECV           RETRY MESSAGE RECEIVE                 08220000
+                                                                        08230000
+MSG_EXIT DS    0H                                                       08240000
+         L     R1,TMSG@           ADDRESS OF MESSAGE BUFFER             08250000
+         LM    R2,R14,REGSAVE+8   RESTORE CALLER'S REGISTERS            08260000
+         LTR   R15,R15            SET CONDITION CODE FOR COMPLETION     08270000
+         BR    R14                RETURN                                08280000
+                                                                        08290000
+         EJECT ,                                                        08300000
+***************************************************************         08310000
+*                                                                       08320000
+*  Routine: REFORMAT - Reformat message buffer to message queue         08330000
+*                                                                       08340000
+*  Description:                                                         08350000
+*                                                                       08360000
+*     This routine will process the message buffer received             08370000
+*     reformatting it into a message queue with appropriate             08380000
+*     formatting options.  The msg buffer input to this routine         08390000
+*     is a standard $MSGBUF in offlink format excluding the             08400000
+*     header.  Based on the message formatting options, a               08410000
+*     formatting message ID has been selected when reformatting         08420000
+*     the messages.  This message is issue with MSGID=NO,               08430000
+*     since it is simlpy used to generate the reformatted msg.          08440000
+*                                                                       08450000
+*  Entry: R1 - Address of $MSGHDR (First)                               08460000
+*         R0 - Length of message buffer                                 08470000
+*                                                                       08480000
+*  Exit:  R15 contains one of the following return codes:               08490000
+*                                                                       08500000
+*            RC00 - Message buffer successfully converted               08510000
+*                                                                       08520000
+***************************************************************         08530000
+REFORMAT DS    0H                                                       08540000
+         STM   R0,R15,REGSAVE     SAVE CALLER'S REGISTERS               08550000
+         LR    R5,R1              ADDRESS OF MESSAGES                   08560000
+         LR    R4,R1              SAVE BASE ADDRESS                     08570000
+         USING $MSBHDR,R5         ADDRESSABILITY                        08580000
+                                                                        08590000
+*--------------------------------------------------------------         08600000
+*  Format message using MSGID selected from formatting options          08610000
+*--------------------------------------------------------------         08620000
+RFMT_MSG DS    0H                                                       08630000
+         L     R2,FMTMSGID        GET FORMATTING MESSAGE ID             08640000
+         LH    R3,$MSBLEN         LENGTH OF MESSAGE                     08650000
+                                                                        08660000
+         TM    FMTOPTS,XOMFTASK   FORMAT MESSAGE USING TASKNAME         08670000
+         BO    RFMT_TSK           YES, ISSUE MESSAGE                    08680000
+                                                                        08690000
+         $MSG  (R2),MSGID=NO,     FORMAT MESSAGE TEXT                  +08700000
+               FIELDS=(($MSBTEXT,(R3)))                                 08710000
+                                                                        08720000
+         B     RFMT_NXT           PROCESS NEXT MESSAGE                  08730000
+                                                                        08740000
+RFMT_TSK DS    0H                                                       08750000
+         $MSG  (R2),MSGID=NO,     FORMAT MESSAGE TEXT                  +08760000
+               FIELDS=(FMTTSKNM,($MSBTEXT,(R3)))                        08770000
+                                                                        08780000
+*--------------------------------------------------------------         08790000
+*  Locate next message to be processed                                  08800000
+*--------------------------------------------------------------         08810000
+RFMT_NXT DS    0H                                                       08820000
+         ICM   R5,15,$MSBLINK     OFFSET TO NEXT MESSAGE                08830000
+         BZ    RFMT_END           END OF MESSAGES                       08840000
+         AR    R5,R4              ADDRESS OF NEXT MESSAGE               08850000
+         B     RFMT_MSG           PROCESS NEXT MESSAGE                  08860000
+                                                                        08870000
+*--------------------------------------------------------------         08880000
+*  Return                                                               08890000
+*--------------------------------------------------------------         08900000
+RFMT_END DS    0H                                                       08910000
+         LA    R15,RC00           NORMAL COMPLETION                     08920000
+         LM    R2,R14,REGSAVE+8   RESTORE CALLER'S REGISTERS            08930000
+         LTR   R15,R15            SET CONDITION CODE                    08940000
+         BR    R14                RETURN                                08950000
+                                                                        08960000
+         DROP  R5                 $MSBHDR                               08970000
+                                                                        08980000
+         EJECT ,                                                        08990000
+***************************************************************         09000000
+*                                                                       09010000
+*  Routine: TIMERSET - Initialize Timer Event                           09020000
+*                                                                       09030000
+*  Description:                                                         09040000
+*                                                                       09050000
+*    This routine will initialize a timer event to send                 09060000
+*    the current process a message when the timer expires.              09070000
+*                                                                       09080000
+*  Entry:  R1  - Timer Interval                                         09090000
+*                                                                       09100000
+*  Exit:   R15 Contains one of the following return codes               09110000
+*                                                                       09120000
+*                RC00 - Timer Successfully initialized                  09130000
+*               >RC00 - Return code from $TIMER SET request             09140000
+*                                                                       09150000
+***************************************************************         09160000
+TIMERSET DS    0H                                                       09170000
+         STM   R0,R15,REGSAVE     SAVE CALLER'S REGISTERS               09180000
+         LR    R2,R1              TIMER INTERVAL                        09190000
+                                                                        09200000
+         $TIMER SET,TID=TIMEVENT,INTVL=(R2),                           +09210000
+               NOTIFY=MESSAGE,MF=(E,$TMR_MFL)                           09220000
+                                                                        09230000
+         LM    R0,R14,REGSAVE     RESTORE CALLER'S REGISTERS            09240000
+         LTR   R15,R15            SET CONDITION CODE                    09250000
+         BR    R14                RETURN                                09260000
+                                                                        09270000
+         EJECT ,                                                        09280000
+***************************************************************         09290000
+*                                                                       09300000
+*  Routine: TIMERCNL - Cancel Timer Event                               09310000
+*                                                                       09320000
+*  Description:                                                         09330000
+*                                                                       09340000
+*    This routine will cancel the timer event identified                09350000
+*    by the Timer ID specified in the TIMEVENT field.                   09360000
+*                                                                       09370000
+*  Entry:  N/A                                                          09380000
+*                                                                       09390000
+*  Exit:   R15 - Contains one of the following return codes             09400000
+*                                                                       09410000
+*                RC00 - Timer successfully cancelled                    09420000
+*               >RC00 - Return code from $TIMER CANCEL request          09430000
+*                                                                       09440000
+***************************************************************         09450000
+TIMERCNL DS    0H                                                       09460000
+         STM   R0,R15,REGSAVE     SAVE CALLER'S REGISTERS               09470000
+                                                                        09480000
+         $TIMER CANCEL,TID=TIMEVENT,MF=(E,$TMR_MFL)                     09490000
+                                                                        09500000
+         LM    R0,R14,REGSAVE     RESTORE CALLER'S REGISTERS            09510000
+         LTR   R15,R15            SET CONDITION CODE                    09520000
+         BR    R14                RETURN                                09530000
+                                                                        09540000
+         EJECT ,                                                        09550000
+***************************************************************         09560000
+*                                                                       09570000
+*  Routine: TIMERTRM - Terminate Active timers for workunit             09580000
+*                                                                       09590000
+*  Description:                                                         09600000
+*                                                                       09610000
+*    This routine will terminate any active timers outstanding          09620000
+*    for the workunit.                                                  09630000
+*                                                                       09640000
+*  Entry:  N/A                                                          09650000
+*                                                                       09660000
+*  Exit:   N/A                                                          09670000
+*                                                                       09680000
+***************************************************************         09690000
+TIMERTRM DS    0H                                                       09700000
+         STM   R0,R15,REGSAVE     SAVE CALLER'S REGISTERS               09710000
+                                                                        09720000
+         $TIMER TERM,MF=(E,$TMR_MFL)                                    09730000
+                                                                        09740000
+         LM    R0,R15,REGSAVE     RESTORE CALLER'S REGISTERS            09750000
+         BR    R14                RETURN                                09760000
+                                                                        09770000
+         EJECT ,                                                        09780000
+***************************************************************         09790000
+*                                                                       09800000
+*  Routine: MSGNTFY - Notify Message request of completion              09810000
+*                                                                       09820000
+*  Description:                                                         09830000
+*                                                                       09840000
+*     This routine will notify the requestor of the message             09850000
+*     processing completion.                                            09860000
+*                                                                       09870000
+*  Entry:  R1 - Address of TMSGSTD                                      09880000
+*          R0 - Message process completion status                       09890000
+*                                                                       09900000
+*  Exit:   N/A                                                          09910000
+*                                                                       09920000
+***************************************************************         09930000
+MSGNTFY  DS    0H                                                       09940000
+         STM   R0,R15,REGSAVE     SAVE CALLER'S REGISTERS               09950000
+         LR    R2,R0              RETAIN COMPLETION STATUS              09960000
+         LR    R5,R1              ADDRESS OF MESSAGE                    09970000
+         USING TMSGSTD,R5         ADDRESSABILITY                        09980000
+                                                                        09990000
+         ICM   R3,15,TMSGEPB      REPLY EPB TOKEN IF REPLY REQ          10000000
+         BZ    NTFY_RET           NO REPLY REQUESTED                    10010000
+                                                                        10020000
+         $TASK POST,EPB=(R3),PCODE=(R2),MF=(E,$TSK_MFL)                 10030000
+                                                                        10040000
+NTFY_RET DS    0H                                                       10050000
+         LM    R0,R15,REGSAVE     RESTORE CALLER'S REGISTERS            10060000
+         BR    R14                RETURN                                10070000
+                                                                        10080000
+         DROP  R5                 TMSGSTD                               10090000
+                                                                        10100000
+         EJECT ,                                                        10110000
+***************************************************************         10120000
+*                                                                       10130000
+*  Routine: GETFMTID - Locate Formatting Message ID                     10140000
+*                                                                       10150000
+*  Description:                                                         10160000
+*                                                                       10170000
+*    This routine will return the appropriate message ID                10180000
+*    required to format the messages sent to the messge                 10190000
+*    monitor cooperative process.  The message formatting               10200000
+*    options requested are used as a key into the message               10210000
+*    ID table.                                                          10220000
+*                                                                       10230000
+*  Entry:  R1  - Formatting options mask                                10240000
+*                                                                       10250000
+*  Exit:   R15 - Formatting Message ID                                  10260000
+*                                                                       10270000
+***************************************************************         10280000
+GETFMTID DS    0H                                                       10290000
+         STM   R0,R15,REGSAVE     SAVE CALLER'S REGISTERS               10300000
+                                                                        10310000
+         LA    R15,0              INITIALIZE MSGID RETURN               10320000
+         N     R1,=A(XOMFDATE+XOMFTIME+XOMFTASK)                        10330000
+                                                                        10340000
+         LA    R4,MSGFMT          ADDRESS OF FORMAT MSG TABLE           10350000
+         LA    R3,MSGFMT#         COUNT OF ENTRIES IN TABLE             10360000
+                                                                        10370000
+GETF_NXT DS    0H                                                       10380000
+         CLM   R1,1,3(R4)         ENTRY MATCH?                          10390000
+         BE    GETF_HIT           YES, SET MSG ID                       10400000
+         LA    R4,L'MSGFMT(,R4)   ADDRESS OF NEXT ENTRY                 10410000
+         BCT   R3,GETF_NXT        PROCESS NEXT ENTRY                    10420000
+         B     GETF_RET           RETURN                                10430000
+                                                                        10440000
+GETF_HIT DS    0H                                                       10450000
+         ICM   R15,7,0(R4)        RETRIEVE FORMATTING MSG ID            10460000
+                                                                        10470000
+GETF_RET DS    0H                                                       10480000
+         LM    R0,R14,REGSAVE     RESTORE CALLER'S REGISTERS            10490000
+         BR    R14                RETURN                                10500000
+                                                                        10510000
+         EJECT ,                                                        10520000
+*--------------------------------------------------------------         10530000
+* Constants and literals                                                10540000
+*--------------------------------------------------------------         10550000
+MSGFMT   EQU   *,3+1              Message formatting table              10560000
+         DC    AL3(901),AL1(0)                                          10570000
+         DC    AL3(902),AL1(XOMFDATE)                                   10580000
+         DC    AL3(903),AL1(XOMFTIME)                                   10590000
+         DC    AL3(904),AL1(XOMFDATE+XOMFTIME)                          10600000
+         DC    AL3(911),AL1(XOMFTASK)                                   10610000
+         DC    AL3(912),AL1(XOMFDATE+XOMFTASK)                          10620000
+         DC    AL3(913),AL1(XOMFTIME+XOMFTASK)                          10630000
+         DC    AL3(914),AL1(XOMFDATE+XOMFTIME+XOMFTASK)                 10640000
+MSGFMTE  EQU   *                                                        10650000
+MSGFMT#  EQU   (MSGFMTE-MSGFMT)/L'MSGFMT                                10660000
+                                                                        10670000
+         LTORG ,                                                        10680000
+                                                                        10690000
+*--------------------------------------------------------------         10700000
+                                                                        10710000
+         PRINT NOGEN                                                    10720000
+         ICVT  ,                                                        10730000
+         ITASK ,                                                        10740000
+         IPCB  ,                                                        10750000
+         IUSER ,                                                        10760000
+                                                                        10770000
+         END   ,                                                        10780000

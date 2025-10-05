@@ -1,0 +1,413 @@
+IPLNLOAD TITLE '- LOAD PLAN INTO CONTIGUOUS STORAGE EXTENT'             00010003
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE: IPLNLOAD - Load plan into contiguous storage extent          00040003
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    The purpose of this routine is to copy a navigation plan           00080003
+*    and its associated data areas including the PLAN (plan             00090003
+*    summary), PLANINFO (plan information area), and SUPRARCs           00100006
+*    and their associated ARC tables into a single contiguous           00110006
+*    block of storage to both simplify plan management and to           00120006
+*    provide a basis for cross-itask sharing of a single copy           00130006
+*    of the plan.                                                       00140006
+*                                                                       00150003
+*    The PLAN returned from PLNBLD() may contain the terminal           00160006
+*    state list and SUPRARC tables used during plan                     00170006
+*    construction.  These data areas provide valuable                   00180006
+*    diagnostic information when plan generation fails, but             00190006
+*    have no further use once a plan is successfully created.           00200006
+*    It is assumed that the plan provided as input is valid and         00210006
+*    that neither PLAN nor PLANINFO contain relavent                    00220006
+*    diagnostics, etc.                                                  00230006
+*                                                                       00240006
+*    As the plan and its related data areas are copied,                 00250006
+*    pointers are relocated.  Pointers invalidated by the copy          00260006
+*    process are zeroed.                                                00270006
+*                                                                       00280003
+*    The caller provides a CSTGMGR subpool (QH) which is used           00290006
+*    to allocate the plan copy.  Serialization is the                   00300006
+*    responsibility of the caller.                                      00310006
+*                                                                       00320003
+*    The source plan, i.e. the plan provided on input is not            00330003
+*    altered in any way.                                                00340003
+*                                                                       00350003
+*                                                                       00360000
+* ON ENTRY:                                                             00370000
+*                                                                       00380000
+*    R1  contains the address of a parameter list described             00390000
+*        by PLNLOADP                                                    00400000
+*                                                                       00410000
+*                                                                       00420000
+* ON EXIT:                                                              00430000
+*                                                                       00440000
+*    R15 contains one of the following return codes                     00450000
+*                                                                       00460000
+*        RC00 - plan consolidation completed without error              00470005
+*                                                                       00480005
+*               The PLNLOADR return area describes the                  00490005
+*               storage extent and location of plan components          00500005
+*                                                                       00510005
+*        RC04 - reserved                                                00520004
+*                                                                       00530000
+*        RC08 - reserved                                                00540004
+*                                                                       00550000
+*        RC12 - invalid request                                         00560003
+*                                                                       00570000
+*        RC16 - storage management failure                              00580003
+*                                                                       00590003
+*               R0 contains the CSTGMGR service return code             00600003
+*                                                                       00610003
+**<DOC-OFF>****************************************************         00620000
+                                                                        00630000
+         EJECT                                                          00640000
+***************************************************************         00650000
+*                                                                       00660000
+* MAINTENANCE:                                                          00670000
+*                                                                       00680000
+*    09/25/95 R. Turgeon                                                00690000
+*             Initial version                                           00700000
+*                                                                       00710000
+***************************************************************         00720000
+                                                                        00730000
+         EJECT                                                          00740000
+         #WORK ,                                                        00750003
+         #ENDWORK ,                                                     00760000
+                                                                        00770000
+         EJECT                                                          00780000
+         PLNLOADP ,          PLAN LOAD REQUEST BLOCK                    00790000
+                                                                        00800000
+         EJECT                                                          00810000
+         IPROJ ,             PROJECT                                    00820000
+                                                                        00830004
+         EJECT                                                          00840004
+         NAV   ,             PLAN STRUCTURES                            00850004
+                                                                        00860000
+         EJECT                                                          00870000
+         EQUS ,                                                         00880000
+                                                                        00890000
+         ABCODES ,           $ABEND CODES                               00900000
+                                                                        00910000
+         EJECT                                                          00920000
+IPLNLOAD #ENTER PREG=R8                                                 00930001
+                                                                        00940000
+         USING ITASK,R10          STDENV                                00950000
+                                                                        00960000
+         EJECT                                                          00970000
+***************************************************************         00980000
+*                                                                       00990000
+*   General initialization, fetch source plan                           01000004
+*                                                                       01010000
+***************************************************************         01020000
+                                                                        01030000
+         USING PLNLOADP,R8        REQUEST LIST                          01040003
+                                                                        01050000
+         L     R9,PPLDRETA        INITIALIZE RETURN AREA                01060003
+         USING PLNLOADR,R9                                              01070003
+         XC    PLNLOADR(PRLDLN),PLNLOADR                                01080003
+                                                                        01090003
+         L     R6,PPLDPLAN        ADDRESS OF CALLERS PLAN RETURN AREA   01100002
+         USING PLAN,R6            SOURCE PLAN, LIFE OF FUNCTION         01110002
+                                                                        01120002
+***************************************************************         01130003
+*                                                                       01140000
+*   Compute total size of the storage extent required as the            01150004
+*   sum of the sizes of the PLAN, PLANINFO, all SUPERARCs, and          01160004
+*   all associated elementary ARCs.  Generally, this is not a           01170004
+*   lot of storage.                                                     01180004
+*                                                                       01190002
+***************************************************************         01200003
+                                                                        01210000
+         ICM   R1,15,PLSTART      PLAN TREE ROOT SARC                   01220003
+         BZ    ERR_PLAN           INVALID REQUEST IF NO PLAN PROVIDED   01230003
+         BAS   R14,GPLEN          TOTAL SIZE OF SUPERARCS AND ARCS      01240003
+         LA    R2,PINFOLN+PLANLN(,R15)  TOTAL STORAGE REQUIRED          01250003
+                                                                        01260002
+***************************************************************         01270003
+*                                                                       01280002
+*   Acquire a single storage block in the subpool provided by           01290003
+*   the caller.  Segment the storage returned into distinct             01300003
+*   data areas.  Note that the PLAN, PLANINFO, SUPRARC and              01310003
+*   NVARC data areas must all be doubleword aligned (i.e. have          01320003
+*   N*doubleword lengths) to ensure that the relocated plan             01330003
+*   can be freed using the pre-existing plan cleanup functions.         01340003
+*                                                                       01350003
+***************************************************************         01360003
+                                                                        01370002
+         L     R3,PPLDQH          ADDR OF SUBPOOL QH                    01380003
+                                                                        01390003
+         STGGET (R2),QH=(R3)      ACQUIRE STORAGE FOR PLAN, ETC.        01400003
+                                                                        01410002
+         BNZ   ERR_STG            FAIL IF ERROR                         01420004
+                                                                        01430004
+         ST    R1,PRLDSTGA        STORAGE AREA ORIGIN RETURNED          01440003
+         ST    R2,PRLDSTGL        STORAGE AREA LENGTH RETURNED          01450003
+                                                                        01460003
+         LR    R5,R1              PLAN IMAGE BASE                       01470003
+PL       USING PLAN,R5            PLAN SUMMARY                          01480003
+PI       USING PLANINFO,PL.PLAN+PLANLN                                  01490004
+                                                                        01500003
+***************************************************************         01510003
+*                                                                       01520003
+*   Copy the source PLAN summary block and remove unused                01530003
+*   data area pointers, etc.                                            01540003
+*                                                                       01550003
+***************************************************************         01560003
+                                                                        01570002
+         MVC   PL.PLAN(PLANLN),PLAN                                     01580003
+                                                                        01590003
+         LA    R1,PL.PLAN         RELOCATED PLAN ORIGIN                 01600003
+         ST    R1,PRLDPLAN        RETURNED                              01610003
+                                                                        01620003
+         SR    R0,R0              SANITIZE THE COPY                     01630003
+         ST    R0,PL.PLNSARC      SUPERARC TABLE                        01640003
+         ST    R0,PL.PLSARCL                                            01650003
+         ST    R0,PL.PLSTART      PLAN TREE REANCHOR REQUIRED           01660003
+         ST    R0,PL.PLLINK       NOT USED                              01670003
+                                                                        01680003
+***************************************************************         01690003
+*                                                                       01700003
+*   Copy the source PLANINFO block and remove unused                    01710003
+*   data area pointers, etc.                                            01720003
+*                                                                       01730003
+***************************************************************         01740003
+                                                                        01750003
+         L     R1,PPLDPINF        SOURCE PLAN INFORMATION RETURN AREA   01760003
+         MVC   PI.PLANINFO,0(R1)                                        01770003
+                                                                        01780003
+         LA    R1,PI.PLANINFO     RELOCATED PLAN INFORMATION BLOCK      01790003
+         ST    R1,PRLDPINF        RETURNED                              01800003
+                                                                        01810003
+         SR    R0,R0              SANITIZE THE COPY                     01820003
+         ST    R0,PI.PISARC       NO SARC IN ERROR                      01830003
+                                                                        01840003
+***************************************************************         01850003
+*                                                                       01860003
+*   Copy the plan SUPRARCs and elementary ARCs into the                 01870003
+*   remainder of the new storage buffer.  Upon entry to CPLAN()         01880004
+*   R0 points to the first free slot in the buffer where                01890004
+*   SUPRARCs will be placed.  R1 points to the end of the               01900004
+*   buffer; elementary ARCs will be inserted from the rear.             01910004
+*                                                                       01920003
+***************************************************************         01930003
+                                                                        01940003
+         LA    R0,PI.PLANINFO+PINFOLN                                   01950003
+         LA    R1,0(R2,R5)        END OF ARC INSERTION AREA             01960004
+         L     R15,PLSTART        PLAN TREE ORIGIN                      01970004
+         BAS   R14,CPLAN          COPY AND RELOCATE PLAN TREE           01980003
+                                                                        01990004
+         ST    R15,PL.PLSTART     PLANT PLAN TREE IN PLAN SUMMARY       02000004
+                                                                        02010000
+         EJECT                                                          02020000
+****************************************************************        02030000
+*                                                                       02040000
+*   Normal and abnormal termination                                     02050000
+*                                                                       02060000
+****************************************************************        02070000
+                                                                        02080000
+NORMRET  DS    0H                                                       02090000
+         LA    R15,RC00           NORMAL COMPLETION                     02100000
+         SR    R0,R0              REASON CODES NOT DEFINED              02110000
+         B     EXIT                                                     02120000
+                                                                        02130000
+ERR_PLAN DS    0H                 INVALID REQUEST                       02140003
+         LA    R15,RC12           LOGIC ERROR IN CALLER                 02150003
+         SR    R0,R0              REASON CODES NOT DEFINED              02160000
+         B     EXIT                                                     02170000
+                                                                        02180000
+ERR_STG  DS    0H                 STORAGE FAILURE                       02190003
+         LR    R0,R15             RSNCODE IS SERVICE RETCODE            02200003
+         LA    R15,RC16                                                 02210003
+         B     EXIT                                                     02220000
+                                                                        02230000
+*--------------------------------------------------------------         02240000
+*   Return completion status to caller                                  02250000
+*--------------------------------------------------------------         02260000
+                                                                        02270000
+EXIT     DS    0H                                                       02280000
+                                                                        02290000
+         #EXIT                                                          02300000
+                                                                        02310003
+         DROP  R6                 PLAN                                  02320003
+                                                                        02330006
+         EJECT                                                          02340006
+**<DOC-ON>*****************************************************         02350003
+*                                                                       02360003
+* ROUTINE:  GPLEN - compute size of all plan SUPRARCs/ARCs              02370006
+*                                                                       02380003
+* DESCRIPTION:                                                          02390003
+*                                                                       02400003
+*    This routine recursively runs the plan tree totaling               02410003
+*    the size of all SUPRARCs and elementary ARCs.                      02420003
+*                                                                       02430003
+*                                                                       02440003
+* ATTRIBUTES:  recursive, BAKR linkage, no save areas                   02450003
+*                                                                       02460003
+*                                                                       02470003
+* ON ENTRY:                                                             02480003
+*                                                                       02490003
+*    R1  - address of plan (sub)tree root                               02500003
+*                                                                       02510003
+*                                                                       02520003
+* ON EXIT:                                                              02530003
+*                                                                       02540003
+*    R15 - total size of plan (sub)tree                                 02550003
+*                                                                       02560003
+**<DOC-OFF>****************************************************         02570003
+                                                                        02580000
+GPLEN    DS    0H                                                       02590003
+         BAKR  R14,0              RECURSIVE LINKAGE                     02600003
+         LR    R2,R1              PLAN SUBTREE ROOT                     02610003
+         USING SUPRARC,R2                                               02620003
+                                                                        02630003
+         SR    R5,R5              SIZE ACCUMULATOR                      02640003
+                                                                        02650003
+*--------------------------------------------------------------         02660003
+*   acquire size of plan subtree                                        02670003
+*--------------------------------------------------------------         02680003
+                                                                        02690003
+GPLNEXT  DS    0H                                                       02700003
+         L     R3,SUPARCS         NUMBER OF ELEMENTARY ARCS             02710003
+         MH    R3,=AL2(NVARCLN)   SIZE OF ALL ARCS                      02720003
+         LA    R5,SUPARCLN(R3,R5) TOTAL SIZE OF TRANSITION              02730003
+                                                                        02740003
+         ICM   R1,15,SUPNEXT      PLAN CONTINUES?                       02750003
+         BZ    GPLADV             DONE HERE IF NOT                      02760008
+                                                                        02770003
+         BAS   R14,GPLEN          RECUR AND RETURN SUBTREE SIZE         02780003
+         AR    R5,R15             ACCUMULATE LENGTHS                    02790003
+                                                                        02800003
+*--------------------------------------------------------------         02810003
+*   run SUPRARC peer chain                                              02820003
+*--------------------------------------------------------------         02830003
+                                                                        02840003
+GPLADV   DS    0H                                                       02850003
+         ICM   R2,15,SUPPEER      PEER SARCS REMAIN?                    02860003
+         BNZ   GPLNEXT            ACCUMULATE SIZES                      02870003
+                                                                        02880003
+         LR    R15,R5             RETURN AGGREGATE SIZE                 02890003
+         PR    ,                                                        02900003
+         DROP  R2                                                       02910003
+                                                                        02920003
+         EJECT                                                          02930003
+**<DOC-ON>*****************************************************         02940003
+*                                                                       02950003
+* ROUTINE:  CPLAN - plan SUPRARC / ARC copy and relocate                02960003
+*                                                                       02970003
+* DESCRIPTION:                                                          02980003
+*                                                                       02990003
+*    The SUPRARC tree and the associated ARC tables are copied          03000006
+*    into the buffer provided.  SUPRARCs are slotted in the             03010006
+*    buffer working forwards from a designated starting                 03020006
+*    address.  ARC tables (variable length) occupy the end of           03030003
+*    the buffer and are inserted working backwards from the             03040006
+*    end of the buffer.  The two pointers converge, but do not          03050006
+*    cross, in the middle.                                              03060006
+*                                                                       03070006
+*    Current position in the buffer is maintained by passing            03080003
+*    front and rear pointers in R0 and R1 which are not                 03090003
+*    affected by PR.                                                    03100003
+*                                                                       03110003
+*    STN pointers in the SUPRARCs and ARCs are invariant.               03120006
+*                                                                       03130003
+*                                                                       03140003
+* ATTRIBUTES:  recursive, BAKR linkage, no save areas                   03150003
+*                                                                       03160003
+*                                                                       03170003
+* ON ENTRY:                                                             03180003
+*                                                                       03190003
+*    R15 - current source plan SUPRARC                                  03200003
+*    R0  - next SUPRARC insertion slot                                  03210003
+*    R1  - last used ARC insertion area                                 03220003
+*                                                                       03230003
+*                                                                       03240003
+* ON EXIT:                                                              03250003
+*                                                                       03260003
+*    R15 - addr of relocated plan subtree root (*SUPRARC)               03270003
+*    R0  - next SUPRARC insertion slot   (updated)                      03280003
+*    R1  - last used ARC insertion area  (updated)                      03290003
+*                                                                       03300003
+**<DOC-OFF>****************************************************         03310003
+                                                                        03320003
+CPLAN    DS    0H                                                       03330003
+         BAKR  R14,0              RECURSIVE LINKAGE                     03340003
+         SR    R9,R9              INITIAL PEER CHAIN ANCHOR SARC        03350003
+         LR    R4,R0              RETURN FIRST OF COPIED PEER SARCS     03361009
+                                                                        03362009
+*--------------------------------------------------------------         03370003
+*   copy and releace current SUPRARC                                    03380003
+*--------------------------------------------------------------         03390003
+                                                                        03400003
+CPLNEXT  DS    0H                                                       03410003
+         LR    R2,R15             SOURCE PLAN SUBTREE ROOT              03420003
+         USING SUPRARC,R2                                               03430003
+                                                                        03440003
+         LR    R5,R0              SARC INSERTION FREE AREA              03450003
+C        USING SUPRARC,R5         PARALLEL ADDRESSABILITY               03460003
+         MVC   C.SUPRARC(SUPARCLN),SUPRARC  COPY SOURCE SUPRARC         03470003
+         LA    R0,SUPARCLN(,R5)   NEXT AVAILABLE SARC SLOT              03480003
+                                                                        03490003
+         LTR   R9,R9              PEER SARC REQUIRES ANCHOR?            03500003
+         BZ    *+8                SKIP IF NOT                           03510003
+         ST    R5,SUPPEER-SUPRARC(,R9)                                  03520003
+                                                                        03530003
+         LR    R9,R5              ADVANCE PEER CHAIN ANCHOR SARC        03540003
+                                                                        03550003
+*--------------------------------------------------------------         03560003
+*   copy the ARC table associated with the SUPRARC and reanchor         03570003
+*--------------------------------------------------------------         03580003
+                                                                        03590003
+         ICM   R7,15,C.SUPARCS    NUMBER OF ELEMENTARY ARCS             03600003
+         BZ    CPLNOARC           NONE (SPECIAL CASE)                   03610003
+         MH    R7,=AL2(NVARCLN)   SIZE OF ALL ARCS                      03620003
+         SR    R1,R7              LOCATE INSERTION AREA                 03630003
+                                                                        03640003
+         LR    R6,R1              TARGET ARC TABLE                      03650003
+         L     R14,C.SUPARCL      SOURCE ARC TABLE ORIGIN               03660003
+         LR    R15,R7             SOURCE LENGTH = TARGET LENGTH         03670003
+         MVCL  R6,R14             RELOCATE THE ARC TABLE                03680003
+         ST    R1,C.SUPARCL       SARC -> RELOCATED ARC TABLE           03690006
+                                                                        03700003
+CPLNOARC DS    0H                                                       03710003
+                                                                        03720003
+*--------------------------------------------------------------         03730003
+*   copy and relocate plan subtree of current SARC if any               03740003
+*--------------------------------------------------------------         03750003
+                                                                        03760003
+         ICM   R15,15,C.SUPNEXT   R1 <== DESCEND TO LOWER PLAN SUBTREE  03770003
+         BZ    CPLTSTAT           TERMINAL STATE IF NONE                03780003
+         BAS   R14,CPLAN          COPY AND RELOCATE THE SUBTREE         03790003
+         ST    R15,C.SUPNEXT      ANCHOR SUBTREE TO CURRENT SARC        03800003
+                                                                        03810003
+CPLTSTAT DS    0H                                                       03820003
+                                                                        03830003
+*--------------------------------------------------------------         03840003
+*   copy and relocate peers of current SARC                             03850003
+*--------------------------------------------------------------         03860003
+                                                                        03870003
+         ICM   R15,15,C.SUPPEER   PEER SARCS ATTACHED?                  03880003
+         BNZ   CPLNEXT            ADVANCE AND REPEAT IF SO              03890003
+                                                                        03900003
+*--------------------------------------------------------------         03910003
+*   return copied and relocated plan subtree SARC to caller             03920003
+*--------------------------------------------------------------         03930003
+                                                                        03940003
+         LR    R15,R4             RETURN RELOCATED PLAN SUBTREE         03950009
+         PR    ,                                                        03960003
+         DROP  R2,C               SUPRARC, COPY OF SUPRARC              03970003
+                                                                        03980003
+         EJECT                                                          03990000
+***************************************************************         04000000
+*                                                                       04010000
+*   Local read only storage                                             04020000
+*                                                                       04030000
+***************************************************************         04040000
+                                                                        04050000
+         LTORG ,                                                        04060000
+                                                                        04070000
+         EJECT                                                          04080000
+         PRINT NOGEN                                                    04090000
+         ICVT  ,                                                        04100000
+         ITASK ,                                                        04110000
+         END   ,                                                        04120000

@@ -1,0 +1,671 @@
+IPRCEPLG TITLE '- Process EPILOG Routine'                               00010000
+**<DOC-ON>****************************************************          00020000
+*                                                                       00030000
+* ROUTINE: IPRCEPLG - Process EPILOG Routine                            00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This routine receives control upon return from a process           00080000
+*    routine.  R14 is the entry address to this routine                 00090000
+*    receiving control via the R14 return address initialized           00100000
+*    by $PROC CREATE processing.                                        00110000
+*                                                                       00120000
+*    If the terminating PCB is the $$MAIN$$ process associated          00130000
+*    with the task,  and if there are subtasks owned by this            00140000
+*    task, the subtask are signaled to terminate and the                00150000
+*    termination of the current PCB halts until all subtasks            00160000
+*    have terminated.                                                   00170000
+*                                                                       00180000
+*    If the terminating PCB has subordinate active processes,           00190000
+*    all child processes are marked "draining" and the                  00200000
+*    terminating PCB is placed into a wait (loop) until all             00210000
+*    subordinate processes have terminated.  If a child process         00220000
+*    was not initially created with a TERMEPB, one is added at          00230000
+*    this time to notify the parent of its completion.                  00240000
+*                                                                       00250000
+*    Next, if resource managers have been specified for the             00260000
+*    terminating PCB,  they are called in LIFO sequence. The            00270000
+*    sync ECB is posted if it was not explicitly or implicitly          00280000
+*    posted during the execution of the process, such as may            00290000
+*    occur if the process abnormally terminates prior to being          00300000
+*    posted.  Also, the TERMEPB is posted if specified.  In             00310000
+*    addition, the XEPB queue is scanned to determine if the            00320000
+*    terminating process has any outstanding PCBs to flush or           00330000
+*    post.                                                              00340000
+*                                                                       00350000
+*    When all processing for the terminated PCB is complete             00360000
+*    the task dispatcher is entered via a CALLDSP taskmgr               00370000
+*    request.                                                           00380000
+*                                                                       00390000
+*                                                                       00400000
+* ON ENTRY:                                                             00410000
+*                                                                       00420000
+*    R14 CONTAINS ENTRY ADDRESS                                         00430000
+*    R10 CONTAINS ITASK ADDRESS                                         00440000
+*                                                                       00450000
+* ON EXIT:                                                              00460000
+*                                                                       00470000
+*    $TASK CALLDSP REQUEST IS ISSUED UPON TERMINATION                   00480000
+*                                                                       00490000
+* MODE:                                                                 00500000
+*                                                                       00510000
+*    TASK                                                               00520000
+*    APF/NON-APF                                                        00530000
+*    SUP/PROB                                                           00540000
+*    AMODE 31, RMODE ANY                                                00550000
+*                                                                       00560000
+**<DOC-OFF>***************************************************          00570000
+                                                                        00580000
+         EJECT ,                                                        00590000
+**************************************************************          00600000
+*                                                                       00610000
+* MAINTENANCE:                                                          00620000
+*                                                                       00630000
+*   04/26/93 Ron Colmone                                                00640000
+*            Initial Version                                            00650000
+*                                                                       00660000
+*   12/06/94 Ron colmone                                                00670000
+*            Added QLOCK Parameter to $SER REQUEUE.                     00680000
+*                                                                       00690000
+*   12/13/94 Tim Weltzer                                                00700000
+*            Added $FRAME RECOVER to clean up stack frames              00710000
+*                                                                       00720000
+*   01/03/95 Ron Colmone          Par# 159456                           00730000
+*            Added support for task manager server                      00740000
+*                                                                       00750000
+*   09/18/95 Ron Colmone          Par# 215477                           00760000
+*            XEPB queue restructuring.  XEPBs are no longer             00770000
+*            maintained on a global queue.                              00780000
+*                                                                       00790000
+**************************************************************          00800000
+                                                                        00810000
+         EJECT ,                                                        00820000
+         $TASK DSECT=YES          TASKMGR PLIST                         00830000
+                                                                        00840000
+         EJECT ,                                                        00850000
+         $PROC DSECT=YES          TASKMGR PLIST                         00860000
+                                                                        00870000
+         EJECT ,                                                        00880000
+         $RESMGR DSECT=YES        RESOURCE MANAGER PLIST                00890000
+                                                                        00900000
+         EJECT ,                                                        00910000
+         $WUSTAT DSECT=YES        WORKUNIT STATUS  PLIST                00920000
+                                                                        00930000
+         EJECT ,                                                        00940000
+         @EPB  TYPE=DSECT         EVENT PROCESS BLOCK                   00950000
+                                                                        00960000
+         EJECT ,                                                        00970000
+         XEPB  ,                  EXTENTED EPB                          00980000
+                                                                        00990000
+         EJECT ,                                                        01000000
+         $QLOCK ,                 LOCK QUEUE ENTRY AND STATUS BLOCK     01010000
+                                                                        01020000
+         EJECT ,                                                        01030000
+         $TIMER DSECT=YES         $TIMER REQUESTS                       01040000
+                                                                        01050000
+         EJECT ,                                                        01060000
+         ABCODES ,                ABEND CODES                           01070000
+*                                                                       01080000
+         EVCODES ,                EVENT CODES                           01090000
+*                                                                       01100000
+         TRACODES ,               TRACE EVENT CODES                     01110000
+*                                                                       01120000
+         EQUS  ,                  GENERAL EQUATES                       01130000
+                                                                        01140000
+         $MSGDFT PREFIX=ICTPID,COMPID='TSK',TABLE=*#MSGS,              +01150000
+               PRINT=NOGEN,MF=(E,WRK256)                                01160000
+                                                                        01170000
+         EJECT ,                                                        01180000
+*---------------------------------------------------------------        01190000
+*  READ/WRITE WORKAREA                                                  01200000
+*---------------------------------------------------------------        01210000
+WORKAREA #WORK ,                  READ / WRITE WORKAREA                 01220000
+WRK256   DS    XL256              GENERAL WORKAREA                      01230000
+REGSAVE  DS    16F                REGISTER SAVE AREA                    01240000
+                                                                        01250000
+FLAGS    DS    X                  CONTROL FLAGS                         01260000
+$LOCKED  EQU   X'80'                DISP LOCK ACQUIRED                  01270000
+$XEPBDEL EQU   X'40'                XEPBS LOGICALLY DELETED             01280000
+                                                                        01290000
+$TASKMFL $TASK   MF=(L,*)         $TASK   PLIST CONSTRUCTION AREA       01300000
+$WST_MFL $WUSTAT MF=(L,*)         $WUSTAT PLIST CONSTRUCTION AREA       01310000
+$TMR_MFL $TIMER  MF=(L,*)         $TIMER  PLIST CONSTRUCTION AREA       01320000
+WORKLEN  #ENDWORK ,               END OF WORKAREA                       01330000
+                                                                        01340000
+                                                                        01350000
+         EJECT ,                                                        01360000
+IPRCEPLG CSECT ,                                                        01370000
+         LR    R12,R14            ENTRY ADDRESS                         01380000
+         USING IPRCEPLG,R12       ESTABLISH ADDRESSABILITY              01390000
+         USING ITASK,R10          ESTABLISH ADDRESSABILITY              01400000
+         USING ICVT,R11           ESTABLISH ADDRESSABILITY              01410000
+                                                                        01420000
+         @CPYRYT ,                COPYRIGHT                             01430000
+                                                                        01440000
+         LR    R3,R15             PRESERVE PROCESS RETURN CODE          01450000
+         LA    R13,TSKDSPSA       ADDR OF DISPATCHER SAVEAREA           01460000
+                                                                        01470000
+         ICM   R9,15,TSKPCBC      ADDRESS OF COMPLETING IPCB            01480000
+         BZ    ABN_NPCB           NO PCB AVAILABLE                      01490000
+         USING IPCB,R9            ADDRESSABILITY                        01500000
+                                                                        01510000
+         OI    PCBFLGS2,PCB2$TRM  MARK PROCESS IN TERMINATION STATUS    01520000
+                                                                        01530000
+*-------------------------------------------------------------          01540000
+*  ALLOCATE WORKAREA FOR ITASK                                          01550000
+*-------------------------------------------------------------          01560000
+         $GETSTOR WORKLEN,OWNER=ITASK                                   01570000
+         LR    R13,R1             ADDRESS OF WORKAREA                   01580000
+         USING WORKAREA,R13       ADDRESSABILITY                        01590000
+                                                                        01600000
+         ST    R13,PCBFSA+8       FORWARD SAVE AREA CHAIN        159456 01610000
+         MVC   WAPGMNM,=CL8'IPRCEPLG'                            159456 01620000
+         ST    R12,WAPGMEPA                                      159456 01630000
+                                                                        01640000
+         EJECT ,                                                        01650000
+*-------------------------------------------------------------          01660000
+* RELEASE ANY LOCKS HELD BY, OR PENDING FOR, THIS WORKUNIT              01670000
+*-------------------------------------------------------------          01680000
+RELLOCKS DS    0H                                                       01690000
+         L     R6,PCBSERQ         LOCATE LOCK REQUEST / ENQUEUE FORMAT  01700000
+         USING QLOCK,R6           MAPPED                                01710000
+         TM    QLOFLAGS,QLOFINQ   PENDING SOME LOCK?                    01720000
+         BNO   REL_FREE           SKIP IF NOT                           01730000
+         OI    QLOFLAGS,QLOFCNCL  INDICATE CANCELATION OF REQUEST       01740000
+         L     R2,QLOLOCK         LOCK WORKUNIT IS CONTENDING FOR       01750000
+                                                                        01760000
+         $SER  REQUEUE,           REMOVE WORKUNIT'S PENDING REQIEST    +01770000
+               QLOCK=QLOCK,                                            +01780000
+               LOCKPTR=(R2)                                             01790000
+                                                                        01800000
+REL_FREE DS    0H                                                       01810000
+         SR    R1,R1              RELEASE LOCKS OWNED BY WORKUNIT       01820000
+                                                                        01830000
+         @CALL ISERFREE,          RELEASE ALL LOCKS                    +01840000
+               CTYPE=CVT,         SYSTEM LINKAGE                       +01850000
+               WKA=0                                                    01860000
+                                                                        01870000
+         DROP  R6                 QLOCK                                 01880000
+                                                                        01890000
+*-------------------------------------------------------------          01900000
+* POST WORKUNIT TERMINATION IN PROGRESS                                 01910000
+*-------------------------------------------------------------          01920000
+         $WUSTAT TERM,WU=(R9),WKA=WRK256,MF=(E,$WST_MFL)                01930000
+                                                                        01940000
+*-------------------------------------------------------------          01950000
+* TERMINATE ACTIVE $TIMERS IF ANY                                       01960000
+*-------------------------------------------------------------          01970000
+         TM     PCBWUFLG,PCBWUFLG_TIMERSET                              01980000
+         BNO    NOTIMERS                                                01990000
+                                                                        02000000
+         $TIMER TERM,MF=(E,$TMR_MFL)                                    02010000
+                                                                        02020000
+NOTIMERS DS     0H                                                      02030000
+                                                                        02040000
+         EJECT ,                                                        02050000
+***************************************************************         02060000
+*                                                                       02070000
+* If the terminating process is the $$MAIN$$ process associated         02080000
+* with the task and if there are active subtasks, then mark the         02090000
+* subtask as draining and post the task dispatcher EPB to               02100000
+* notify the task of termination.  Initialize the subtask_end           02110000
+* EPB and wait for all subtask to complete.  The subtask_end            02120000
+* EPB will be posted by ITSKTERM (Async EPB RTN) when all               02130000
+* subtasks have terminated.  The notification of task                   02140000
+* termination must be performed under control of the dispatcher         02150000
+* lock.                                                                 02160000
+*                                                                       02170000
+***************************************************************         02180000
+TTRMSUBQ DS    0H                                                       02190000
+         C     R9,TSKPCB$M        IS THIS $$MAIN$$ TERMINATING          02200000
+         BNE   PTRMSUBQ           NO,  TERMINATE SUBORDINATE PCBS       02210000
+                                                                        02220000
+         BAS   R14,GETLOCK        ACQUIRE DISPATCHER LOCK               02230000
+         BNZ   ABN_LOCK           ERROR IF NOT ACQUIRED                 02240000
+                                                                        02250000
+         LA    R7,TSKSUBQ         ADDRESS OF SUBTASK QUEUE HDR          02260000
+         SH    R7,=AL2(TSKSIBL-ITASK) SUBTRACT OFFSET TO SIBLING LINK   02270000
+S        USING ITASK,R7           SUBTASK ADDRESSABILITY                02280000
+                                                                        02290000
+TTRMNEXT DS    0H                                                       02300000
+         ICM   R7,15,S.TSKSIBL    ADDRESS OF NEXT SUBTASK (SIBLING)     02310000
+         BZ    TTRMWAIT           RELEASE DISP LOCK,  AWAIT TERM        02320000
+         TM    S.TSKFLGS,TSK$TERM TASK HAS TERMINATED                   02330000
+         BO    TTRMNEXT           YES, PROCESS NEXT SUBTASK             02340000
+                                                                        02350000
+         OI    S.TSKFLGS2,TSK2$DRN MARK SUBTASK AS DRAINING             02360000
+         $MSG  011,FIELDS=(S.TSKNAME)                                   02370000
+                                                                        02380000
+         $TASK POST,EPB=S.TSKDEPB,MF=(E,$TASKMFL)                       02390000
+                                                                        02400000
+         B     TTRMNEXT           PROCESS NEXT SUBTASK                  02410000
+         DROP  S                  SUBTASK ITASK                         02420000
+                                                                        02430000
+*--------------------------------------------------------------         02440000
+*  If subtasks exists,  initialize the SUBTASK-END EPB.  Release        02450000
+*  the dispatcher lock and wait for termination of all subtasks.        02460000
+*--------------------------------------------------------------         02470000
+TTRMWAIT DS    0H                                                       02480000
+         ICM   R2,15,TSKSUBQ      ANY SUBTASKS REMAINING                02490000
+         BZ    TTRMUNLK           NO, CONTINUE WITH TASK TERM           02500000
+         $TASK SETEPB,ECODE=EC$STASK_END,SCOPE=LOCAL,MF=(E,$TASKMFL)    02510000
+         ST    R1,TSKEEPB@        SAVE SUBTASK ENDED EPB ADDR           02520000
+                                                                        02530000
+TTRMUNLK DS    0H                                                       02540000
+         BAS   R14,RELLOCK        RELEASE DISPATCHER LOCK               02550000
+         LTR   R2,R2              WAIT FOR SUBTASK TO COMPL             02560000
+         BZ    PTRMSUBQ           NO, CONTINUE WITH PROC CLEANUP        02570000
+                                                                        02580000
+TTRMWAIL DS    0H                                                       02590000
+         $TASK WAIT,MF=(E,$TASKMFL)  WAIT FOR ALL SUBTASK TO TERM       02600000
+         C     R15,=A(EC$STASK_END)  ALL SUBTASKS ENDED?                02610000
+         BNE   TTRMWAIL              NO,  CONTINUE WAITING              02620000
+                                                                        02630000
+         EJECT ,                                                        02640000
+**************************************************************          02650000
+*                                                                       02660000
+* If children PCBs are still active,  mark child PCBs as                02670000
+* draining and wait until they have all terminated.                     02680000
+* If a child process does not have a TERMEPB specified,  then           02690000
+* initialize an XEPB to be posted at termination of the child           02700000
+* process.  When all child PCBs have completed,  termination            02710000
+* of this PCB will continue.                                            02720000
+*                                                                       02730000
+**************************************************************          02740000
+PTRMSUBQ DS    0H                                                       02750000
+         ICM   R0,15,PCBPCBQ      CHILD PCBS STILL ACTIVE?              02760000
+         BZ    PRC_TRAC           NO, CONTINUE WITH PROCESS TERM        02770000
+                                                                        02780000
+         BAS   R14,GETLOCK        OBTAIN DISPATCHER LOCK                02790000
+         BNZ   ABN_LOCK           ERROR IF NOT ACQUIRED                 02800000
+                                                                        02810000
+         LA    R7,PCBPCBQ         ORIGIN OF PCB CHILD QUEUE HEADER      02820000
+         SH    R7,=AL2(PCBSIBL-IPCB)  SUBTRACT OFFSET TO SIBLING LINK   02830000
+S        USING IPCB,R7            SUBORDINANT PCB ADDRESSABILITY        02840000
+                                                                        02850000
+PTRMNEXT DS    0H                                                       02860000
+         ICM   R7,15,S.PCBSIBL     ADDRESS OF NEXT SUBORDINANT PCB      02870000
+         BZ    PTRMRELK            END OF SUB PCB LIST, AWAIT TERM      02880000
+         TM    S.PCBFLGS2,PCB2$TRM IS PCB IN TERMINATION STATUS?        02890000
+         BO    PTRMTEPB            YES,  ALLOC TERM EPB IF REQUIRED     02900000
+                                                                        02910000
+         OI    S.PCBFLGS2,PCB2$DRN MARK SUB PCB AS DRAINING             02920000
+                                                                        02930000
+         @CALL ITSKDPNQ,(TSKDISPQ,S.IPCB),CTYPE=CVT,             159456+02940000
+               MF=(E,MFE_LIST)                                   159456 02950000
+                                                                        02960000
+         $MSG  010,FIELDS=(TSKNAME,S.PCBNAME)                           02970000
+                                                                        02980000
+         $TRACE TRC_PROCFLSH,4*4   FORMAT TRACE ENTRY FOR PCB FLUSH     02990000
+         BNZ   NO_TRC1             TRACE NOT ACTIVE                     03000000
+         ST    R7,0(,R1)                                                03010000
+         MVC   8(L'PCBNAME,R1),S.PCBNAME                                03020000
+NO_TRC1  DS    0H                                                       03030000
+                                                                        03040000
+*-------------------------------------------------------------          03050000
+* INITIALIZE TERMEPB FOR SUB PROCESS IF NOT PREV SPECIFIED              03060000
+*-------------------------------------------------------------          03070000
+PTRMTEPB DS    0H                                                       03080000
+         ICM   R0,15,S.PCBTEPB    TERMEPB ALREADY DEFINED               03090000
+         BNZ   PTRMNEXT           YES, PROCESS NEXT PCB                 03100000
+                                                                        03110000
+         $TASK SETEPB,ECODE=EC$TERM_PROC,SCOPE=LOCAL,MF=(E,$TASKMFL)    03120000
+         ST    R1,S.PCBTEPB       SET TERMEPB ADDRESS                   03130000
+         B     PTRMNEXT           PROCESS NEXT CHILD PROCESS            03140000
+                                                                        03150000
+*-------------------------------------------------------------          03160000
+* WAIT FOR COMPLETION OF ALL SUBORDINANT PROCESSES                      03170000
+*-------------------------------------------------------------          03180000
+PTRMRELK DS    0H                                                       03190000
+         BAS   R14,RELLOCK        RELEASE DISPATCHER LOCK               03200000
+                                                                        03210000
+PTRMWAIT DS    0H                                                       03220000
+         ICM   R0,15,PCBPCBQ      ALL SUB PCBS TERMINATED?              03230000
+         BZ    PRC_TRAC           YES, TRACE PROCESS TERMINATION        03240000
+                                                                        03250000
+         $TASK WAIT,MF=(E,$TASKMFL)  WAIT FOR PROCESS TERMINATION       03260000
+         B     PTRMWAIT           CHECK OF ALL PCBS HAVE ENDED          03270000
+                                                                        03280000
+         EJECT ,                                                        03290000
+*-------------------------------------------------------------          03300000
+* TRACE PROCESS TERMINATION                                             03310000
+*-------------------------------------------------------------          03320000
+PRC_TRAC DS    0H                                                       03330000
+         $TRACE TRC_PROCRETN,4*4                                        03340000
+         BNZ   RESMNGRS           TRACE NOT ACTIVE                      03350000
+         ST    R15,0(,R1)         PROCESS RETURN CODE                   03360000
+         ST    R0,4(,R1)          PROCESS REASON CODE                   03370000
+         MVC   8(L'PCBNAME,R1),PCBNAME    PROCESS NAME                  03380000
+                                                                        03390000
+*-------------------------------------------------------------          03400000
+* CALL RESOURCE MANAGER EXIT ROUTINES                                   03410000
+*-------------------------------------------------------------          03420000
+RESMNGRS DS    0H                                                       03430000
+         $RESMGR CALL,OWNER=IPCB,MF=(E,MFE_LIST)                        03440000
+                                                                        03450000
+         EJECT ,                                                        03460000
+*-------------------------------------------------------------          03470000
+* RUN REMAIN PROCESS TERMINATION PROCESSING AS TASKMGR                  03480000
+*-------------------------------------------------------------          03490000
+         $TRACE TRC_PROCEND,4*4   FORMAT TRACE ENTRY FOR PCB ENDING     03500000
+         BNZ   NO_TRC2            TRACE NOT ACTIVE                      03510000
+         MVC   0(L'PCBNAME,R1),PCBNAME                                  03520000
+NO_TRC2  DS    0H                                                       03530000
+                                                                        03540000
+         XC    TSKPCBC,TSKPCBC    PCB NO LONGER ACTIVE                  03550000
+         OI    PCBFLGS2,PCB2$END  PROCESS TERMINATED                    03560000
+                                                                        03570000
+         EJECT ,                                                        03580000
+**************************************************************** 215477 03590000
+*                                                                215477 03600000
+*  Extended EPBs (XEPBs) are system managed EPBs that are        215477 03610000
+*  allocated and release when both responsible parties of the    215477 03620000
+*  EPB have either terminated or posted the EPB.  XEPBs are      215477 03630000
+*  connect to both the requesting and processing ITASK to enable 215477 03640000
+*  recovery of the resource and notification of premature        215477 03650000
+*  termination.  If both the requesting and processing workunits 215477 03660000
+*  are within the same ITASK,  the PCB is only chained from      215477 03670000
+*  requesting PCB queue.                                         215477 03680000
+*                                                                215477 03690000
+*  When a request is made to allocate an XEPB or assign posting  215477 03700000
+*  responsibility to an XEPB, the workunit XEPB use count is     215477 03710000
+*  incremented.  When a post or dispatch of an XEPB is           215477 03720000
+*  performed, the count is decremented.  If the use count is     215477 03730000
+*  currently zero,  no XEPB termination processing is required   215477 03740000
+*  for this workunit.                                            215477 03750000
+*                                                                215477 03760000
+**************************************************************** 215477 03770000
+         ICM   R0,15,PCBXUSEC     XEPB USE COUNT > 0             215477 03780000
+         BZ    PTRMXEND           NO,  SKIP XEPB SCAN            215477 03790000
+                                                                        03800000
+         BAS   R14,GETLOCK        ACQUIRE DISP LOCK              215477 03810000
+         BNZ   ABN_LOCK           LOCK FAILURE                   215477 03820000
+                                                                        03830000
+*--------------------------------------------------------------- 215477 03840000
+*  Run the XEPB processor queue for the ITASK and post any XEPBs 215477 03850000
+*  that the terminating workunit is responisible for processing. 215477 03860000
+*  If the requesting task is already terminated,  simply delete  215477 03870000
+*  the ITASK from the processing tasks XEPB queue, otherwise     215477 03880000
+*  remove this XEPB from the ITASKs XEPB processing queue.       215477 03890000
+*--------------------------------------------------------------- 215477 03900000
+         LA    R4,TSKXEPQP        ADDRESS OF XEPB PROCESSOR QUEUE215477 03910000
+         SH    R4,=AL2(XEPBPNXT-XEPB)                            215477 03920000
+Q        USING XEPB,R4            ADDRESSABILITY TO EXTENDED EPB 215477 03930000
+                                                                        03940000
+PQNEXT   DS    0H                                                215477 03950000
+         ICM   R4,15,Q.XEPBPNXT   ADDR OF NEXT XEPB ON PQUEUE    215477 03960000
+         BZ    PQEND              END OF PROCESSOR XEPB QUEUE    215477 03970000
+         C     R9,Q.XEPBPPCB      RESPONSIBLE FOR POSTING?       215477 03980000
+         BNE   PQNEXT             NO, CONTINUE                   215477 03990000
+                                                                        04000000
+         LR    R3,R4              COPY XEPB ADDRESS              215477 04010000
+         USING XEPB,R3            ADDRESSIBILITY XEPB            215477 04020000
+STD      USING EPB,R3             ADDRESSABILITY (STANDARD EPB)  215477 04030000
+                                                                        04040000
+         TM    XEPBFLGS,XEPB$RAB  HAS REQUESTOR TERMINATED?      215477 04050000
+         BO    PQDELETE           YES, DELETE XEPB               215477 04060000
+         LA    R1,STD.EPBECB      ASSUME LOCAL ECB               215477 04070000
+         TM    STD.EPBFLGS,EPB$RMT    REMOTE ECB?                215477 04080000
+         BZ    *+8                NO, CHECK IF POSTED            215477 04090000
+         L     R1,0(,R1)          RETRIEVE REMOTE ECB ADDRESS    215477 04100000
+         TM    0(R1),X'40'        HAS ECB BEEN POSTED?           215477 04110000
+         BO    PQREMOVE           YES, REMOVE FROM PQUEUE        215477 04120000
+                                                                        04130000
+         OI    XEPBFLGS,XEPB$PAB  PROCESSOR ENDED                215477 04140000
+         $TASK POST,PCODE=$$TERM,EPB=XEPB,MF=(E,$TASKMFL)        215477 04150000
+                                                                        04160000
+PQREMOVE DS    0H                                                215477 04170000
+         L     R4,Q.XEPBPPRV      ADDRESS OF PREVIOUS XEPB       215477 04180000
+         $XEPB REMOVE,XEPB=(R3),QTYPE=P,QHDR=TSKXEPQP            215477 04190000
+         B     PQNEXT             PROCESS NEXT XEPB              215477 04200000
+                                                                        04210000
+PQDELETE DS    0H                                                215477 04220000
+         OI    FLAGS,$XEPBDEL     XEPBS MARKED AS DELETED        215477 04230000
+         $XEPB LDELETE,XEPB=(R3)  MARK XEPB AS DELETED           215477 04240000
+         B     PQNEXT             PROCESS NEXT XEPB              215477 04250000
+                                                                        04260000
+PQEND    DS    0H                                                215477 04270000
+         DROP  R3,STD,Q           XEPB, EPB                      215477 04280000
+                                                                        04290000
+         EJECT ,                                                        04300000
+*--------------------------------------------------------------- 215477 04310000
+*  Run the XEPB requestor queue for the ITASK and mark the XEPBs 215477 04320000
+*  as flushed accordingly.  If the EPB has already been posted   215477 04330000
+*  or no processing workunit has been assigned then delete the   215477 04340000
+*  XEPB.  If the XEPB has not yet been posted,  simply remove    215477 04350000
+*  the XEPB from the requestor queue, the posting task will be   215477 04360000
+*  responsible for deleting.  If the terminating workunit is the 215477 04370000
+*  processor of an XEPB within the same ITASK, the XEPB is only  215477 04380000
+*  queued to the XEPB requestor queue, the XEPB will be posted   215477 04390000
+*  and processed the same as in processor queue logic.  If the   215477 04400000
+*  requestor is already deleted,  the XEPB will be deleted.      215477 04410000
+*--------------------------------------------------------------- 215477 04420000
+         LA    R4,TSKXEPQR        ADDR OF XEPB REQUESTOR QUEUE   215477 04430000
+         SH    R4,=AL2(XEPBRNXT-XEPB)                            215477 04440000
+Q        USING XEPB,R4            ADDRESSABILITY TO EXTENDED EPB 215477 04450000
+                                                                        04460000
+RQNEXT   DS    0H                                                215477 04470000
+         ICM   R4,15,Q.XEPBRNXT   ADDR OF NEXT XEPB ON PQUEUE    215477 04480000
+         BZ    RQEND              END OF REQUESTOR XEPB QUEUE    215477 04490000
+                                                                        04500000
+         LR    R3,R4              COPY XEPB ADDRESS              215477 04510000
+         USING XEPB,R3            ADDRESSIBILITY XEPB            215477 04520000
+STD      USING EPB,R3             ADDRESSABILITY (STANDARD EPB)  215477 04530000
+                                                                        04540000
+         C     R9,STD.EPBWU@      EPB REQUESTOR TERMINATING      215477 04550000
+         BE    RQREQ              YES, MARK AS TERMINATED        215477 04560000
+         C     R9,Q.XEPBPPCB      RESPONSIBLE FOR POSTING?       215477 04570000
+         BNE   RQNEXT             NO, CONTINUE                   215477 04580000
+                                                                        04590000
+RQPROC   DS    0H                                                215477 04600000
+         TM    XEPBFLGS,XEPB$RAB  HAS REQUESTOR TERMINATED?      215477 04610000
+         BO    RQDELETE           YES, DELETE XEPB               215477 04620000
+         LA    R1,STD.EPBECB      ASSUME LOCAL ECB               215477 04630000
+         TM    STD.EPBFLGS,EPB$RMT    REMOTE ECB?                215477 04640000
+         BZ    *+8                NO, CHECK IF POSTED            215477 04650000
+         L     R1,0(,R1)          RETRIEVE REMOTE ECB ADDRESS    215477 04660000
+         TM    0(R1),X'40'        HAS ECB BEEN POSTED?           215477 04670000
+         BO    RQNEXT             YES, REMOVE FROM PQUEUE        215477 04680000
+                                                                        04690000
+         OI    XEPBFLGS,XEPB$PAB  PROCESSOR ENDED                215477 04700000
+         $TASK POST,PCODE=$$TERM,EPB=XEPB,MF=(E,$TASKMFL)        215477 04710000
+         B     RQNEXT             PROCESS NEXT XEPB              215477 04720000
+                                                                        04730000
+RQREQ    DS    0H                                                215477 04740000
+         OI    STD.EPBFLGS,EPB$FLSH   MARK EPB AS FLUSHED        215477 04750000
+         OI    XEPBFLGS,XEPB$RAB  REQUESTOR ENDED                215477 04760000
+                                                                        04770000
+         LA    R1,STD.EPBECB      ASSUME LOCAL ECB               215477 04780000
+         TM    STD.EPBFLGS,EPB$RMT    REMOTE ECB?                215477 04790000
+         BZ    *+8                NO, CHECK IF POSTED            215477 04800000
+         L     R1,0(,R1)          RETRIEVE REMOTE ECB ADDRESS    215477 04810000
+         TM    0(R1),X'40'        HAS ECB BEEN POSTED?           215477 04820000
+         BO    RQDELETE           YES, MARK XEPB AS DELETED      215477 04830000
+         OC    XEPBPNXT(8),XEPBPNXT  OTHER TASK RESP TO POST?    215477 04840000
+         BNZ   RQREMOVE           UES, REMOVE FROM REQ QUEUE     215477 04850000
+         OC    XEPBPPCB,XEPBPPCB  OTHER PCB IN TASK WILL POST?   215477 04860000
+         BNZ   RQNEXT             YES, SKIP TO NEXT XEPB         215477 04870000
+                                                                        04880000
+RQDELETE DS    0H                                                215477 04890000
+         OI    FLAGS,$XEPBDEL     XEPBS MARKED AS DELETED        215477 04900000
+         $XEPB LDELETE,XEPB=(R3)  MARK XEPB AS DELETED           215477 04910000
+         B     RQREPB             WITHDRAW FROM EVENTS TABLE     215477 04920000
+                                                                        04930000
+RQREMOVE DS    0H                                                215477 04940000
+         L     R4,Q.XEPBPPRV      ADDRESS OF PREVIOUS XEPB       215477 04950000
+         $XEPB REMOVE,XEPB=(R3),QTYPE=R,QHDR=TSKXEPQR            215477 04960000
+                                                                        04970000
+RQREPB   DS    0H                                                215477 04980000
+         $TASK REMEPB,EPB=(R3),MF=(E,$TASKMFL)                   215477 04990000
+         B     RQNEXT             PROCESS NEXT XEPB              215477 05000000
+                                                                        05010000
+RQEND    DS    0H                                                215477 05020000
+         DROP  R3,STD,Q           XEPB, EPB                      215477 05030000
+                                                                        05040000
+*--------------------------------------------------------------- 215477 05050000
+*  If XEPBs have been marked for logical deletion,  then call    215477 05060000
+*  the XEPB service to remove and phyically delete the logically 215477 05070000
+*  deleted XEPBs.                                                215477 05080000
+*--------------------------------------------------------------- 215477 05090000
+         TM    FLAGS,$XEPBDEL     ANY XEPBS POSTED FOR DELETION  215477 05100000
+         BZ    PTRMXEND           NO, skip xepb free             215477 05110000
+                                                                        05120000
+         $XEPB FREE,WKA=WRK256    FREE DELETED XEPBS             215477 05130000
+                                                                        05140000
+PTRMXEND DS    0H                                                       05150000
+                                                                        05160000
+         EJECT ,                                                        05170000
+*-------------------------------------------------------------          05180000
+*  POST SYNC EPB WITH RETURN CODE IF SYNC=YES HAS NOT BEEN POSTED       05190000
+*-------------------------------------------------------------          05200000
+         TM    TSKFLGS,TSK$SYNC   TASK SYNC REQUIRED                    05210000
+         BZ    PROCNSYN           NO, DELETE PROCESS                    05220000
+         NI    TSKFLGS,FF-TSK$SYNC RESET SYNC FLAG                      05230000
+                                                                        05240000
+         $TASK POST,              POST TASK SYNC EPB                   +05250000
+               EPB=*TSKSEPB@,                                          +05260000
+               PCODE=(R3),                                             +05270000
+               MF=(E,TSKT_MFL)                                          05280000
+                                                                        05290000
+PROCNSYN DS    0H                                                       05300000
+                                                                        05310000
+*-------------------------------------------------------------          05320000
+*  OBTAIN TERMINATION EPB ADDRESS AND COMPLETION STATUS                 05330000
+*-------------------------------------------------------------          05340000
+         ICM   R4,15,PCBTEPB      FETCH TERMINATION EPB PTR             05350000
+         BZ    PROC_DEL           NO TERMINATION EPB                    05360000
+                                                                        05370000
+         LR    R5,R3              USUALLY POST CODE IS RETCODE          05380000
+         TM    PCBFLGS,PCB$ABE    PROCESS FAILED?                       05390000
+         BNO   PROC_DEL           SKIP IF NOT                           05400000
+         LA    R5,$$ABEND         ELSE INDICATE ABEND                   05410000
+                                                                        05420000
+*-------------------------------------------------------------          05430000
+*  DELETE PROCESS                                                       05440000
+*-------------------------------------------------------------          05450000
+PROC_DEL DS    0H                                                       05460000
+         $TRACE TRC_PROCDEL,4*4   FORMAT TRACE ENTRY FOR PCB ENDING     05470000
+         BNZ   NO_TRC3            TRACE NOT ACTIVE                      05480000
+         ST    R9,0(,R1)                                                05490000
+         MVC   8(L'PCBNAME,R1),PCBNAME                                  05500000
+NO_TRC3  DS    0H                                                       05510000
+                                                                        05520000
+         $PROC DELETE,            DELETE ACTIVE PROCESS                +05530000
+               PCB=(R9),                                               +05540000
+               WORKA=*TSK@WRKA,                                        +05550000
+               MF=(E,TSKP_MFL)                                          05560000
+                                                                        05570000
+         BAS   R14,RELLOCK        RELEASE DISPATCHER LOCK        215477 05580000
+                                                                        05590000
+*-------------------------------------------------------------          05600000
+*  POST TERMINATION EPB IF REQUIRED                                     05610000
+*-------------------------------------------------------------          05620000
+         LTR   R4,R4              TERMEPB SPECIFIED                     05630000
+         BZ    PROCNTRM           NO, SKIP POST                         05640000
+                                                                        05650000
+         $TASK POST,              POST TERMINATION EPB                 +05660000
+               EPB=(R4),                                               +05670000
+               PCODE=(R5),                                             +05680000
+               MF=(E,TSKT_MFL)                                          05690000
+PROCNTRM DS    0H                                                       05700000
+                                                                        05710000
+                                                                        05720000
+         EJECT ,                                                        05730000
+*-------------------------------------------------------------          05740000
+*  RELEASE WORKAREA                                                     05750000
+*-------------------------------------------------------------          05760000
+         $RETSTOR (R13),OWNER=ITASK                                     05770000
+                                                                        05780000
+         LA    R13,TSKDSPSA       TASK DISPATCHER SAVEAREA              05790000
+                                                                        05800000
+*-------------------------------------------------------------          05810000
+*  CALL TASK/PROCESS DISPATCHER                                         05820000
+*-------------------------------------------------------------          05830000
+         $TASK CALLDSP,           CALL TASK/PROCESS DISPATCHER         +05840000
+               WORKA=*TSK@WRKA,                                        +05850000
+               MF=(E,TSKT_MFL)                                          05860000
+                                                                        05870000
+         EJECT ,                                                        05880000
+****************************************************************        05890000
+*                                                                       05900000
+*  Routine: GETLOCK - Acquire DISP lock                                 05910000
+*                                                                       05920000
+****************************************************************        05930000
+GETLOCK  DS    0H                                                       05940000
+         STM   R0,R15,REGSAVE     SAVE CALLERS REGISTERS                05950000
+                                                                        05960000
+         TM    FLAGS,$LOCKED      LOCK ALREADY ACQUIRED                 05970000
+         BO    GETL_HAV           ALREADY OWNED                         05980000
+                                                                        05990000
+         $SER  OBTAIN,DISP        REQUEST SERIALIZATION                 06000000
+         B     *+4(R15)           BRANCH ON LOCK RETURN CODE            06010000
+         B     GETL_OBT           0 - LOCK OBTAINED                     06020000
+         B     GETL_HAV           4 - LOCK ALREADY OWNED                06030000
+         B     GETL_ERR           8 - UNABLE TO ACQUIRE LOCK            06040000
+                                                                        06050000
+GETL_OBT DS    0H                                                       06060000
+         OI    FLAGS,$LOCKED      LOCK OBTAINED                         06070000
+                                                                        06080000
+GETL_HAV DS    0H                                                       06090000
+         LA    R15,RC00           NORMAL COMPLETION                     06100000
+         B     GETL_RET           RETURN                                06110000
+                                                                        06120000
+GETL_ERR DS    0H                                                       06130000
+         LA    R15,RC08           UNABLE TO ACQUIRE LOCK                06140000
+                                                                        06150000
+GETL_RET DS    0H                                                       06160000
+         LM    R0,R14,REGSAVE     RESTORE CALLERS REGISTERS             06170000
+         LTR   R15,R15            SET CONDITION CODE                    06180000
+         BR    R14                RETURN                                06190000
+                                                                        06200000
+         EJECT ,                                                        06210000
+****************************************************************        06220000
+*                                                                       06230000
+*  Routine: RELLOCK - Release DISP lock                                 06240000
+*                                                                       06250000
+****************************************************************        06260000
+RELLOCK  DS    0H                                                       06270000
+         STM   R0,R15,REGSAVE     SAVE CALLERS REGISTERS                06280000
+                                                                        06290000
+         TM    FLAGS,$LOCKED      SERIALIZATION ACQUIRED?               06300000
+         BZ    RELL_RET           NO, RETURN                            06310000
+         NI    FLAGS,FF-$LOCKED   SERIALIZATION RELEASED                06320000
+                                                                        06330000
+         $SER  RELEASE,DISP       RELEASE SERIALIZATION                 06340000
+                                                                        06350000
+RELL_RET DS    0H                                                       06360000
+         LM    R0,R15,REGSAVE     RESTORE CALLERS REGISTERS             06370000
+         BR    R14                RETURN                                06380000
+                                                                        06390000
+                                                                        06400000
+         EJECT ,                                                        06410000
+**************************************************************          06420000
+*                                                                       06430000
+*  CATASTROPHIC ERROR                                                   06440000
+*                                                                       06450000
+**************************************************************          06460000
+ABN_NPCB DS    0H                                                       06470000
+         $ABEND ABE_NOPCB,                                             +06480000
+               SCOPE=ITASK,                                            +06490000
+               TITLE='NO PCB CURRENTLY ACTIVE'                          06500000
+                                                                        06510000
+ABN_LOCK DS    0H                                                       06520000
+         $ABEND ABE_DISPLOCK,                                          +06530000
+               SCOPE=ITASK,                                            +06540000
+               TITLE='UNABLE TO ACQUIRE DISP LOCK'                      06550000
+                                                                        06560000
+         EJECT ,                                                        06570000
+**************************************************************          06580000
+*                                                                       06590000
+*  CONSTANTS AND LITERALS                                               06600000
+*                                                                       06610000
+**************************************************************          06620000
+         LTORG ,                                                        06630000
+                                                                        06640000
+         FRCA  ,                                                        06650000
+         @CB   WORKUNIT=YES                                             06660000
+         PRINT NOGEN                                                    06670000
+         ICVT  ,                                                        06680000
+         ITASK ,                                                        06690000
+         IPCB  ,                                                        06700000
+         END   ,                                                        06710000
