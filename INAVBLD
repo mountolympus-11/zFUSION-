@@ -1,0 +1,560 @@
+INAVBLD  TITLE '- CONSTRUCT/REFRESH PROJECT NAVIGATION STRUCTURES'      00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE: INAVBLD - construct/refresh project nav structures           00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This routine controls the initial construction and rebuild         00080000
+*    of the navigation structures associated with a project.            00090000
+*    The component structures identified by the request type            00100000
+*    will be constructed if they do not currently exist or if           00110000
+*    maintenance has occurred to the catalog tables supporting          00120000
+*    these data structures.  If changes have occurred to the            00130000
+*    catalog,  all existing data structures will be destroyed           00140000
+*    and rebuilt.                                                       00150000
+*                                                                       00160000
+*                                                                       00170000
+* NOTES:                                                                00180000
+*                                                                       00190000
+*    Construction of these data structures is performed under           00200000
+*    control of the IPROJ multi-instance lock.                          00210000
+*                                                                       00220000
+*                                                                       00230000
+* ON ENTRY:                                                             00240000
+*                                                                       00250000
+*    R1 contains the address of the parameter list constructed          00260000
+*       by the $NAVBLD macro as follows:                                00270000
+*                                                                       00280000
+*        +00 - F'1' - build / refresh rgnnet                            00290000
+*              F'2' - build / refresh state transition network          00300000
+*                                                                       00310000
+* ON EXIT:                                                              00320000
+*                                                                       00330000
+*    R15 contains one of the following return codes:                    00340000
+*                                                                       00350000
+*        RC00  - component successfully constructed                     00360000
+*                                                                       00370000
+*        RC08  - region net construction failure                        00380000
+*                                                                       00390000
+*                R0/R1 contain return/reason codes from INAVBRGN        00400000
+*                                                                       00410000
+*        RC12  - STN construction failure                               00420000
+*                                                                       00430000
+*                R0/R1 contain return/reason codes from INAVBSTN        00440000
+*                                                                       00450000
+*        RC16  - variable load failure                                  00460000
+*                                                                       00470000
+*                R0/R1 contain return/reason codes from INAVBVAR        00480000
+*                                                                       00490000
+*        RC20  - navigation network in error because of prior error     00500000
+*                                                                       00510000
+*                RSN04 - region net construction failed                 00520000
+*                RSN08 - STN construction failed                        00530000
+*                RSN12 - variable load failed                           00540000
+*                                                                       00550000
+*        RC24  - request failure                                        00560000
+*                                                                       00570000
+*                RSN04 - invalid component requested                    00580000
+*                                                                       00590000
+**<DOC-OFF>****************************************************         00600000
+                                                                        00610000
+         EJECT                                                          00620000
+***************************************************************         00630000
+*                                                                       00640000
+* MAINTENANCE:                                                          00650000
+*                                                                       00660000
+*    10/04/93 Ron colmone                                               00670000
+*             Initial version                                           00680000
+*                                                                       00690000
+*    08/01/95 R. Turgeon      Rel 2.0                                   00700000
+*             Reset project catalog table update mask bits upon         00710000
+*             rebuild of STN                                            00720000
+*                                                                       00730000
+*    08/31/95 R. Turgeon      Rel 2.1   - VDBCACHE, PLANCACHE           00740000
+*             Implement VDBCACHE and PLANCACHE.  If the                 00750000
+*             project catalog is updated requiring rebuild of           00760000
+*             the STN and associated structures, the VDB and            00770000
+*             plan caches are discarded.                                00780000
+*                                                                       00790000
+*             Reorganize so that IPROJ MIL is only acquired if          00800000
+*             intial / rebuild of structures is required.               00810000
+*                                                                       00820000
+*             Updated PREPPLAN PURGE operation.                         00830000
+*                                                                       00840000
+*    01/27/96 R. Turgeon      Rel 2.1                                   00850000
+*             Update IPROJ uniquifier any time its STN is               00860000
+*             built / updated allowing users of that structure          00870000
+*             to identify changes.                                      00880000
+*                                                                       00890000
+***************************************************************         00900000
+                                                                        00910000
+         EJECT                                                          00920000
+WORKAREA #WORK ,                                                        00930000
+                                                                        00940000
+COMP     DS    F                  $NAVBLD ARGUMENT                      00950000
+                                                                        00960000
+NAVCOMP  DS    X                  COMPONENTS REQUIRED FOR REQUEST       00970000
+$RGNNET  EQU   X'80'                 REGION NET REQUIRED                00980000
+$STNET   EQU   X'40'                 STATE TRANSITION NETWORK REQ       00990000
+$VARS    EQU   X'20'                 VARIABLE LOAD REQUIRED             01000000
+                                                                        01010000
+FLAGS    DS    X                  CONTROL FLAGS                         01020000
+F$LOCKAQ EQU   X'80'                 RUNNING UNDER IPROJ MIL LOCK       01030000
+F$LOCKH  EQU   X'40'                 IPROJ MIL LOCK ACQUIRED LOCALLY    01040000
+                                                                        01050000
+TARGETS  DS    X                  TARGETTED COMPONENTS, REF $NAVMNT     01060000
+                                                                        01070000
+RETSTAT  DS    0F                 RETURN/REASON CODES                   01080000
+RETCODE  DS    F                     RETURN CODE                        01090000
+RSNCODE  DS    F                     REASON CODE                        01100000
+INFCODE  DS    F                     INFO   CODE                        01110000
+                                                                        01120000
+WORKLEN  #ENDWORK ,               END OF WORKAREA                       01130000
+                                                                        01140000
+         EJECT                                                          01150000
+         NAV   ,                  STATE TRANSITION NETWORK MAPPINGS     01160000
+                                                                        01170000
+         EJECT                                                          01180000
+         PSB   ,                  PREPARED STATEMENT BLOCK              01190000
+                                                                        01200000
+         EJECT                                                          01210000
+         IPROJ ,                  PROJECT                               01220000
+                                                                        01230000
+         EJECT                                                          01240000
+         PREPPLAN EQUS            PREPARED STMT - PLAN INTERFACES       01250000
+                                                                        01260000
+         EJECT                                                          01270000
+         PREPSQL  EQUS            PREPARED STMT - SQL, TABLE INTERFACES 01280000
+                                                                        01290000
+         EJECT                                                          01300000
+         ABCODES ,                ABEND CODE EQUATES                    01310000
+                                                                        01320000
+         EJECT                                                          01330000
+         EQUS  ,                  GENERAL EQUATES                       01340000
+                                                                        01350000
+#POOLSZ  EQU   4*1024             DEFAULT STORAGE POOL BLKSIZE          01360000
+                                                                        01370000
+         EJECT                                                          01380000
+INAVBLD  #ENTER PREG=R8                                                 01390000
+                                                                        01400000
+         USING ITASK,R10          ITASK ADDRESSABILITY                  01410000
+                                                                        01420000
+***************************************************************         01430000
+*                                                                       01440000
+*   Initialization, identify request type and target IPROJ              01450000
+*                                                                       01460000
+***************************************************************         01470000
+                                                                        01480000
+         L     R9,TSKPCBC         ADDRESS OF CURRENT PCB                01490000
+         USING IPCB,R9            IPCB  ADDRESSABILITY                  01500000
+                                                                        01510000
+         L     R6,PCBUSER         ADDRESS OF CURRENT USER               01520000
+         USING IUSER,R6           TEMP ADDRESSABILITY                   01530000
+                                                                        01540000
+         L     R7,USRPROJ         LOCATE CURRENT PROJECT                01550000
+         USING IPROJ,R7           LIFE OF FUNCTION                      01560000
+                                                                        01570000
+         ICM   R1,15,0(R8)        REQUESTED COMPONENTS                  01580000
+         BZ    ERR_REQ            INVALID COMPONENT SPECIFIED           01590000
+         CH    R1,=AL2($NAVMNT#)  VALID REQUEST RANGE?                  01600000
+         BH    ERR_REQ            INVALID COMPONENT SPECIFIED           01610000
+         ST    R1,COMP            SAVE REQUESTED COMPONENT              01620000
+                                                                        01630000
+         EJECT                                                          01640000
+***************************************************************         01650000
+*                                                                       01660000
+*   Determine if navigation data structures are present. If             01670000
+*   not, continue with construction.  Otherwise determine if            01680000
+*   catalog maintenance has affected the requested data                 01690000
+*   structures requiring their refresh.                                 01700000
+*                                                                       01710000
+***************************************************************         01720000
+                                                                        01730000
+RECONSTR DS    0H                                                       01740000
+         L     R2,COMP            REQUESTED COMPONENT                   01750000
+         BCTR  R2,0               PREPARE FOR INSERT                    01760000
+         IC    R2,$NAVMNT(R2)     OBTAIN MAINT FLAG MASK WHICH ...      01770000
+         STC   R2,TARGETS         TARGETS SPECIFIC NAV COMPONENTS       01780000
+                                                                        01790000
+         TM    PRJMNTF1,*-*       CATALOG MAINTENANCE FLAG TEST         01800000
+         EX    R2,*-4             CATALOG MAINTENANCE OCCURRED?         01810000
+         BZ    INITIAL            NO, VERIFY IF COMPONENTS EXISTS       01820000
+                                                                        01830000
+         EJECT                                                          01840000
+***************************************************************         01850000
+*                                                                       01860000
+*   Teardown of nav structures is required, resolve contention          01870000
+*                                                                       01880000
+***************************************************************         01890000
+                                                                        01900000
+         BAS   R14,GETLOCK        LOCK THE IPROJ                        01910000
+                                                                        01920000
+         TM    PRJMNTF1,*-*       DETECT COLLISION                      01930000
+         EX    R2,*-4             HAS REBUILD ALREADY OCCURRED?         01940000
+         BZ    INITIAL            DONE HERE IF SO                       01950000
+                                                                        01960000
+         ICM   R0,15,PRJEXSTG     NAVIGATION DATA AREAS PRESENT?        01970000
+         BZ    INITIAL            NO, CONTINUE WITH BUILD               01980000
+                                                                        01990000
+         EJECT                                                          02000000
+***************************************************************         02010000
+*                                                                       02020000
+*   Any SQL statements that have been prepared under the prior          02030000
+*   version of the project may have plans associated with them.         02040000
+*   Because the plans and VDB definitions contain project store         02050000
+*   references, they too must be purged.  However, the PSB              02060000
+*   itself is retained and can be reloaded during subsequent            02070000
+*   SQL statement processing.                                           02080000
+*                                                                       02090000
+***************************************************************         02100000
+                                                                        02110000
+         PREPSQL  PURGE          DISCARD ALL VDB REFERENCES             02120000
+                                                                        02130000
+         PREPPLAN PURGE          DISCARD ALL ACCESS PLANS               02140000
+                                                                        02150000
+         EJECT                                                          02160000
+***************************************************************         02170000
+*                                                                       02180000
+*   STN rebuild is required because changes have been made to           02190000
+*   project catalog tables.  Delete the navigation storage pool         02200000
+*   containing the obsolete STN and reset the appropriate data          02210000
+*   area anchors.                                                       02220000
+*                                                                       02230000
+*   IVDBPURG is invoked to delete pending VDB table reference           02240000
+*   entries and the VDBCACHE.  Similarly, IPLNCLN is invoked to         02250000
+*   delete pending navigation plan reference entries and the            02260000
+*   PLANCACHE.  Updates to project catalog tables invalidate            02270000
+*   these versions.                                                     02280000
+*                                                                       02290000
+***************************************************************         02300000
+                                                                        02310000
+         LA    R1,IPROJ                                                 02320000
+         @CALL IVDBPURG,CTYPE=CVT                                       02330000
+                                                                        02340000
+         LA    R1,IPROJ                                                 02350000
+         @CALL IPLNCLN,CTYPE=CVT                                        02360000
+                                                                        02370000
+         STGTERM QH=PRJEXSTG      FREE NAVIGATION STG POOL              02380000
+                                                                        02390000
+         MVI   PRJERRF1,0         INITIALIZE STRUCTURE STATUS           02400000
+         MVI   PRJBLDF1,0                                               02410000
+                                                                        02420000
+         XC    PRJEXNAV(PRJEXLN),PRJEXNAV                               02430000
+                                                                        02440000
+         EJECT                                                          02450000
+***************************************************************         02460000
+*                                                                       02470000
+*   Network construction is performed by component. Retrieve            02480000
+*   the required navigational component mask using request type.        02490000
+*   If the storage pool has not yet been initialized do it now.         02500000
+*                                                                       02510000
+***************************************************************         02520000
+                                                                        02530000
+INITIAL  DS    0H                                                       02540000
+         L     R2,COMP            REQUESTED COMPONENT                   02550000
+         BCTR  R2,0               PREPARE FOR INSERT                    02560000
+         IC    R2,$NAVCMP(R2)     RETRIEVE COMPONENT CONSTR MASK        02570000
+         STC   R2,NAVCOMP         SAVE NAV COMPONENTS                   02580000
+                                                                        02590000
+         ICM   R0,15,PRJEXSTG     STORAGE POOL EXIST?                   02600000
+         BNZ   INITPOOL           ONWARD IF SO                          02610000
+                                                                        02620000
+         BAS   R14,GETLOCK        IPROJ SERIALIZATION                   02630000
+                                                                        02640000
+         ICM   R0,15,PRJEXSTG     STORAGE POOL BUILT BY CONTENDER       02650000
+         BNZ   INITPOOL           ONWARD IF SO                          02660000
+                                                                        02670000
+         L     R2,=A(#POOLSZ)     NAVIGATION STG POOL BLKSIZE           02680000
+         STGINIT (R2),QH=PRJEXSTG INITIALIZE STG POOL                   02690000
+         BNZ   ABN_STG            STORAGE INITIALIZATION FAILED         02700000
+                                                                        02710000
+INITPOOL DS    0H                                                       02720000
+                                                                        02730000
+         EJECT                                                          02740000
+***************************************************************         02750000
+*                                                                       02760000
+*   If the region network is required and does not yet exist            02770000
+*   call its constructor                                                02780000
+*                                                                       02790000
+***************************************************************         02800000
+                                                                        02810000
+RGNBUILD DS    0H                                                       02820000
+         TM    NAVCOMP,$RGNNET    REGION NET REQUIRED                   02830000
+         BZ    RGN_DONE           NO, CONTINUE WITH NEXT COMPONENT      02840000
+                                                                        02850000
+         TM    PRJERRF1,PRJE1RGN  RGN BUILD FAILED ON PREV REQ          02860000
+         BO    ERR_RGN            YES, NOTIFY REQUESTOR                 02870000
+         TM    PRJBLDF1,PRJB1RGN  RGNNET ALREADY PERFORMED              02880000
+         BO    RGN_DONE           YES, CONTINUE WITH NEXT COMPONENT     02890000
+                                                                        02900000
+         BAS   R14,GETLOCK        IPROJ SERIALIZATION                   02910000
+                                                                        02920000
+         TM    PRJERRF1,PRJE1RGN  RETEST FOR COLLISION                  02930000
+         BO    ERR_RGN                                                  02940000
+         TM    PRJBLDF1,PRJB1RGN                                        02950000
+         BO    RGN_DONE                                                 02960000
+                                                                        02970000
+*--------------------------------------------------------------         02980000
+*   construct region network                                            02990000
+*--------------------------------------------------------------         03000000
+                                                                        03010000
+         LA    R1,IPROJ           ADDRESS OF IPROJ                      03020000
+         @CALL INAVBRGN,CTYPE=CVT CONSTRUCT REGION NETWORK              03030000
+                                                                        03040000
+         ST    R15,RSNCODE        REGION NET CONSTRUCT RETCODE          03050000
+         ST    R0,INFCODE         REGION NET CONSTRUCT RSNCODE          03060000
+         C     R15,=A(RC04)       SUCCESSFULLY CONSTRUCTED?             03070000
+         BH    RGN_ERR            ERROR OTHERWISE                       03080000
+         OI    PRJBLDF1,PRJB1RGN  RGN CONSTRUCTION PERFORMED            03090000
+         B     RGN_DONE                                                 03100000
+                                                                        03110000
+RGN_ERR  DS    0H                                                       03120000
+         LA    R15,RC08           RGNNET CONSTRUCTION FAILURE           03130000
+         ST    R15,RETCODE        SET RETURN CODE                       03140000
+         OI    PRJERRF1,PRJE1RGN  RGNNET CONSTRUCTION ERROR             03150000
+         B     RETURN             FAIL NAV NETWORK CONSTRUCTION         03160000
+                                                                        03170000
+RGN_DONE DS    0H                                                       03180000
+                                                                        03190000
+         EJECT                                                          03200000
+***************************************************************         03210000
+*                                                                       03220000
+*   If the state transition network is required and does not            03230000
+*   yet exist call its constructor                                      03240000
+*                                                                       03250000
+***************************************************************         03260000
+                                                                        03270000
+STNBUILD DS    0H                                                       03280000
+         TM    NAVCOMP,$STNET     STN REQUIRED                          03290000
+         BZ    STN_DONE           NO, CONTINUE WITH NEXT COMPONENT      03300000
+                                                                        03310000
+         TM    PRJERRF1,PRJE1STN  STN BUILD FAILED ON PREV REQ          03320000
+         BO    ERR_STN                                                  03330000
+         TM    PRJBLDF1,PRJB1STN  STN ALREADY BUILT?                    03340000
+         BO    STN_DONE           YES, CONTINUE WITH NEXT COMPONENT     03350000
+                                                                        03360000
+         BAS   R14,GETLOCK        IPROJ SERIALIZATION                   03370000
+                                                                        03380000
+         TM    PRJERRF1,PRJE1STN  RETEST FOR COLLISION                  03390000
+         BO    ERR_STN                                                  03400000
+         TM    PRJBLDF1,PRJB1STN                                        03410000
+         BO    STN_DONE                                                 03420000
+                                                                        03430000
+*--------------------------------------------------------------         03440000
+*   construct STN                                                       03450000
+*--------------------------------------------------------------         03460000
+                                                                        03470000
+         L     R1,ICTPNSID        PROJECT INSTANCE ID         19960127  03480000
+         LA    R0,1(,R1)          NEW / REFRESHED INSTANCE    19960127  03490000
+         CS    R1,R0,ICTPNSID     PERSISTENT UPDATE           19960127  03500000
+         BNE   *-8                                            19960127  03510000
+         ST    R0,PRJINSID        RETAIN IN REFRESHED IPROJ   19960127  03520000
+                                                                        03530000
+         LA    R1,IPROJ           ADDRESS OF IPROJ                      03540000
+         @CALL INAVBSTN,CTYPE=CVT CONSTRUCT REGION NETWORK              03550000
+                                                                        03560000
+         ST    R15,RSNCODE        STN CONSTRUCT RETCODE                 03570000
+         ST    R0,INFCODE         STN CONSTRUCT RSNCODE                 03580000
+         C     R15,=A(RC08)       SUCCESSFULLY CONSTRUCTED?             03590000
+         BH    STN_ERR            ERROR OTHERWISE                       03600000
+         OI    PRJBLDF1,PRJB1STN  STN CONSTRUCTION PERFORMED            03610000
+         B     STN_DONE                                                 03620000
+                                                                        03630000
+STN_ERR  DS    0H                                                       03640000
+         LA    R15,RC12           STN CONSTRUCTION FAILURE              03650000
+         ST    R15,RETCODE        SET RETURN CODE                       03660000
+         OI    PRJERRF1,PRJE1STN  STN CONSTRUCTION ERROR                03670000
+         B     RETURN             FAIL NAV NETWORK CONSTRUCTION         03680000
+                                                                        03690000
+STN_DONE DS    0H                                                       03700000
+                                                                        03710000
+         EJECT                                                          03720000
+***************************************************************         03730000
+*                                                                       03740000
+*   If variable load is required and has not yet been performed         03750000
+*   call the variable load routine                                      03760000
+*                                                                       03770000
+***************************************************************         03780000
+                                                                        03790000
+VARBUILD DS    0H                                                       03800000
+         TM    NAVCOMP,$VARS      VARLOAD REQUIRED                      03810000
+         BZ    VAR_DONE           NO, CONTINUE WITH NEXT COMPONENT      03820000
+                                                                        03830000
+         TM    PRJERRF1,PRJE1VAR  VAR BUILD FAILED ON PREV REQ?         03840000
+         BO    ERR_VAR                                                  03850000
+         TM    PRJBLDF1,PRJB1VAR  VARS ALREADY LOADED?                  03860000
+         BO    VAR_DONE                                                 03870000
+                                                                        03880000
+         BAS   R14,GETLOCK        IPROJ SERIALIZATION                   03890000
+                                                                        03900000
+         TM    PRJERRF1,PRJE1VAR  RETEST FOR COLLISION                  03910000
+         BO    ERR_VAR                                                  03920000
+         TM    PRJBLDF1,PRJB1VAR                                        03930000
+         BO    VAR_DONE                                                 03940000
+                                                                        03950000
+*--------------------------------------------------------------         03960000
+*   load variables                                                      03970000
+*--------------------------------------------------------------         03980000
+                                                                        03990000
+         LA    R1,IPROJ           ADDRESS OF IPROJ                      04000000
+         @CALL INAVBVAR,CTYPE=CVT LOAD VARIABLE DEFINITIONS             04010000
+                                                                        04020000
+         ST    R15,RSNCODE        VAR LOAD RETCODE                      04030000
+         ST    R0,INFCODE         VAR LOAD RSNCODE                      04040000
+         C     R15,=A(RC04)       SUCCESSFULLY CONSTRUCTED?             04050000
+         BH    VAR_ERR            ERROR OTHERWISE                       04060000
+         OI    PRJBLDF1,PRJB1VAR  VARIABLE BUILD PERFORMED              04070000
+         B     VAR_DONE                                                 04080000
+                                                                        04090000
+VAR_ERR  DS    0H                                                       04100000
+         LA    R15,RC16           VAR LOAD FAILURE                      04110000
+         ST    R15,RETCODE        SET RETURN CODE                       04120000
+         OI    PRJERRF1,PRJE1VAR  VAR LOAD ERROR                        04130000
+                                                                        04140000
+VAR_DONE DS    0H                                                       04150000
+         B     RETURN             FAIL NAV NETWORK CONSTRUCTION         04160000
+                                                                        04170000
+         EJECT                                                          04180000
+***************************************************************         04190000
+*                                                                       04200000
+*   Return normal / abnormal completion status to caller                04210000
+*                                                                       04220000
+***************************************************************         04230000
+                                                                        04240000
+ERR_REQ  DS    0H                                                       04250000
+         LA    R15,RC24           REQUEST ERROR                         04260000
+         LA    R0,RSN04           INVALID COMPONENT                     04270000
+         STM   R15,R0,RETSTAT     SAVE RETURN/REASON CODES              04280000
+         B     RETURN             PROCEED WITH LOCK RELEASE             04290000
+                                                                        04300000
+ERR_RGN  DS    0H                                                       04310000
+         LA    R15,RC20           NETWORK IN ERROR                      04320000
+         LA    R0,RSN04           RGNNET IN ERROR                       04330000
+         STM   R15,R0,RETSTAT     SAVE RETURN/REASON CODES              04340000
+         B     RETURN             PROCEED WITH LOCK RELEASE             04350000
+                                                                        04360000
+ERR_STN  DS    0H                                                       04370000
+         LA    R15,RC20           NETWORK IN ERROR                      04380000
+         LA    R0,RSN08           STN IN ERROR                          04390000
+         STM   R15,R0,RETSTAT     SAVE RETURN/REASON CODES              04400000
+         B     RETURN             PROCEED WITH LOCK RELEASE             04410000
+                                                                        04420000
+ERR_VAR  DS    0H                                                       04430000
+         LA    R15,RC20           NETWORK IN ERROR                      04440000
+         LA    R0,RSN12           VAR IN ERROR                          04450000
+         STM   R15,R0,RETSTAT     SAVE RETURN/REASON CODES              04460000
+         B     RETURN             PROCEED WITH LOCK RELEASE             04470000
+                                                                        04480000
+*--------------------------------------------------------------         04490000
+*   release IPROJ lock and exit                                         04500000
+*--------------------------------------------------------------         04510000
+                                                                        04520000
+RETURN   DS    0H                                                       04530000
+         TM    FLAGS,F$LOCKAQ     IPROJ IS/WAS LOCKED FOR UPDATE?       04540000
+         BNO   RETEXIT            DONE HERE IF NOT                      04550000
+                                                                        04560000
+         XI    TARGETS,FF         INVERT THE COMPONENT UPDATE MASK      04570000
+         NC    PRJMNTF1,TARGETS   RESET PROJECT CATALOG MAINT FLAGS     04580000
+                                                                        04590000
+         BAS   R14,RETLOCK        RELEASE IPROJ LOCK                    04600000
+                                                                        04610000
+RETEXIT  DS    0H                                                       04620000
+         LM    R15,R1,RETSTAT     RESTORE RET/RSN/INFO CODES            04630000
+                                                                        04640000
+         #EXIT ,                  RETURN                                04650000
+                                                                        04660000
+         EJECT                                                          04670000
+****************************************************************        04680000
+*                                                                       04690000
+* ROUTINE:  GETLOCK - Acquire IPROJ lock                                04700000
+*                                                                       04710000
+****************************************************************        04720000
+                                                                        04730000
+GETLOCK  DS    0H                                                       04740000
+         ST    R14,FWORD          RESTORE RETURN ADDRESS                04750000
+         TM    FLAGS,F$LOCKAQ+F$LOCKH                                   04760000
+         BNZR  R14                LOCK PREV VERIFIED OR ACQUIRED        04770000
+                                                                        04780000
+         OI    FLAGS,F$LOCKAQ     ACQUISITION ATTEMPTED                 04790000
+                                                                        04800000
+         $SER  OBTAIN,LOCKPTR=PRJMILK                                   04810000
+                                                                        04820000
+         CH    R15,=AL2(RC04)     LOCK ACQUIRED?                        04830000
+         BE    GETLKX             ONWARD IF NOT                         04840000
+         BH    ABN_LOCK           SERIOUS PROBLEM                       04850000
+                                                                        04860000
+         OI    FLAGS,F$LOCKH      LOCK IS HELD                          04870000
+                                                                        04880000
+GETLKX   DS    0H                                                       04890000
+         L     R14,FWORD          RESTORE RETURN ADDRESS                04900000
+         BR    R14                RETURN                                04910000
+                                                                        04920000
+         EJECT                                                          04930000
+****************************************************************        04940000
+*                                                                       04950000
+* ROUTINE:  RETLOCK - Release IPROJ lock                                04960000
+*                                                                       04970000
+****************************************************************        04980000
+                                                                        04990000
+RETLOCK  DS    0H                                                       05000000
+         ST    R14,FWORD          RESTORE RETURN ADDRESS                05010000
+         TM    FLAGS,F$LOCKH      LOCK ACQUIRED LOCALLY?                05020000
+         BNOR  R14                DONE IF NOT                           05030000
+                                                                        05040000
+         NI    FLAGS,FF-F$LOCKAQ-F$LOCKH                                05050000
+                                                                        05060000
+         $SER  RELEASE,LOCKPTR=PRJMILK                                  05070000
+                                                                        05080000
+         L     R14,FWORD          RESTORE RETURN ADDRESS                05090000
+         BR    R14                RETURN                                05100000
+                                                                        05110000
+         EJECT                                                          05120000
+***************************************************************         05130000
+*                                                                       05140000
+*   Catastrophic errors                                                 05150000
+*                                                                       05160000
+***************************************************************         05170000
+                                                                        05180000
+ABN_LOCK DS    0H                                                       05190000
+         $ABEND ABE_PROJLOCK,                                          X05200000
+               TITLE='PROJECT MIL LOCK ACQUIRE/RELEASE ERROR'           05210000
+                                                                        05220000
+ABN_STG  DS    0H                                                       05230000
+         $ABEND ABE_STORAGE,TITLE='STORAGE ALLOCATION FAILURE'          05240000
+                                                                        05250000
+         EJECT                                                          05260000
+***************************************************************         05270000
+*                                                                       05280000
+*   Local read only data areas, etc.                                    05290000
+*                                                                       05300000
+*   The $NAVMNT table defines the maint flag mask used to               05310000
+*   determine if reconstruction is required for a component             05320000
+*   based upon maintenance to the underlying catalog tables.            05330000
+*                                                                       05340000
+*   The $NAVCMP table defines the navigation components                 05350000
+*   that will be (re)constructed by the associated request.             05360000
+*                                                                       05370000
+***************************************************************         05380000
+                                                                        05390000
+STNREQS  EQU   PRJM1REC+PRJM1NAV+PRJM1RGN+PRJM1VAR+PRJM1TAB+PRJM1COL    05400000
+                                                                        05410000
+$NAVMNT  DS    0F                                                       05420000
+         DC    AL1(PRJM1RGN)                                            05430000
+         DC    AL1(STNREQS)                                             05440000
+$NAVMNT# EQU   *-$NAVMNT                                                05450000
+                                                                        05460000
+$NAVCMP  DS    0F                                                       05470000
+         DC    AL1($RGNNET)                     RGN REQUEST             05480000
+         DC    AL1($RGNNET+$STNET+$VARS)        STN REQUEST             05490000
+$NAVCMP# EQU   *-$NAVCMP                                                05500000
+                                                                        05510000
+         LTORG ,                                                        05520000
+                                                                        05530000
+         EJECT                                                          05540000
+         PRINT NOGEN                                                    05550000
+         ICVT  ,                                                        05560000
+         ITASK ,                                                        05570000
+         IPCB  ,                                                        05580000
+         IUSER ,                                                        05590000
+         END   ,                                                        05600000

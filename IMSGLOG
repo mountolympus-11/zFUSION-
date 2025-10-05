@@ -1,0 +1,670 @@
+IMSGLOG  TITLE '- MESSAGE MONITOR ROUTER'                               00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE: IMSGLOG - Message monitor router                             00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This routine accepts a message block in $MSGBUF format             00080000
+*    and transmits it to message monitor ITASKs via $TSEND.             00090000
+*    The $MSGBUF prefix is not included.                                00100000
+*                                                                       00110000
+*    $LOGTASK is a system defined message monitor ITASK                 00120000
+*    collecting all messages issued by all ITASKs having a              00130000
+*    destination list including $LOGFILE, including those               00140000
+*    issued by $LOGTASK itself.  The inability to access                00150000
+*    $LOGTASK is significant to system operation and is                 00160000
+*    reflected by a special return code.                                00170000
+*                                                                       00180000
+*    Messages issued by an ITASK or process owned by the ITASK          00190000
+*    may be monitored by other processes running under the same         00200000
+*    ITASK.  Intratask message monitoring is determined by              00210000
+*    running the 'local' $MONMSG queue anchored in                      00220000
+*    ITASK.TSKMNMSG.  If a particular message class and/or              00230000
+*    destination is monitored, the message is forwarded to the          00240000
+*    appropriate process using $TSEND PCB=.  Locking is not             00250000
+*    required to run the local queue.                                   00260000
+*                                                                       00270000
+*    Messages issued by an ITASK or process owned by the ITASK          00280000
+*    may also be monitored by 'foreign' workunits.  This is             00290000
+*    indicated by the TSKMN_WATCHED flag, which is valid                00300000
+*    whenever TSKMNSEQ = ICTMNSEQ.  When that equality does not         00310000
+*    hold, the 'global' $MONMSG queue anchored in ICTMNMSG has          00320000
+*    been updated since the last message was issued by the              00330000
+*    current (messaging) ITASK.  In either case, a scan of the          00340000
+*    global queue is needed to determine global msg routing             00350000
+*    requirements.  The global $MONMSG queue must be scanned            00360000
+*    under cover of the DISP lock.  The lock is held as long as         00370000
+*    possible, minimizing the amount of lock requests needed by         00380000
+*    the lower level, intertask $TSEND issued to forward these          00390000
+*    messages.  No special significance is attributed to $TSEND         00400000
+*    failures to message monitors other than $LOGTASK.                  00410000
+*                                                                       00420000
+*    A $MONMSG 'selects' a message by class and/or destination.         00430000
+*                                                                       00440000
+*                                                                       00450000
+* NOTES:                                                                00460000
+*                                                                       00470000
+*    Because intertask messaging via $TSEND requires data               00480000
+*    movement through an intermediate staging buffer, the               00490000
+*    message line links found in $MSBLINK are converted to an           00500000
+*    offset (positive or negative) from the first message               00510000
+*    contained in the block.                                            00520000
+*                                                                       00530000
+*    The message destination mask and class code are passed             00540000
+*    in the low order byte of $TSEND PARM1 and PARM2,                   00550000
+*    respectively.                                                      00560000
+*                                                                       00570000
+*                                                                       00580000
+* ON ENTRY:                                                             00590000
+*                                                                       00600000
+*    R1  contains the address of a parameter list constructed           00610000
+*        as follows:                                                    00620000
+*                                                                       00630000
+*        +00 - addr of a $MSGBUF message block                          00640000
+*        +04 - addr of a one byte message destination mask              00650000
+*        +08 - addr of a one byte message class code                    00660000
+*                                                                       00670000
+*                                                                       00680000
+* ON EXIT:                                                              00690000
+*                                                                       00700000
+*    R15 contains one of the following return codes                     00710000
+*                                                                       00720000
+*        RC00 - message block asynchronously sent to monitors           00730000
+*        RC04 - $LOGFILE destination, but $LOGTASK not available        00740000
+*        RC08 - $TSEND rejected, service routine retcode in R1          00750000
+*                                                                       00760000
+**<DOC-OFF>****************************************************         00770000
+                                                                        00780000
+         EJECT                                                          00790000
+***************************************************************         00800000
+*                                                                       00810000
+* MAINTENANCE:                                                          00820000
+*                                                                       00830000
+*    05/01/93 R. Turgeon                                                00840000
+*             Initial version                                           00850000
+*                                                                       00860000
+*    09/08/94 R. Turgeon                                                00870000
+*             Rewritten to expand the log task concept to the           00880000
+*             more general 'message monitor workunit'                   00890000
+*                                                                       00900000
+*    10/23/95 R. Turgeon   PAR #224245                                  00910000
+*             Correct incorrectly coded loop                            00920000
+*                                                                       00930000
+***************************************************************         00940000
+                                                                        00950000
+         EJECT                                                          00960000
+         #WORK ,                                                        00970000
+                                                                        00980000
+CNTLFLGS DS    X             CONTROL FLAGS                              00990000
+CNTLDISP EQU   X'80'            DISP LOCK ACQUIRED                      01000000
+                                                                        01010000
+BYTE     DS    X             SINGLE BYTE WORKAREA                       01020000
+                                                                        01030000
+RETCODE  DS    F             REQUEST COMPLETION CODE                    01040000
+                                                                        01050000
+DESTWORD DS    F             DESTINATION MASK AS $TSEND PARM1           01060000
+DESTMASK EQU   DESTWORD+3,1  MESSAGE DESTINATION MASK                   01070000
+                                                                        01080000
+CLASWORD DS    F             CLASS CODE AS $TSEND PARM2                 01090000
+CLASCODE EQU   CLASWORD+3,1  MESSAGE CLASS CODE                         01100000
+                                                                        01110000
+COPYBUFR DS    A             AUX BUFFER FOR COPIED $MSGBUF              01120000
+SENDBUFR DS    A             $TSEND-READY $MSGBUF ADDR                  01130000
+                                                                        01140000
+RETREGS  DS    3F            R15-R1                                     01150000
+REGSAVE  DS    16F           LOCAL SUBROUTINE SAVEAREA #1               01160000
+REGSAVE2 DS    16F           LOCAL SUBROUTINE SAVEAREA #2               01170000
+                                                                        01180000
+         #ENDWORK ,          END WORKAREA                               01190000
+                                                                        01200000
+         EJECT                                                          01210000
+         $MSGBUF ,           MESSAGE BUFFER                             01220000
+                                                                        01230000
+         EJECT                                                          01240000
+         $MONMSG ,           MESSAGE MONITOR LOCAL/GLOBAL QUEUE ENTRY   01250000
+                                                                        01260000
+         EJECT                                                          01270000
+         $MSGCNST ,          $MSG CONSTANTS, DESTINATION CODES, ETC.    01280000
+                                                                        01290000
+         EJECT                                                          01300000
+         $MCLASS DSECT=YES   MESSAGE CLASS DEFINITIONS                  01310000
+                                                                        01320000
+         EJECT                                                          01330000
+         $TSEND DSECT=YES    INTERTASK COMMUNICATION                    01340000
+                                                                        01350000
+         EJECT                                                          01360000
+         ABCODES ,           $ABEND CODES                               01370000
+                                                                        01380000
+         MSGCODES ,          INTERTASK MESSAGING CODES                  01390000
+                                                                        01400000
+         EQUS  ,                                                        01410000
+         EJECT ,                                                        01420000
+                                                                        01430000
+IMSGLOG  #ENTER PREG=R8                                                 01440000
+                                                                        01450000
+         USING ITASK,R10               STDENV                           01460000
+                                                                        01470000
+***************************************************************         01480000
+*                                                                       01490000
+*   accept passed parameters                                            01500000
+*                                                                       01510000
+***************************************************************         01520000
+         L     R2,4(,R8)               LOCATE DESTINATION MASK          01530000
+         MVC   DESTMASK,0(R2)          LOCAL COPY                       01540000
+         L     R2,8(,R8)               LOCATE CLASS CODE                01550000
+         MVC   CLASCODE,0(R2)          LOCAL COPY                       01560000
+         L     R8,0(,R8)               LOCATE MESSAGE BUFFER            01570000
+         USING $MSGBUF,R8                                               01580000
+                                                                        01590000
+*--------------------------------------------------------------         01600000
+*   carry compare-ready class code                                      01610000
+*--------------------------------------------------------------         01620000
+         SR    R5,R5                   PREPARE FOR INSERT               01630000
+         IC    R5,CLASCODE             CLASS CODE                       01640000
+         SH    R5,=AL2(C'A')           CONVERT TO MSG CLASS ARRAY NDX   01650000
+         BM    INVCLASS                CLASS IS INVALID, CARRY AS FLAG  01660000
+         CH    R5,=AL2(L'$MMICLSM)     EXCEEDS CLASS CODE RANGE?        01670000
+         BNH   *+8                     SKIP IF NOT, CLASS IS VALID      01680000
+         L     R5,=F'1'                ELSE INDICATE INVALID            01690000
+                                                                        01700000
+INVCLASS DS    0H                      R5 < 0 IF CLASS IS INVALID       01710000
+                                                                        01720000
+         EJECT                                                          01730000
+***************************************************************         01740000
+*                                                                       01750000
+*   Broadcast $MSGBUF to local message monitoring processes,            01760000
+*   suppressing low-level communications diagnostic and trace           01770000
+*   messages that could otherwise cause a message generation            01780000
+*   loop.                                                               01790000
+*                                                                       01800000
+*   If LCLMON=NO is specified for the message class then                01810000
+*   message delivery is suppress for local monitoring and               01820000
+*   also global monitoring if the issuing task is a 1st                 01830000
+*   level system ITASK.                                                 01840000
+*                                                                       01850000
+***************************************************************         01860000
+         USING $MONMSG,R7              STANDARD ADDRESSABILITY          01870000
+                                                                        01880000
+*--------------------------------------------------------------         01890000
+*   determine if local (re)delivery of messages suppressed              01900000
+*--------------------------------------------------------------         01910000
+         LTR   R5,R5                   VALID CLASS?                     01920000
+         BM    LCLSCAN                 NOT TESTED FURTHER IF NOT        01930000
+                                                                        01940000
+         $MSGATTR CLASCODE,CTYPE=STD                                    01950000
+                                                                        01960000
+         USING MSGCSENT,R1             MESSAGE CLASS TABLE ENTRY        01970000
+         CLI   MSGCSMON,FALSE          LOCAL DELIVERY SUPPRESSED?       01980000
+         BNE   LCLSCAN                 NO, CONTINUE WITH LOCAL SCAN     01990000
+         TM    TSKFLGS3,TSK3$1LV       1ST LEVEL (SYSTEM) TASK?         02000000
+         BO    GBLFIN                  BYPASS ALL MSG MONITORING        02010000
+         B     LCLFIN                  JUST BYPASS LOCAL MONITORING     02020000
+                                                                        02030000
+         DROP  R1                      MSGCSENT                         02040000
+                                                                        02050000
+*--------------------------------------------------------------         02060000
+*   locate local (process level) message recipients                     02070000
+*--------------------------------------------------------------         02080000
+LCLSCAN  DS    0H                                                       02090000
+         ICM   R7,15,TSKMNMSG          LOCAL MESSAGE MONITORING?        02100000
+         BZ    LCLFIN                  DONE HERE IF NOT                 02110000
+                                                                        02120000
+LCLSLOOP DS    0H                                               224245  02130000
+         TM    $MMITSK,BF              ALL-TASKS MONITOR?               02140000
+         BZ    LCLTEST                 INTERESTED PARTY IF SO           02150000
+         CLC   $MMITSK,TSKNAME         OUR TASK IN PARTICULAR?          02160000
+         BNE   LCLADV                  SKIP IT IF NOT                   02170000
+                                                                        02180000
+LCLTEST  DS    0H                                                       02190000
+         ICM   R0,15,$MMIDEST          MONITORED MSG DESTINATIONS       02200000
+         BZ    LCLCLASS                NONE SPECIFIED                   02210000
+         N     R0,DESTWORD             CLASH W/ MESSAGE DEST ACTUALS    02220000
+         BZ    LCLADV                  NOT SELECTED                     02230000
+                                                                        02240000
+LCLCLASS DS    0H                                                       02250000
+         OC    $MMICLSM,$MMICLSM       MONITORING SPECIFIC CLASSES?     02260000
+         BZ    LCLBCAST                NO,  SEND MESSAGE                02270000
+         LTR   R5,R5                   VALID CLASS?                     02280000
+         BM    LCLADV                  NOT TESTED FURTHER IF NOT        02290000
+         LA    R1,$MMICLSM(R5)         LOCATE CORR MSG CLASS SELECTOR   02300000
+         CLI   0(R1),0                 MONITORED CLASS?                 02310000
+         BE    LCLADV                  ONWARD IF NOT SELECTED           02320000
+                                                                        02330000
+*--------------------------------------------------------------         02340000
+*   send message to local monitoring workunit (process)                 02350000
+*--------------------------------------------------------------         02360000
+LCLBCAST DS    0H                                                       02370000
+         LA    R1,$MSGBUF              R1  <== SOURCE $MSGBUF           02380000
+         LA    R0,$MMOWU               R0  <== MONITORING PROCESS NAME  02390000
+         LA    R15,SENDPROC            R15 <== INTRATASK MONITOR        02400000
+                                                                        02410000
+         BAS   R14,SEND                DISPOSE OF MSG BLOCK             02420000
+                                                                        02430000
+         B     *+4(R15)                ANALYZE COMPLETION               02440000
+         B     LCLADV                     00 - COMPLETE                 02450000
+         B     LCLADV                     04 - DESTINATION TASK N/A     02460000
+         B     ERR_TEXT                   08 - TEXT REJECT              02470000
+         B     ERR_STG                    12 - STORAGE FAILURE          02480000
+                                                                        02490000
+*--------------------------------------------------------------         02500000
+*   examine all local monitors                                          02510000
+*--------------------------------------------------------------         02520000
+LCLADV   DS    0H                                                       02530000
+         ICM   R7,15,$MMNEXT           TRY NEXT $MONMSG ENTRY           02540000
+         BNZ   LCLSLOOP                CONTINUE                 224245  02550000
+                                                                        02560000
+LCLFIN   DS    0H                      END LOCAL QUEUE SCAN             02570000
+         DROP  R7                      $MONMSG                          02580000
+                                                                        02590000
+         EJECT                                                          02600000
+***************************************************************         02610000
+*                                                                       02620000
+*   broadcast $MSGBUF to global message-monitoring ITASKS               02630000
+*                                                                       02640000
+***************************************************************         02650000
+         CLC   TSKMNSEQ,ICTMNSEQ       GLOBAL MONITORING STATUS CHANGE? 02660000
+         BNE   GBLPREP                 REEVALUATION REQUIRED IF SO      02670000
+         TM    TSKMNFLG,TSKMN_WATCHED  CURRENT ITASK MONITORED GLOBALLY 02680000
+         BNO   GBLFIN                  DONE IF NOT                      02690000
+                                                                        02700000
+GBLPREP  DS    0H                      DETERMINE GLOBAL MONITOR STATUS  02710000
+         NI    TSKMNFLG,FF-TSKMN_WATCHED                                02720000
+         ICM   R0,15,ICTMNMSG          GLOBAL MONITORS ACTIVE?          02730000
+         BNZ   GBLDISP                 ACQUIRE LOCK                     02740000
+         ST    R0,TSKMNSEQ             SEQ = 0 ONLY IF NO MONITORS      02750000
+         B     GBLFIN                  DONE                             02760000
+                                                                        02770000
+GBLDISP  DS    0H                                                       02780000
+         BAS   R14,DISPLOCK            SERIALIZE USE OF GLOBAL QUEUE    02790000
+                                                                        02800000
+         MVC   TSKMNSEQ,ICTMNSEQ       SYNCHRONIZE                      02810000
+         ICM   R7,15,ICTMNMSG          GLOBAL MESSAGE MONITORING?       02820000
+         BZ    GBLFIN                  DONE HERE IF NOT                 02830000
+         USING $MONMSG,R7              STANDARD ADDRESSABILITY          02840000
+                                                                        02850000
+*--------------------------------------------------------------         02860000
+*   locate local (process level) message recipients                     02870000
+*--------------------------------------------------------------         02880000
+GBLSCAN  DS    0H                                                       02890000
+         CLC   TSKNAME,$MMITSK         EXPLICIT MONITOR FOR THIS TASK   02900000
+         BL    GBLFIN                  QUEUE ORDERED BY TARGET TASKNAME 02910000
+         BE    GBLSELCT                EXPLICIT SELECTION               02920000
+         TM    $MMITSK,BF              ALL-TASKS MONITOR?               02930000
+         BNZ   GBLADV                  DOES NOT APPLY OTHERWISE         02940000
+                                                                        02950000
+GBLSELCT DS    0H                                                       02960000
+         CLC   TSKNAME,$MMOWU          MONITORING = MONITORED?          02970000
+         BE    GBLADV                  HANDLED AT LOCAL LEVEL           02980000
+         OI    TSKMNFLG,TSKMN_WATCHED  CURRENT ITASK GLOBALLY MONITORED 02990000
+                                                                        03000000
+         ICM   R0,15,$MMIDEST          MONITORED MSG DESTINATIONS       03010000
+         BZ    GBLCLASS                NONE SPECIFIED                   03020000
+         N     R0,DESTWORD             CLASH W/ MESSAGE DEST ACTUALS    03030000
+         BZ    GBLADV                  NOT SELECTED                     03040000
+                                                                        03050000
+GBLCLASS DS    0H                                                       03060000
+         OC    $MMICLSM,$MMICLSM       MONITORING SPECIFIC CLASSES?     03070000
+         BZ    GBLBCAST                NO,  SEND MESSAGE                03080000
+         LTR   R5,R5                   VALID CLASS?                     03090000
+         BM    GBLADV                  IGNORE CLASS DESIGNATION IF NOT  03100000
+         LA    R1,$MMICLSM(R5)         LOCATE CORR MSG CLASS SELECTOR   03110000
+         CLI   0(R1),0                 MONITORED CLASS?                 03120000
+         BE    GBLADV                  ONWARD IF NOT SELECTED           03130000
+                                                                        03140000
+*--------------------------------------------------------------         03150000
+*   send message to foreign monitoring itask                            03160000
+*--------------------------------------------------------------         03170000
+GBLBCAST DS    0H                                                       03180000
+         LA    R1,$MSGBUF              R1  <== SOURCE $MSGBUF           03190000
+         LA    R0,$MMOWU               R0  <== MONITORING PROCESS NAME  03200000
+         LA    R15,SENDTASK            R15 <== INTERTASK MONITOR        03210000
+                                                                        03220000
+         BAS   R14,SEND                DISPOSE OF MSG BLOCK             03230000
+                                                                        03240000
+         B     *+4(R15)                ANALYZE COMPLETION               03250000
+         B     GBLADV                     00 - COMPLETE                 03260000
+         B     GBLADV                     04 - DESTINATION TASK N/A     03270000
+         B     ERR_TEXT                   08 - TEXT REJECT              03280000
+         B     ERR_STG                    12 - STORAGE FAILURE          03290000
+                                                                        03300000
+*--------------------------------------------------------------         03310000
+*   examine all global monitors                                         03320000
+*--------------------------------------------------------------         03330000
+GBLADV   DS    0H                                                       03340000
+         ICM   R7,15,$MMNEXT           TRY NEXT $MONMSG ENTRY           03350000
+         BNZ   GBLSCAN                 CONTINUE                         03360000
+                                                                        03370000
+GBLFIN   DS    0H                      END GLOBAL QUEUE SCAN            03380000
+         DROP  R7                      $MONMSG                          03390000
+                                                                        03400000
+         EJECT                                                          03410000
+***************************************************************         03420000
+*                                                                       03430000
+*   send message(s) to $LOGTASK if selected by destination              03440000
+*                                                                       03450000
+***************************************************************         03460000
+         TM    DESTMASK,$LOGFILE       MSG DESTINED FOR LOGFILE?        03470000
+         BNO   ELOGFILE                SKIP IF NOT                      03480000
+         ICM   R0,R15,ICTTSKLG         LOG TASK AVAILABLE?              03490000
+         BZ    LOGNA                   INDICATE MSG UNDELIVERABLE       03500000
+                                                                        03510000
+LOGSEND  DS    0H                                                       03520000
+         LA    R1,$MSGBUF              R1  <== SOURCE MESSAGE BUFFER    03530000
+         LA    R0,=CL8'$LOGTASK'       R0  <== LOGTASK AS DESTINATION   03540000
+         LA    R15,SENDTASK            R15 <== INTERTASK SEND           03550000
+                                                                        03560000
+         BAS   R14,SEND                SEND TO MESSAGE MONITOR WORKUNIT 03570000
+                                                                        03580000
+         B     *+4(R15)                ANALYZE COMPLETION               03590000
+         B     ELOGFILE                   00 - COMPLETE                 03600000
+         B     LOGNA                      04 - DESTINATION TASK N/A     03610000
+         B     ERR_TEXT                   08 - TEXT REJECT              03620000
+         B     ERR_STG                    12 - STORAGE FAILURE          03630000
+                                                                        03640000
+LOGNA    DS    0H                                                       03650000
+         LA    R15,RC04                INDICATE LOGTASK NOT AVAILABLE   03660000
+         ST    R15,RETCODE             RETAIN FOR RETURN                03670000
+         B     ELOGFILE                DONE                             03680000
+                                                                        03690000
+ELOGFILE DS    0H                                                       03700000
+                                                                        03710000
+         EJECT                                                          03720000
+***************************************************************         03730000
+*                                                                       03740000
+*   termination and exit                                                03750000
+*                                                                       03760000
+***************************************************************         03770000
+NORM_RET DS    0H                      NO CATASTROPHIC FAILURES         03780000
+         L     R15,RETCODE             PREDETERMINED RETCODE            03790000
+         B     EXIT                                                     03800000
+                                                                        03810000
+ERR_TEXT DS    0H                                                       03820000
+         LR    R1,R15                  $TSEND RETURN CODE               03830000
+         LA    R15,RC08                TEXT (LENGTH) REJECTED           03840000
+                                                                        03850000
+*--------------------------------------------------------------         03860000
+*   RELEASE DYNAMICALLY ACQUIRED LOCKS, STORAGE AND EXIT                03870000
+*--------------------------------------------------------------         03880000
+EXIT     DS    0H                                                       03890000
+         STM   R15,R1,RETREGS          SAVE RETURN REGS                 03900000
+                                                                        03910000
+         BAS   R14,DISPUNLK            RELEASE DISP LOCK IF ACQUIRED    03920000
+                                                                        03930000
+         ICM   R2,15,COPYBUFR          $MSGBUF COPY CREATED?            03940000
+         BZ    RET                     SKIP IF NOT                      03950000
+         L     R3,$MSBUSED-$MSGBUF(,R2)                                 03960000
+                                                                        03970000
+         STGRETN ADDR=(R2),                                            X03980000
+               LEN=(R3),                                               X03990000
+               QH=TSKSTG                                                04000000
+                                                                        04010000
+*--------------------------------------------------------------         04020000
+*   RETURN TO CALLER                                                    04030000
+*--------------------------------------------------------------         04040000
+RET      DS    0H                                                       04050000
+         LM    R15,R1,RETREGS          RESTORE RETURN REGS              04060000
+                                                                        04070000
+         #EXIT ,                                                        04080000
+                                                                        04090000
+*--------------------------------------------------------------         04100000
+*   CATASTOPHIC FAILURES                                                04110000
+*--------------------------------------------------------------         04120000
+ERR_STG  DS    0H                                                       04130000
+         ST    R15,FWORD                                                04140000
+                                                                        04150000
+         $ABEND ABE_STORAGE,*FWORD,DUMP=YES,                           X04160000
+               TITLE='STORAGE MANAGMENT FAILURE'                        04170000
+                                                                        04180000
+         EJECT                                                          04190000
+***************************************************************         04200000
+*                                                                       04210000
+* ROUTINE: SEND - Route message to message-monitoring workunit          04220000
+*                                                                       04230000
+* ON ENTRY:                                                             04240000
+*                                                                       04250000
+*    R0  - address of the destination workunit identifier               04260000
+*    R1  - addrEss of the source $MSGBUF                                04270000
+*    R15 - addrEss of the appropriate intra or inter task               04280000
+*          routing routine                                              04290000
+*                                                                       04300000
+* ON EXIT:                                                              04310000
+*                                                                       04320000
+*    R15 - $TSEND return code                                           04330000
+*                                                                       04340000
+*    SENDBUFR - If non-zero, the address of a $MSGBUF                   04350000
+*               previously prepared for intra/inter task                04360000
+*               $TSEND.  If zero, the source $MSGBUF is used            04370000
+*               to construct a suitable, relocatable copy of            04380000
+*               $MSGBUF.                                                04390000
+*                                                                       04400000
+*    COPYBUFR - If non-zero, the address of a relocatable               04410000
+*               $MSGBUF to which the mainline has a storage             04420000
+*               release obligation, as described in REFORMAT.           04430000
+*                                                                       04440000
+***************************************************************         04450000
+SEND     DS    0H                                                       04460000
+         STM   R0,R15,REGSAVE          PRESERVE MAINLINE REGS           04470000
+         LR    R5,R15                  PRESERVE ROUTINE ADDRESS         04480000
+         LR    R6,R0                   TARGET WORKUNIT IDENTIFIER       04490000
+         LR    R8,R1                   SOURCE $MSGBUF                   04500000
+         USING $MSGBUF,R8              STANDARD ADDRESSABILITY          04510000
+                                                                        04520000
+*--------------------------------------------------------------         04530000
+*   REFORMAT THE SOURCE $MSGBUF FOR TRANSMISSION IF REQUIRED            04540000
+*--------------------------------------------------------------         04550000
+         ICM   R1,15,SENDBUFR          $MSGBUF PREPARED FOR SEND?       04560000
+         BNZ   SENDCALL                PREVIOUSLY COMPLETED             04570000
+         ST    R8,SENDBUFR             ASSUME SOURCE IS XMIT READY      04580000
+                                                                        04590000
+         LA    R1,$MSGBUF              SOURCE $MSGBUF AS PARM           04600000
+         BAS   R14,REFORMAT            CONVERT PTRS TO OFFLINKS         04610000
+         LTR   R15,R15                 NEW $MSGBUF RETURNED?            04620000
+         BZ    SENDCALL                DONE IF NOT NEEDED               04630000
+                                                                        04640000
+         ST    R1,SENDBUFR             RETAIN COPY                      04650000
+         ST    R1,COPYBUFR             REMEMBER STG RETURN OBLIGATION   04660000
+                                                                        04670000
+*--------------------------------------------------------------         04680000
+*   PASS TRANSMISSION-READY $MSGBUF THRU TO ROUTER ROUTINE              04690000
+*--------------------------------------------------------------         04700000
+SENDCALL DS    0H                      R1 <== TRANSMIT-READY $MSGBUF    04710000
+         LR    R0,R6                   R0 <== WORKUNIT IDENTIFIER       04720000
+         BASR  R14,R5                  INVOKE ROUTER                    04730000
+                                                                        04740000
+*--------------------------------------------------------------         04750000
+*   RETURN ROUTER ($TSEND) ROUTINE RETURN CODE                          04760000
+*--------------------------------------------------------------         04770000
+         LM    R2,R14,REGSAVE+8        RESTORE CALLERS REGS             04780000
+         BR    R14                                                      04790000
+                                                                        04800000
+         EJECT                                                          04810000
+***************************************************************         04820000
+*                                                                       04830000
+* ROUTINE: SENDTASK - INTERTASK SEND TO DESIGNATED MONITOR TASK         04840000
+*                                                                       04850000
+* ON ENTRY:                                                             04860000
+*                                                                       04870000
+*    R1 - ADDR OF $MSGBUF IN TRANSMIT (RELOCATABLE) FORMAT              04880000
+*    R0 - ADDR OF RECIPIENT ITASK NAME                                  04890000
+*                                                                       04900000
+* ON EXIT:                                                              04910000
+*                                                                       04920000
+*    R15  CONTAINS THE $TSEND RETURN CODE                               04930000
+*                                                                       04940000
+***************************************************************         04950000
+SENDTASK DS    0H                                                       04960000
+         STM   R0,R15,REGSAVE2         PRESERVE CALLERS REGS            04970000
+         LR    R2,R0                   DESTINATION ITASK NAME           04980000
+         LR    R8,R1                   ACCEPT RELOCATABLE $MSGBUF       04990000
+         USING $MSGBUF,R8              STANDARD ADDRESSABILITY          05000000
+                                                                        05010000
+         L     R3,$MSBUSED             LENGTH OF ENTIRE $MSGBUF         05020000
+         SH    R3,=AL2($MSBPFXL)       DISCARD THE PREFIX               05030000
+                                                                        05040000
+         $TSEND (R2),                  MSG MONITOR ITASK NAME          X05050000
+               TYPE=ITM_LOG_DATA,      TYPE OF REQUEST                 X05060000
+               PARMS=(*DESTWORD,*CLASWORD,*TSKNAME,*TSKNAME+4),        X05070000
+               INFO=($MSBHDR,(R3)),    CHAINED MESSAGE ENTRIES         X05080000
+               MF=(E,MFE_LIST)                                          05090000
+                                                                        05100000
+         LM    R2,R14,REGSAVE2+8       RESTORE MAINLINE REGS            05110000
+         BR    R14                     DONE                             05120000
+         DROP  R8                      $MSGBUF                          05130000
+                                                                        05140000
+         EJECT                                                          05150000
+***************************************************************         05160000
+*                                                                       05170000
+* ROUTINE: SENDPROC - INTRATASK SEND TO DESIGNATED MONITOR PROC         05180000
+*                                                                       05190000
+* ON ENTRY:                                                             05200000
+*                                                                       05210000
+*    R1 - ADDR OF $MSGBUF IN TRANSMIT (RELOCATABLE) FORMAT              05220000
+*    R0 - ADDR OF RECIPIENT IPCB                                        05230000
+*                                                                       05240000
+* ON EXIT:                                                              05250000
+*                                                                       05260000
+*    R15  CONTAINS THE $TSEND RETURN CODE                               05270000
+*                                                                       05280000
+***************************************************************         05290000
+SENDPROC DS    0H                                                       05300000
+         STM   R0,R15,REGSAVE2         PRESERVE CALLERS REGS            05310000
+         LR    R2,R0                   DESTINATION IPCB ADDRESS         05320000
+         LR    R8,R1                   ACCEPT RELOCATABLE $MSGBUF       05330000
+         USING $MSGBUF,R8              STANDARD ADDRESSABILITY          05340000
+                                                                        05350000
+         L     R3,$MSBUSED             LENGTH OF ENTIRE $MSGBUF         05360000
+         SH    R3,=AL2($MSBPFXL)       DISCARD THE PREFIX               05370000
+                                                                        05380000
+         $TSEND *,(R2),                LOCAL MONITOR PROCESS           X05390000
+               TYPE=ITM_LOG_DATA,      TYPE OF REQUEST                 X05400000
+               PARMS=(*DESTWORD,*CLASWORD,*TSKNAME,*TSKNAME+4),        X05410000
+               INFO=($MSBHDR,(R3)),    CHAINED MESSAGE ENTRIES         X05420000
+               MF=(E,MFE_LIST)                                          05430000
+                                                                        05440000
+         LM    R2,R14,REGSAVE2+8       RESTORE MAINLINE REGS            05450000
+         BR    R14                     DONE                             05460000
+         DROP  R8                      $MSGBUF                          05470000
+                                                                        05480000
+         EJECT                                                          05490000
+***************************************************************         05500000
+*                                                                       05510000
+* ROUTINE: REFORMAT                                                     05520000
+*                                                                       05530000
+* DESCRIPTION:                                                          05540000
+*                                                                       05550000
+*    This routine accepts a $MSGBUF multi-line message buffer           05560000
+*    and creates a copy of that buffer, converting the                  05570000
+*    message links to a positive or negative offset from the            05580000
+*    first queued message.  This format is suitable for                 05590000
+*    relocation via $TSEND or XPORT.                                    05600000
+*                                                                       05610000
+* ON ENTRY:                                                             05620000
+*                                                                       05630000
+*    R1  CONTAINS THE ADDRESS OF THE SOURCE $MSGBUF                     05640000
+*                                                                       05650000
+* ON EXIT:                                                              05660000
+*                                                                       05670000
+*    R15 CONTAINS ONE OF THE FOLLOWING RETURN CODES                     05680000
+*                                                                       05690000
+*        RC00 - SINGLE LINE MESSAGE, NO COPY OR RELOC REQUIRED          05700000
+*                                                                       05710000
+*        RC04 - $MSGBUF COPIED AND CONVERTED TO OFFSET FORMAT           05720000
+*                                                                       05730000
+*               R1 - ADDR OF RELOCATABLE $MSGBUF ALLOCATED IN           05740000
+*                    STGMGR TASK ORIENTED STORAGE                       05750000
+*                                                                       05760000
+***************************************************************         05770000
+REFORMAT DS    0H                                                       05780000
+         STM   R0,R15,REGSAVE2         PRESERVE CALLERS REGS            05790000
+         LR    R8,R1                   ACCEPT $MSGBUF                   05800000
+         USING $MSGBUF,R8                                               05810000
+         ICM   R15,15,$MSBLINK         MULTILINE MESSAGE, RC00 IF NOT   05820000
+         BZ    RETURN                  FAST EXIT IF NOT                 05830000
+                                                                        05840000
+         STGGET *$MSBUSED,QH=TSKSTG    SHORT TERM MEMORY                05850000
+         BNZ   ERR_STG                 STORAGE MGMT FAILURE             05860000
+                                                                        05870000
+         LR    R14,R1                  COPY ADDRESS                     05880000
+         L     R15,$MSBUSED            LENGTH                           05890000
+         LR    R2,R8                   SOURCE BUFFER                    05900000
+         LR    R3,R15                  SOURCE LENGTH = TARGET LENGTH    05910000
+         MVCL  R14,R2                  MODIFIABLE COPY OF $MSGBUF       05920000
+                                                                        05930000
+         LA    R4,$MSBHDR              ADDR OF FIRST MSG OF SOURCE      05940000
+         LR    R8,R1                   SWITCH BASE TO COPY              05950000
+         LA    R6,$MSBHDR              FIRST RECORD IN COPIED MSGBUF    05960000
+         LR    R5,R6                   START WITH THE FIRST             05970000
+         USING $MSBHDR,R5              CHOKE UP ON ADDRESSABILITY       05980000
+                                                                        05990000
+*--------------------------------------------------------------         06000000
+*   CONVERT MESSAGE LINKS TO OFFSETS (OFFLINKS)                         06010000
+*--------------------------------------------------------------         06020000
+REFLOC   DS    0H                                                       06030000
+         ICM   R2,15,$MSBLINK          LOCATE MSG IN SOURCE BUFFER      06040000
+         BZ    COPYCPT                 END OF LINK CONVERSION           06050000
+         SR    R2,R4                   CONVERT ADDR TO OFFSET           06060000
+         ST    R2,$MSBLINK             SET FORWARD PTR USING OFFSET     06070000
+         LA    R5,0(R2,R6)             ADVANCE BASE TO NEXT MSG COPY    06080000
+         B     REFLOC                  AGAIN                            06090000
+                                                                        06100000
+COPYCPT  DS    0H                                                       06110000
+         LA    R15,RC04                INDICATE COPY MADE               06120000
+                                                                        06130000
+*--------------------------------------------------------------         06140000
+*   RETURN RELOCATABLE $MSGBUF TO CALLER                                06150000
+*--------------------------------------------------------------         06160000
+RETURN   DS    0H                      R1 CONTAINS $MSGBUF COPY PTR     06170000
+         LM    R2,R14,REGSAVE2+8       RESTORE CALLERS REGS             06180000
+         BR    R14                                                      06190000
+         DROP  R5,R8                   ROVING $MSBHDR, $MSGBUF          06200000
+                                                                        06210000
+         EJECT                                                          06220000
+***************************************************************         06230000
+*                                                                       06240000
+* ROUTINE: DISPLOCK - ACQUIRE DISP LOCK                                 06250000
+*                                                                       06260000
+***************************************************************         06270000
+DISPLOCK DS    0H                                                       06280000
+         ST    R14,FWORD          PRESERVE RETURN ADDRESS               06290000
+                                                                        06300000
+         $SER  OBTAIN,DISP        ACQUIRE DISP LOCK                     06310000
+                                                                        06320000
+         BNZ   *+8                BRANCH IF ALREADY OWNED               06330000
+         OI    CNTLFLGS,CNTLDISP  ELSE INDICATE LOCK ACQUIRED           06340000
+                                                                        06350000
+         L     R14,FWORD          RESTORE RETURN ADDRESS                06360000
+         BR    R14                RETURN                                06370000
+                                                                        06380000
+         EJECT                                                          06390000
+***************************************************************         06400000
+*                                                                       06410000
+* ROUTINE: DISPUNLK - RELEASE DISP LOCK                                 06420000
+*                                                                       06430000
+***************************************************************         06440000
+DISPUNLK DS    0H                                                       06450000
+         ST    R14,FWORD          PRESERVE RETURN ADDRESS               06460000
+         SR    R15,R15            PRESUME SUCCESS                       06470000
+                                                                        06480000
+         TM    CNTLFLGS,CNTLDISP  LOCK ACQUIRED?                        06490000
+         BNO   DISPUNX            NO RELEASE OTHERWISE                  06500000
+         NI    CNTLFLGS,FF-CNTLDISP   INDICATE LOCK NOT HELD            06510000
+                                                                        06520000
+         $SER  RELEASE,DISP       RELEASE DISP LOCK                     06530000
+                                                                        06540000
+DISPUNX  DS    0H                                                       06550000
+         L     R14,FWORD          RESTORE RETURN ADDRESS                06560000
+         BR    R14                RETURN                                06570000
+                                                                        06580000
+         EJECT                                                          06590000
+***************************************************************         06600000
+*                                                                       06610000
+*   LOCAL READ/ONLY DATA AREAS, ETC.                                    06620000
+*                                                                       06630000
+***************************************************************         06640000
+         LTORG ,                                                        06650000
+                                                                        06660000
+         PRINT NOGEN                                                    06670000
+         ITASK ,                                                        06680000
+         ICVT  ,                                                        06690000
+         END   ,                                                        06700000

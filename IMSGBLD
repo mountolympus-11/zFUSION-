@@ -1,0 +1,408 @@
+IMSGBLD  TITLE '- CONSTRUCT MSG BLOCK FROM TEXT BUFFER'                 00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE: IMSGBLD - Construct message block from text buffer           00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This routine is used to construct a message buffer                 00080000
+*    representing a single or multiple line message from a              00090000
+*    C-style character string terminated by a zero byte and             00100000
+*    containing zero or more newline characters.  Each text             00110000
+*    line is represented by an entry in the buffer that                 00120000
+*    consists of header and the message identifier / message            00130000
+*    text.                                                              00140000
+*                                                                       00150000
+*    If the message buffer provided has been previously                 00160000
+*    initialized, as determined by $MSBUSED NE 0, messages are          00170000
+*    inserted in the message queue previously accumulated.              00180000
+*                                                                       00190000
+*    Messages are entered in either the front of the rear of            00200000
+*    the message queue.  Multiline messages are inserted in             00210000
+*    FIFO sequence in the designated insertion location.                00220000
+*                                                                       00230000
+*                                                                       00240000
+* NOTES:                                                                00250000
+*                                                                       00260000
+*    Message entries ($MSBHDR) are aligned on fullword bounds           00270000
+*                                                                       00280000
+*                                                                       00290000
+* ON ENTRY:                                                             00300000
+*                                                                       00310000
+*    R1 contains the addr of a plist constructed as follows:            00320000
+*                                                                       00330000
+*          +00 - addr of message identifier (leadin) string             00340000
+*          +04 - leng of message identifier or zero if suppressed       00350000
+*          +08 - addr of msg buffer ($MSGBUF format)                    00360000
+*          +12 - leng of EBCDICZ text buffer                            00370000
+*          +16 - addr of msg text line origin                           00380000
+*          +20 - addr of message sequence flag (0-FIFO, /0-LIFO)        00390000
+*                                                                       00400000
+*    R0 contains the addr of a 256 byte workarea                        00410000
+*                                                                       00420000
+*                                                                       00430000
+* ON EXIT:                                                              00440000
+*                                                                       00450000
+*    r15 contains one of the following return codes                     00460000
+*                                                                       00470000
+*          RC00 - successful completion                                 00480000
+*                                                                       00490000
+*                 R1 - origin of msg block                              00500000
+*                 R0 - total number of buffered msg lines               00510000
+*                                                                       00520000
+*          RC04 - construction area not large enough                    00530000
+*                                                                       00540000
+*          RC08 - invalid msg buffer provided for append                00550000
+*                 operation                                             00560000
+*                                                                       00570000
+**<DOC-OFF>****************************************************         00580000
+                                                                        00590000
+         EJECT                                                          00600000
+***************************************************************         00610000
+*                                                                       00620000
+* MAINTENANCE:                                                          00630000
+*                                                                       00640000
+*    04/15/93 R. Rurgeon                                                00650000
+*             Initial version                                           00660000
+*                                                                       00670000
+*    11/17/94 Su-fen Wu   PAR# 156435                                   00680000
+*             Add processing of a wrap <w>                              00690000
+*                                                                       00700000
+*    04/24/95 R. Turgeon  rel 2.0                                       00710000
+*             Implement LIFO / FIFO message queuing option              00720000
+*                                                                       00730000
+***************************************************************         00740000
+                                                                        00750000
+         EJECT                                                          00760000
+         #WORK LENGTH=256    BEGIN WORKAREA                             00770000
+                                                                        00780000
+FLAGS    DS    X             LOCAL FLAG BYTE                            00790000
+F$EOS    EQU   X'80'            END OF TEXT STRING ENCOUNTERED          00800000
+F$WRAP   EQU   X'40'            WRAP BYTE ENCOUNTERED                   00810000
+                                                                        00820000
+MSGBUF   DS    A             MESSAGE BLOCK ORIGIN                       00830000
+MSGIDA   DS    A             MESSAGE IDENTIFIER ORIGIN                  00840000
+MSGIDLN  DS    F             MESSAGE IDENTIFIER LENGTH                  00850000
+                                                                        00860000
+REGSAVE  DS    16F           R0-R15 LOCAL REGISTER SAVEAREA             00870000
+                                                                        00880000
+         #ENDWORK ,          END WORKAREA                               00890000
+                                                                        00900000
+         EJECT                                                          00910000
+         $MSGBUF ,           MESSAGE BLOCK FORMAT                       00920000
+                                                                        00930000
+         EJECT                                                          00940000
+         EQUS  LINKAGE=COND                                             00950000
+                                                                        00960000
+         EJECT ,                                                        00970000
+IMSGBLD  #ENTER PREG=R8,WAPASS=YES                                      00980000
+                                                                        00990000
+         EJECT                                                          01000000
+***************************************************************         01010000
+*                                                                       01020000
+*   FETCH PASSED PARAMETERS                                             01030000
+*                                                                       01040000
+***************************************************************         01050000
+                                                                        01060000
+         LM    R2,R7,0(R8)        FETCH PASSED PARAMETERS               01070000
+         ST    R2,MSGIDA          MESSAGE IDENTIFIER ORIGIN             01080000
+         ST    R3,MSGIDLN         MESSAGE IDENTIFIER LENGTH             01090000
+                                                                        01100000
+         USING $MSGBUF,R4         MSG BLOCK FORMAT                      01110000
+         ST    R4,MSGBUF          SAVE FOR RETURN                       01120000
+*                                 R5 <== BUFFER LENGTH                  01130000
+*                                 R6 <== MESSAGE TEXT LINE ORIGIN       01140000
+*                                 R7 <== MESSAGE SEQUENCE OPTION FLAG   01150000
+                                                                        01160000
+***************************************************************         01170000
+*                                                                       01180000
+*   INITIALIZATION AND VALIDATION                                       01190000
+*                                                                       01200000
+***************************************************************         01210000
+                                                                        01220000
+         ICM   R1,15,$MSBSIZE     BUFFER PREVIOUSLY INITIALIZED?        01230000
+         BNZ   BUFINIT            INIT IF NOT                           01240000
+                                                                        01250000
+         XC    $MSGBUF($MSBPFXL),$MSGBUF                                01260000
+         LA    R0,$MSBPFXL        LENGTH OF BUFFER PREFIX               01270000
+         CR    R5,R0              MINIMUM RQMTS SATISFIED?              01280000
+         BNH   ERR_OVFL           LENGTH RQMT NOT SATISFIED             01290000
+         ST    R5,$MSBSIZE        POST BUFFER SIZE                      01300000
+         ST    R0,$MSBUSED        SPACE CONSUMED BY PREFIX              01310000
+                                                                        01320000
+         LA    R1,$MSGQF          INITIALIZE MSG QUEUE HEADER           01330000
+         ST    R1,$MSGQL                                                01340000
+                                                                        01350000
+BUFINIT  DS    0H                                                       01360000
+                                                                        01370000
+*--------------------------------------------------------------         01380000
+*   DETERMINE MESSAGE INSERTION LOCATION / FIFO OR LIFO QUEUING         01390000
+*--------------------------------------------------------------         01400000
+                                                                        01410000
+PREV     USING $MSBHDR,R9         ROVING PREDECESSOR ENTRY ADDRESS      01420000
+                                                                        01430000
+         L     R9,$MSGQL          ASSUME FIFO INSERT AT END OF QUEUE    01440000
+         LTR   R7,R7              MESSAGE SEQUENCE INDICATOR PROVIDED?  01450000
+         BZ    IPSET              DEFAULT TO FIFO IF NOT                01460000
+         CLI   0(R7),0            FIFO QUEUING SPECIFIED?               01470000
+         BE    IPSET              SKIP IF SO                            01480000
+         LA    R9,$MSGQF          LIFO INSERT AT FRONT OF QUEUE         01490000
+                                                                        01500000
+IPSET    DS    0H                                                       01510000
+                                                                        01520000
+*--------------------------------------------------------------         01530000
+*   IDENTIFY FREE SPACE AREA AND SPACE REMAINING                        01540000
+*--------------------------------------------------------------         01550000
+                                                                        01560000
+         USING $MSBHDR,R7         PREPARE FOR MSG ADDITION              01570000
+                                                                        01580000
+         LA    R7,$MSGBUF         MESSAGE BUFFER ORIGIN                 01590000
+         AL    R7,$MSBUSED                                              01600000
+         L     R5,$MSBSIZE        TOTAL SIZE OF BUFFER                  01610000
+         S     R5,$MSBUSED        LESS AMOUNT ALREADY CONSUMED          01620000
+                                                                        01630000
+         EJECT ,                                                        01640000
+***************************************************************         01650000
+*                                                                       01660000
+*   EXTRACT LINE FROM TEXT BUFFER AND INSERT IN MSG BLOCK               01670000
+*                                                                       01680000
+***************************************************************         01690000
+                                                                        01700000
+EXTNEXT  DS    0H                                                       01710000
+         TM    FLAGS,F$EOS        END OF STRING ENCOUNTERED?            01720000
+         BO    COMPLETE           DONE IF SO                            01730000
+                                                                        01740000
+         LR    R1,R6              R1 <== TEXT BUFFER SEGMENT            01750000
+         BAS   R14,GETLINE        IDENTIFY TEXT LINE                    01760000
+         LR    R2,R6              TEXT LINE ORIGIN                      01770000
+         B     *+4(R15)                                                 01780000
+         B     HITNL                                                    01790000
+         B     HITWRAP                                                  01800000
+         B     HITEOS                                                   01810000
+         B     TEXTWRAP                                                 01820000
+                                                                        01830000
+HITNL    DS    0H                                                       01840000
+         LA    R6,1(R1,R6)        RESET FOR NEXT PASS                   01850000
+         B     TEXTGO                                                   01860000
+                                                                        01870000
+HITWRAP  DS    0H                                                       01880000
+         LA    R6,1(R1,R6)        RESET FOR NEXT PASS                   01890000
+         OI    FLAGS,F$WRAP       INDICATE ACCORDINGLY                  01900000
+         B     TEXTGO                                                   01910000
+                                                                        01920000
+HITEOS   DS    0H                                                       01930000
+         LA    R6,1(R1,R6)        RESET FOR NEXT PASS                   01940000
+         OI    FLAGS,F$EOS        INDICATE ACCORDINGLY                  01950000
+         B     TEXTGO                                                   01960000
+                                                                        01970000
+TEXTWRAP DS    0H                                                       01980000
+         LA    R6,0(R1,R6)        RESET FOR NEXT PASS                   01990000
+                                                                        02000000
+TEXTGO   DS    0H                                                       02010000
+         LTR   R1,R1              NULL LINE?                            02020000
+         BNP   EXTNEXT            DISCARD IF SO                         02030000
+                                                                        02040000
+         L     R15,MSGIDLN        LENGTH OF MSG IDENTIFIER              02050000
+         AR    R15,R1             PLUS LENGTH OF TEXT                   02060000
+         LA    R15,$MSBHDRL(,R15) PLUS LENGTH OF LINE HDR               02070000
+         LA    R15,3(,R15)        ROUND                                 02080000
+         SRL   R15,2              TO                                    02090000
+         SLL   R15,2              FWORD                                 02100000
+                                                                        02110000
+*--------------------------------------------------------------         02120000
+*   REFORMAT MSG AND PLACE IN RETURN BLOCK - TOTAL LEN IN R15           02130000
+*--------------------------------------------------------------         02140000
+                                                                        02150000
+         SR    R5,R15             ALL FITS IN SPACE REMAINING?          02160000
+         BM    ERR_OVFL           FAIL IF NOT                           02170000
+                                                                        02180000
+         L     R0,$MSBUSED        TOTAL SIZE OF BLOCK CONSUMED          02190000
+         AR    R0,R15             ACCOUNT FOR THIS ENTRY                02200000
+         ST    R0,$MSBUSED        SAVE UPDATED VALUE                    02210000
+                                                                        02220000
+         XC    $MSBHDR($MSBHDRL),$MSBHDR                                02230000
+                                                                        02240000
+         LR    R0,R1              TEXT LENGTH                           02250000
+         AL    R0,MSGIDLN         PLUS LENGTH OF IDENTIFIER             02260000
+         STH   R0,$MSBLEN         TOTAL MSG TEXT LENGTH                 02270000
+                                                                        02280000
+         ICM   R14,15,MSGIDLN     LENGTH OF IDENTIFIER                  02290000
+         BZ    NOMSGID            MESSAGES NOT TAGGED                   02300000
+         L     R3,MSGIDA          ADDR OF MSG IDENTIFIER STRING         02310000
+         BCTR  R14,0              PREPARE FOR COPY                      02320000
+         EX    R14,*+4            COPY                                  02330000
+         MVC   $MSBTEXT(*-*),0(R3)                                      02340000
+         LA    R14,1(,R14)        RESTORE TRUE LENGTH OF IDENTIFIER     02350000
+                                                                        02360000
+NOMSGID  DS    0H                                                       02370000
+         LA    R14,$MSBTEXT(R14)  TEXT LOCATION                         02380000
+         LR    R15,R1             TARGET LENGTH IS                      02390000
+         LR    R3,R15             SAME AS SOURCE LENGTH                 02400000
+         MVCL  R14,R2             INSERT MSG TEXT, R14 HAS FREE PTR     02410000
+                                                                        02420000
+*--------------------------------------------------------------         02430000
+*   INSERT MESSAGE IN QUEUE USING EITHER FIFO OR LIFO QUEUING           02440000
+*--------------------------------------------------------------         02450000
+                                                                        02460000
+         L     R0,PREV.$MSBLINK   FORWARD LINK FROM PREDECESSOR         02470000
+         ST    R0,$MSBLINK        BECOMES FORWARD LINK FROM CURRENT     02480000
+         ST    R7,PREV.$MSBLINK   INSERT NEW ENTRY AFTER PREDECESSOR    02490000
+                                                                        02500000
+         C     R9,$MSGQL          INSERTION OCCURRED AT END OF QUEUE?   02510000
+         BNE   *+8                SKIP IF NOT                           02520000
+         ST    R7,$MSGQL          REPLACE PTR TO LAST ENTRY IF SO       02530000
+                                                                        02540000
+         LR    R9,R7              NEW PREDECESSOR IS NEW ENTRY          02550000
+         LA    R7,3(,R14)         ADVANCE TO NEXT RETURN AREA SLOT      02560000
+         SRL   R7,2               TO                                    02570000
+         SLL   R7,2               FWORD                                 02580000
+                                                                        02590000
+*--------------------------------------------------------------         02600000
+*   UPDATE MESSAGE HEADER STATS AND GO FOR NEXT MESSAGE LINE            02610000
+*--------------------------------------------------------------         02620000
+                                                                        02630000
+         LH    R14,$MSGCNT        UPDATE                                02640000
+         LA    R14,1(,R14)        MESSAGE                               02650000
+         STH   R14,$MSGCNT        COUNT                                 02660000
+                                                                        02670000
+         B     EXTNEXT            AND PROCESS NEXT MSG LINE             02680000
+                                                                        02690000
+         EJECT ,                                                        02700000
+***************************************************************         02710000
+*                                                                       02720000
+*   RETURN COMPLETION STATUS AND MESSAGE BLOCK TO REQUESTOR             02730000
+*                                                                       02740000
+***************************************************************         02750000
+                                                                        02760000
+COMPLETE DS    0H                                                       02770000
+         LA    R15,RC00           NORMAL COMPLETION                     02780000
+         L     R1,MSGBUF          RETURN MESSAGE BLOCK ORIGIN           02790000
+         LH    R0,$MSGCNT         AND NUMBER OF ENTRIES / LINES         02800000
+         B     EXIT               DONE                                  02810000
+                                                                        02820000
+ERR_OVFL DS    0H                 RETURN AREA OVERFLOW                  02830000
+         LA    R15,RC04           INDICATE ERROR                        02840000
+         B     EXIT               DONE                                  02850000
+                                                                        02860000
+ERR_APND DS    0H                 INVALID MSGBUF DETECTED ON APPEND     02870000
+         LA    R15,RC08           INDICATE ERROR                        02880000
+         B     EXIT               DONE                                  02890000
+                                                                        02900000
+EXIT     DS    0H                                                       02910000
+         #EXIT ,                  RETURN                                02920000
+                                                                        02930000
+         DROP  R4,R7              $MSGBUF, $MSGHDR                      02940000
+                                                                        02950000
+         EJECT ,                                                        02960000
+***************************************************************         02970000
+*                                                                       02980000
+* ROUTINE:  GETLINE - Extract line from text buffer                     02990000
+*                                                                       03000000
+* DESCRIPTION:                                                          03010000
+*                                                                       03020000
+*    This routine extracts message lines from a zero delimitted         03030000
+*    (EBCDICZ) text buffer.  The given text buffer is scanned           03040000
+*    for the next occurrence of a newline character or the end          03050000
+*    of buffer indicator (\0).  Either dlm terminates the               03060000
+*    message line.  Subsequent message lines can be extracted           03070000
+*    by advancing the text buffer ptr by the size of the message        03080000
+*    extracted plus one.                                                03090000
+*                                                                       03100000
+*                                                                       03110000
+* ON ENTRY:                                                             03120000
+*                                                                       03130000
+*    R1  - addr of line origin                                          03140000
+*                                                                       03150000
+*                                                                       03160000
+* ON EXIT:                                                              03170000
+*                                                                       03180000
+*    R1  - length of line                                               03190000
+*                                                                       03200000
+*    R15 - line termination type, as follows:                           03210000
+*                                                                       03220000
+*             00 - new line ( <NL> hit )                                03230000
+*             04 - wrap ( <W> hit )                                     03240000
+*             08 - end of string ( EOS hit )                            03250000
+*             12 - wrapped line                                         03260000
+*                                                                       03270000
+***************************************************************         03280000
+                                                                        03290000
+GETLINE  DS    0H                                                       03300000
+         STM   R0,R15,REGSAVE     SAVE MAINLINE REGS                    03310000
+         LR    R3,R1              LINE ORIGIN                           03320000
+         LR    R4,R1              UNMODIFIED FOR LENGTH CALC            03330000
+         SR    R2,R2              CLEAR FOR TRT IMAGE BYTE              03340000
+                                                                        03350000
+         TM    FLAGS,F$WRAP                                             03360000
+         BO    GETWRAP                                                  03370000
+                                                                        03380000
+GETLNXT  DS    0H                 SCAN FOR TERMINATOR                   03390000
+         TRT   0(256,R3),GETLTAB  TEST MSG SEGMENT                      03400000
+         BC    HITS,GETLHIT       TERMINATOR ENCOUNTERED                03410000
+         LA    R3,256(,R3)        ELSE TRY AGAIN                        03420000
+         B     GETLNXT                                                  03430000
+                                                                        03440000
+GETWRAP  DS    0H                                                       03450000
+         TRT   0(100,R3),GETLTAB   TEST MSG SEGMENT                     03460000
+         BC    HITS,GETLHIT       TERMINATOR ENCOUNTERED                03470000
+         LA    R15,RC12                                                 03480000
+         LA    R3,80(R3)                                                03490000
+         TRT   0(20,R3),WRAPTAB   TEST DELIMITER                        03500000
+         BC    HITS,GETWHIT       TERMINATOR ENCOUNTERED                03510000
+         LH    R1,=H'80'                                                03520000
+         B     GETRETN                                                  03530000
+                                                                        03540000
+GETLHIT  DS    0H                                                       03550000
+         LR    R15,R2             COPY IMAGE BYTE                       03560000
+         SH    R15,=H'4'          COPY IMAGE BYTE                       03570000
+         SR    R1,R4              LENGTH OF TEXT ACCEPTED               03580000
+         B     GETRETN                                                  03590000
+                                                                        03600000
+GETWHIT  DS    0H                                                       03610000
+         SR    R1,R4              LENGTH OF TEXT ACCEPTED               03620000
+         LA    R1,1(R1)                                                 03630000
+                                                                        03640000
+GETRETN  DS    0H                                                       03650000
+         LM    R2,R14,REGSAVE+8   RESTORE MAINLINE REGS                 03660000
+         BR    R14                RETURN                                03670000
+                                                                        03680000
+*--------------------------------------------------------------         03690000
+*   TEXT SCAN DLM IDENTIFICATION                                        03700000
+*--------------------------------------------------------------         03710000
+                                                                        03720000
+NL       EQU   X'0A'              ASCII NEW LINE (LF) CHAR              03730000
+                                                                        03740000
+GETLTAB  DS    0A                                                       03750000
+         DC    256AL1(0)                                                03760000
+         ORG   GETLTAB+0          IDENTIFY END-OF-STRING DLM            03770000
+         DC    AL1(12)                                                  03780000
+         ORG   GETLTAB+C'{'       IDENTIFY WRAP                         03790000
+         DC    AL1(8)                                                   03800000
+         ORG   GETLTAB+C'\'       IDENTIFY NEW-LINE CHAR                03810000
+         DC    AL1(4)                                                   03820000
+         ORG   ,                                                        03830000
+                                                                        03840000
+WRAPTAB  DS    0A                                                       03850000
+         DC    256AL1(0)                                                03860000
+         ORG   WRAPTAB+C' '       IDENTIFY BLANK                        03870000
+         DC    AL1(8)                                                   03880000
+         ORG   WRAPTAB+C','       IDENTIFY COMMA                        03890000
+         DC    AL1(8)                                                   03900000
+         ORG   WRAPTAB+C'.'       IDENTIFY PERIOD                       03910000
+         DC    AL1(8)                                                   03920000
+         ORG   WRAPTAB+C')'       IDENTIFY CLOSE BRACKET                03930000
+         DC    AL1(8)                                                   03940000
+         ORG   ,                                                        03950000
+                                                                        03960000
+         EJECT ,                                                        03970000
+***************************************************************         03980000
+*                                                                       03990000
+*   LOCAL READ/ONLY DATA AREAS, ETC.                                    04000000
+*                                                                       04010000
+***************************************************************         04020000
+                                                                        04030000
+         LTORG ,                                                        04040000
+                                                                        04050000
+         PRINT NOGEN                                                    04060000
+         ICVT  ,                                                        04070000
+         END   ,                                                        04080000

@@ -1,0 +1,706 @@
+INAVBVAR TITLE '- ATTACH VARIABLE DEFINITIONS TO NAVIGATION STN'        00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE: INAVBVAR - ATTACH VARIABLE DEFS TO NAVIGATION STN            00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    THIS ROUTINE IS USED TO ATTACH ALL VARIABLE DEFINITIONS            00080000
+*    FOUND IN THE GIVEN PROJECT TO THEIR APPROPRIATE STN                00090000
+*    ENTRIES.  VARIABLES ARE DEFINED AGAINST A SINGLE SCREEN            00100000
+*    INSTANCE, OR AGAINST ALL SCREENS IN A SCREEN SET.  THE             00110000
+*    TYPE OF RELATIONSHIP IS NOT TRACKED IN THE SYSVAR                  00120000
+*    REQUIRING THE SPECIFICS TO BE TESTED HERE.  ADDITIONALLY,          00130000
+*    VARIABLES MAY BE REGION-RESIDENT.  WHEN THOSE RELATIONSHIPS        00140000
+*    ARE FOUND, THEY ARE VALIDATED HERE AS WELL.                        00150000
+*                                                                       00160000
+*                                                                       00170000
+* NOTES:                                                                00180000
+*                                                                       00190000
+*    THE NAVIGATION STATE TRANSITION NETWORK IS A MULTILINK             00200000
+*    STRUCTURE THAT MUST BE SERIALIZED WHILE UNDER CONSTRUCTION.        00210000
+*    THE CALLER MUST HOLD THE PROJECT-INSTANCE (MIL) LOCK.              00220000
+*                                                                       00230000
+*    THE SYSVARIABLES CATALOG TABLE IS READ USING THE TABLE             00240000
+*    TOKEN CONTAINED IN THE IPROJ.  THE TABLE IS NEITHER OPENED         00250000
+*    NOR CLOSED.                                                        00260000
+*                                                                       00270000
+*                                                                       00280000
+* ON ENTRY:                                                             00290000
+*                                                                       00300000
+*    R1  CONTAINS THE ADDRESS OF THE HOST IPROJ TO WHICH ALL            00310000
+*        NAVIGATIONAL STRUCTURES ARE ATTACHED.  IT IS ASSUMED           00320000
+*        THAT THE NAVIGATION STORAGE QUEUE HEADER DEFINED               00330000
+*        AT IPROJ.PRJEXSTG HAS BEEN INITIALIZED AND THAT THE            00340000
+*        STN HAS BEEN CREATED.                                          00350000
+*                                                                       00360000
+*                                                                       00370000
+* ON EXIT:                                                              00380000
+*                                                                       00390000
+*    R15 CONTAINS ONE OF THE FOLLOWING RETURN CODES                     00400000
+*                                                                       00410000
+*        RC00  - ALL VARIABLES ATTACHED WITHOUT ERROR                   00420000
+*                                                                       00430000
+*        RC04  - RESERVED                                               00440000
+*                                                                       00450000
+*        RC08  - NO VARIABLES DEFINED                                   00460000
+*                                                                       00470000
+*        RC12  - INVALID OR CONFLICTING CATALOG ENTRIES                 00480000
+*                ENCOUNTERED, CONSULT THE RETURN CODE                   00490000
+*                                                                       00500000
+*        RC20  - UNRECOVERABLE ERROR                                    00510000
+*                                                                       00520000
+*                                                                       00530000
+*    R0  CONTAINS ONE OF THE FOLLOWING REASON CODES                     00540000
+*                                                                       00550000
+*        RSN00 - NO EXCEPTIONS NOTED                                    00560000
+*                                                                       00570000
+*        RSN04 - AT LEAST ONE VARIABLE WAS DISCARDED DUE TO             00580000
+*                AN IMPROPER DEFINITION OR RELATIONSHIP.                00590000
+*                DIAGNOSTIC MSG QUEUED FOR RU RETURN.                   00600000
+*                                                                       00610000
+**<DOC-OFF>****************************************************         00620000
+                                                                        00630000
+***************************************************************         00640000
+*                                                                       00650000
+* MAINTENANCE:                                                          00660000
+*                                                                       00670000
+*    12/06/94 R. TURGEON                                                00680000
+*             REMOVED PAGE= / SHRPAGE= FOR $SPACE, $OBJECT,             00690000
+*             AND TB* SERVICE REQUESTS                                  00700000
+*                                                                       00710000
+***************************************************************         00720000
+                                                                        00730000
+         EJECT                                                          00740000
+         #WORK ,                  WRITEABLE WORKING STORAGE             00750000
+                                                                        00760000
+RETCODE  DS    F                  RETURN CODE RETENTION                 00770000
+RSNCODE  DS    F                  REASON CODE RETENTION                 00780000
+ACCEPTS  DS    F                  NUMBER OF VARIABLES ACCEPTED          00790000
+                                                                        00800000
+@VARPTR  DS    A                  SYSVARIABLE BUFFER PTR                00810000
+@VARLEN  DS    F                  SYSVARIABLE LENGTH                    00820000
+INDEXP   DS    A                  SYSVAR INDEX NAME PTR OR ZERO         00830000
+                                                                        00840000
+CURRNVLA DS    A                  ADDR OF NVLAVAR FOR VAR OR ZERO       00850000
+CURRVAR  DS    CL16               CURRENT VARIABLE NAME                 00860000
+                                                                        00870000
+NEWSLOTS DS    F                  SLOT COUNT FOR VAR NODE REALLOCATION  00880000
+USERAREA DS    4F                 $ENTITY USERDATA EXCHANGE AREA        00890000
+REGSAVE  DS    16F                LOCAL REGISTER SAVEAREA               00900000
+                                                                        00910000
+$LVSLOTS EQU   4                  INITIAL NVLAVAR SLOT COUNT            00920000
+$NVLAVAR DS    XL(NVLPFXLN+NVLENTLN*$LVSLOTS)                           00930000
+                                                                        00940000
+MSGLIST  $MSG  FIELDS=(,,,,),MF=L $MSG PLIST CONSTRUCTION AREA          00950000
+                                                                        00960000
+         #ENDWORK ,               PROJECT CONTROL BLOCK                 00970000
+                                                                        00980000
+         EJECT                                                          00990000
+         IPROJ ,                  PROJECT CONTROL BLOCK                 01000000
+                                                                        01010000
+         EJECT                                                          01020000
+         NAV   ,                  NAVIGATION NETWORK STRUCTURES         01030000
+                                                                        01040000
+         EJECT                                                          01050000
+         REGION ,                 REGION NETWORK                        01060000
+                                                                        01070000
+         EJECT                                                          01080000
+         EXRGNET ,                EXECUTION REGION NETWORK              01090000
+                                                                        01100000
+         EJECT                                                          01110000
+         $ENTITY DSECT=YES        ENTITY MANAGER REQUEST LIST           01120000
+                                                                        01130000
+         EJECT                                                          01140000
+         ICATALOG VARIABLES       SYSVARIABLES PROCESSED                01150000
+                                                                        01160000
+         EJECT                                                          01170000
+         TBSERVIS SET,GET                                               01180000
+                                                                        01190000
+         EJECT                                                          01200000
+         TRACODES PRINT=NOGEN     TRACE TABLE ENTRY CODES               01210000
+*                                                                       01220000
+         ABCODES PRINT=NOGEN      $ABEND CODES                          01230000
+*                                                                       01240000
+         EQUS  ,                                                        01250000
+                                                                        01260000
+         $MSGDFT PREFIX=ICTPID,COMPID='NAV',TABLE=*#MSGS,              X01270000
+               CONID=*ICTCONID,CONNAME=ICTCONNM,                       X01280000
+               DEST=$IMSGQ,                                            X01290000
+               MSGQA=PRJEXMCQ,STGQH=PRJEXSTG,                          X01300000
+               PRINT=NOGEN,MF=(E,MSGLIST)                               01310000
+                                                                        01320000
+         EJECT                                                          01330000
+INAVBVAR #ENTER PREG=(R7)                                               01340000
+                                                                        01350000
+         USING  ITASK,R10         STDENV                                01360000
+         L      R9,TSKPCBC        PROCESS MODE                          01370000
+         USING  IPCB,R9                                                 01380000
+                                                                        01390000
+         EJECT                                                          01400000
+***************************************************************         01410000
+*                                                                       01420000
+*   SCAN THE SYSVARIABLES TABLE AND MATCH ENTRIES TO SCREENS            01430000
+*   OR SCREEN SETS.  WHEN AN OWNING REGION IS INDICATED, THAT           01440000
+*   RELATIONSHIP IS VALIDATED HERE.                                     01450000
+*                                                                       01460000
+***************************************************************         01470000
+         USING IPROJ,R7           PROJECT RESOURCES                     01480000
+                                                                        01490000
+         LA    R3,=CL8'VARNAME'   SYSVARS ORDERED BY VARIABLE NAME      01500000
+         ST    R3,INDEXP          INDEX NAME PTR                        01510000
+                                                                        01520000
+WOINDEX  DS    0H                 SELECT / DROP REF TO RECENT INDEX     01530000
+         TBSET POS=TOP,           ESTABLISH POSITION AT TOP OF TABLE   X01540000
+               TTOKEN=PRJTKVAR,                                        X01550000
+               INDEX=(R3),                                             X01560000
+               MF=(E,MFE_LIST)                                          01570000
+                                                                        01580000
+         LTR   R15,R15            SUCCESSFUL COMPLETION?                01590000
+         BZ    VARSET             READY FOR SCAN IF SO                  01600000
+         LTR   R3,R3              ATTEMPTED USE OF RECENT INDEX?        01610000
+         BZ    ABN_TBSV           PROBLEM WITH BASE TABLE               01620000
+         SR    R3,R3              TRY WITHOUT INDEX, MINIMAL IMPACT     01630000
+         ST    R3,INDEXP          RETRACT USE OF INDEX                  01640000
+         B     WOINDEX            RETRY                                 01650000
+                                                                        01660000
+VARSET   DS    0H                                                       01670000
+                                                                        01680000
+*--------------------------------------------------------------         01690000
+*   DETERMINE LENGTH REQUIRED FOR NEXT SYSVARIABLES ENTRY               01700000
+*--------------------------------------------------------------         01710000
+VARINEXT DS    0H                                                       01720000
+         TBGET FWORD,             GET SIZE REQUIRED FOR SYSVAR         X01730000
+               LENGTH=1,          FORCE REJECT WITH LENGTH             X01740000
+               POS=NEXT,                                               X01750000
+               INDEX=*INDEXP,                                          X01760000
+               TTOKEN=PRJTKVAR,                                        X01770000
+               MF=(E,MFE_LIST)                                          01780000
+                                                                        01790000
+         CH    R15,=AL2(RC04)     TEST COMPLETION STATUS                01800000
+         BL    ABN_TBSV           ROW ACQUIRED, CANT BE GOOD            01810000
+         BH    ABN_TBSV           TABLE SERVICES ERROR                  01820000
+                                                                        01830000
+         LTR   R0,R0              END OF SYSVARIABLES?                  01840000
+         BZ    NORMRET            DONE IF SO                            01850000
+                                                                        01860000
+*--------------------------------------------------------------         01870000
+*   ACQUIRE NAVIGATION STORAGE POOL EXTENT FOR VARIABLE                 01880000
+*--------------------------------------------------------------         01890000
+         LR    R3,R0              SIZE OF EXTENT REQUIRED               01900000
+                                                                        01910000
+         STGGET (R3),QH=PRJEXSTG  ACQUIRE STORAGE FOR SYSVAR            01920000
+         BNZ   ABN_STG            STORAGE FAILURE                       01930000
+                                                                        01940000
+         LR    R6,R1              ACQUIRED STORAGE                      01950000
+         USING SVARSECT,R6        CAST TO DESIRED FORMAT                01960000
+                                                                        01970000
+*--------------------------------------------------------------         01980000
+*   READ THE SYSVARIABLE DIRECTLY INTO PERMANENT STG SLOT               01990000
+*--------------------------------------------------------------         02000000
+         TBGET SVARSECT,          ACQUIRE SYSVARIABLE ENTRY            X02010000
+               LENGTH=(R3),       FORCE REJECT WITH LENGTH             X02020000
+               POS=NEXT,                                               X02030000
+               INDEX=*INDEXP,                                          X02040000
+               TTOKEN=PRJTKVAR,                                        X02050000
+               MF=(E,MFE_LIST)                                          02060000
+                                                                        02070000
+         CH    R15,=AL2(RC04)     TEST COMPLETION STATUS                02080000
+         BNL   ABN_TBSV           EXPECT SUCCESSFUL DELIVERY            02090000
+                                                                        02100000
+         EJECT                                                          02110000
+***************************************************************         02120000
+*                                                                       02130000
+*   LOCATE SCREEN OR SCREEN-SET TO WHICH VAR IS ASSOCIATED              02140000
+*                                                                       02150000
+***************************************************************         02160000
+         $ENTITY EXTR,            LOCATE STN                           X02170000
+               QNAME=CSTRIMAG,    ENTITY IS AN IMAGE                   X02180000
+               ENTITY=SVARSNAM,   FOREIGN KEY RESIDES IN SYSVAR        X02190000
+               USERDATA=USERAREA,                                      X02200000
+               ANCHOR=PRJEXENT,                                        X02210000
+               MF=(E,MFE_LIST)                                          02220000
+                                                                        02230000
+         CH    R15,=AL2(RC04)     TEST COMPLETION STATUS                02240000
+         BL    VARSTN             STN LOCATED (R1) +                    02250000
+         BE    *+8                VARIABLE NOT ATTACHED TO SCREEN       02260000
+         EX    R0,*               ASSERT 'PROPERLY FORMULATED REQ'      02270000
+                                                                        02280000
+*--------------------------------------------------------------         02290000
+*   SCREEN NAME DID NOT MATCH SYSVAR, RETRY AS SCREEN SET NAME          02300000
+*--------------------------------------------------------------         02310000
+         $ENTITY EXTR,            LOCATE STN                           X02320000
+               QNAME=CSTRSSET,    ENTITY IS A SCREEN SET               X02330000
+               ENTITY=SVARSNAM,   FOREIGN KEY RESIDES IN SYSVAR        X02340000
+               USERDATA=USERAREA,                                      X02350000
+               ANCHOR=PRJEXENT,                                        X02360000
+               MF=(E,MFE_LIST)                                          02370000
+                                                                        02380000
+         CH    R15,=AL2(RC04)     TEST COMPLETION STATUS                02390000
+         BL    VARSTN             STN LOCATED (R1)                      02400000
+         BE    VERR_STN           VARIABLE NOT ATTACHED TO SCREEN       02410000
+         EX    R0,*               ASSERT 'PROPERLY FORMULATED REQ'      02420000
+                                                                        02430000
+VARSTN   DS    0H                                                       02440000
+         L     R5,USERAREA        FETCH PTR TO STN                      02450000
+         USING NVSTN,R5           MAINTAIN ADDRESSABILITY HENCEFORTH    02460000
+                                                                        02470000
+         EJECT                                                          02480000
+***************************************************************         02490000
+*                                                                       02500000
+*   LOCATE REGION TREE FOR SCREEN SET IF VAR IS RGN DEPENDENT           02510000
+*                                                                       02520000
+***************************************************************         02530000
+         TM    SVAREGN,BF         VARIABLE RESIDES IN REGION?           02540000
+         BZ    VARRGNX            DONE HERE IF NOT                      02550000
+                                                                        02560000
+         ICM   R0,15,NVSRGN       REGIONS ASSOC WITH STN AS EXPECTED?   02570000
+         BZ    VERR_SSN           NOT AVAILABLE (CONSULT R15)           02580000
+                                                                        02590000
+         LA    R1,NVSTSSN         ASSUME LOCATE BY SCREEN-SET NAME      02600000
+         TM    0(R1),BF           SCREEN-SET NAME DEFINED?              02610000
+         BNZ   *+8                SKIP IF SO                            02620000
+         LA    R1,NVSTNAME        ELSE REVERT TO UNEMBELISHED SCREEN    02630000
+                                                                        02640000
+         @CALL ILOCSSET,CTYPE=CVT                                       02650000
+                                                                        02660000
+         LTR   R15,R15            REGION TREE LOCATED AS EXPECTED?      02670000
+         BNZ   VERR_SSN           NOT AVAILABLE (CONSULT R15)           02680000
+                                                                        02690000
+*--------------------------------------------------------------         02700000
+*   LOCATE SPECIFIC REGION DEF WITHIN SCREEN-SET RGN TREE               02710000
+*--------------------------------------------------------------         02720000
+         LR    R0,R1              R0 <== REGION TREE (EXRGNET)          02730000
+         LA    R1,SVAREGN         R1 <== REGION NAME                    02740000
+                                                                        02750000
+         @CALL ILOCRGN,CTYPE=CVT  VALIDATE EXISTENCE OF NAMED REGION    02760000
+                                                                        02770000
+         LTR   R15,R15            REGION DEFINED?                       02780000
+         BNZ   VERR_RGN           ERROR IF NOT                          02790000
+                                                                        02800000
+VARRGNX  DS    0H                 END OF REGION PROCESSING              02810000
+                                                                        02820000
+         EJECT                                                          02830000
+***************************************************************         02840000
+*                                                                       02850000
+*   ATTACH THE VARIABLE TO THE STN PREVIOUSLY IDENTIFIED                02860000
+*                                                                       02870000
+***************************************************************         02880000
+         ST    R6,@VARPTR         ADDR OF SYSVAR                        02890000
+         ST    R3,@VARLEN         LENGTH OF SYSVAR                      02900000
+                                                                        02910000
+VECRETRY DS    0H                                                       02920000
+         ICM   R4,15,NVSTVAR      VARIABLE PTR VECTOR                   02930000
+         BZ    VECALLOC           NOT YET ALLOCATED                     02940000
+         USING NVVAR,R4           DECLARE INTENTIONS                    02950000
+                                                                        02960000
+         L     R2,NVVCOUNT        NUMBER OF SLOTS IN USE                02970000
+         C     R2,NVVSLOTS        FREE SLOTS REMAIN?                    02980000
+         BL    VECFMT             READY FOR INSERT IF SO                02990000
+                                                                        03000000
+*--------------------------------------------------------------         03010000
+*   (RE)ALLOCATE VARIABLE VECTOR IF NO SPACE REMAINS                    03020000
+*--------------------------------------------------------------         03030000
+VECALLOC DS    0H                 ALLOC NEW PREDECESSOR LINKAGE BLOCK   03040000
+         LA    R1,##SLOTS         DEFAULT SLOT COUNT FOR NEW BLOCK      03050000
+         LTR   R4,R4              REPLACING FULL VECTOR?                03060000
+         BZ    VECGET             SKIP IF NOT                           03070000
+         L     R1,NVVSLOTS        CURRENT SLOT COUNT                    03080000
+         AR    R1,R1              DOUBLED IN NEW BLOCK                  03090000
+                                                                        03100000
+VECGET   DS    0H                                                       03110000
+         ST    R1,NEWSLOTS        NUMBER OF SLOTS IN NEW BLOCK          03120000
+         MH    R1,=AL2(NVVENTLN)  LENGTH OF EACH SLOT                   03130000
+         LA    R3,NVVARFX(R1)     TOTAL LENGTH OF BLOCK REQUIRED        03140000
+                                                                        03150000
+         STGGET (R3),QH=PRJEXSTG  ACQUIRE NEW VECTOR                    03160000
+         BNZ   ABN_STG            STORAGE FAILURE                       03170000
+                                                                        03180000
+         LR    R8,R1              PRESERVE ACQUIRED STORAGE ADDRESS     03190000
+                                                                        03200000
+*--------------------------------------------------------------         03210000
+*   RETAIN CURRENT CONTENTS OF REPLACED VARIABLE VECTOR                 03220000
+*--------------------------------------------------------------         03230000
+         LTR   R4,R4              REPLACING FULL VECTOR?                03240000
+         BZ    VECFCPT            SKIP THE COPY IF NOT                  03250000
+                                                                        03260000
+         LR    R0,R8              NEW STORAGE                           03270000
+         L     R1,NVVSIZE         SIZE OF FULL VECTOR                   03280000
+         LA    R14,NVVAR          FULL VECTOR ORIGIN                    03290000
+         LR    R15,R1             SOURCE LENGTH = TARGET LENGTH         03300000
+         MVCL  R0,R14             COPY                                  03310000
+                                                                        03320000
+         L     R2,NVVSIZE         SIZE OF OLD BLOCK                     03330000
+                                                                        03340000
+         STGRETN ADDR=(R4),LEN=(R2),QH=PRJEXSTG                         03350000
+         BNZ   ABN_STG            STORAGE MANAGEMENT FAILURE            03360000
+                                                                        03370000
+*--------------------------------------------------------------         03380000
+*   COMPLETE CONFIGURATION OF REPLACEMENT VECTOR                        03390000
+*--------------------------------------------------------------         03400000
+VECFCPT  DS    0H                                                       03410000
+         LR    R4,R8              CAST NEW EXTENT AS VAR VECTOR         03420000
+         ST    R4,NVSTVAR         REANCHOR VAR VECTOR IN STN            03430000
+         ST    R3,NVVSIZE         SIZE OF NEW VECTOR                    03440000
+         L     R0,NEWSLOTS        TOTAL NUMBER OF SLOTS                 03450000
+         ST    R0,NVVSLOTS        REALLOC COMPLETE                      03460000
+         B     VECRETRY           REDRIVE THE REQUEST                   03470000
+                                                                        03480000
+***************************************************************         03490000
+*                                                                       03500000
+*   FORMAT VARIABLE LINKAGE ENTRY - R2 CONTAINS SLOT NUMBER             03510000
+*                                                                       03520000
+***************************************************************         03530000
+VECFMT   DS    0H                                                       03540000
+         MH    R2,=AL2(NVVENTLN)  COMPUTE FREE SLOT OFFSET              03550000
+         LA    R3,NVVENTRY(R2)    ADDR OF FREE SLOT                     03560000
+                                                                        03570000
+         USING NVVENTRY,R3        PREPARE FOR SLOT CONSTRUCTION         03580000
+         MVC   NVVEPTR,@VARPTR    INSERT SYSVAR ENTRY ORIGIN            03590000
+         MVC   NVVELEN,@VARLEN    INSERT SYSVAR ENTRY LENGTH            03600000
+         DROP  R3                 SLOT CONSTRUCTION COMPLETE            03610000
+                                                                        03620000
+         L     R15,NVVCOUNT       NUMBER OF SLOTS IN USE                03630000
+         LA    R15,1(,R15)        ACCOUNT FOR NEW ENTRY                 03640000
+         ST    R15,NVVCOUNT       POST CURRENT USAGE                    03650000
+                                                                        03660000
+         L     R15,ACCEPTS        NUMBER OF VARIABLES ACCEPTED          03670000
+         LA    R15,1(,R15)                                              03680000
+         ST    R15,ACCEPTS                                              03690000
+                                                                        03700000
+*--------------------------------------------------------------         03710000
+*   ENQUEUE ALL STATES CONTAINING INPUT VARS THAT ARE NEITHER           03720000
+*   'REQUIRED' NOR 'LITERAL' FOR USE DURING THE VARIABLE POOL           03730000
+*   LOAD OF DEFAULT VALUES.                                             03740000
+*--------------------------------------------------------------         03750000
+         L     R1,@VARPTR         FETCH SYSVAR LOCATION  ?????          03760000
+V        USING SVARSECT,R1        TEMP ADDRESSABILITY                   03770000
+         CLI   V.SVARUTYP,SVAR$INP            INPUT VARIABLE?           03780000
+         BNE   INVARFIN                       SKIP IF NOT               03790000
+         TM    V.SVARFLG1,SVARF1LT+SVARF1RQ   LITERAL OR REQUIRED?      03800000
+         BNZ   INVARFIN                       NEITHER IS TRACKED        03810000
+                                                                        03820000
+         LH    R2,NVSINVRN        NUMBER OF INPUT VARS ASSOC W/ STN     03830000
+         LA    R0,1(,R2)          UPDATE ACCORDINGLY                    03840000
+         STH   R0,NVSINVRN                                              03850000
+                                                                        03860000
+         LTR   R2,R2              FIRST INPUT VAR IDENTIFIED FOR STN?   03870000
+         BNZ   INVARFIN           SKIP IF NOT                           03880000
+         MVC   NVSINVNX,PRJEXINV  ELSE ADD TO INPUT VAR LIST            03890000
+         ST    R5,PRJEXINV        UPDATE LIST HDR ACCORDINGLY           03900000
+                                                                        03910000
+INVARFIN DS    0H                                                       03920000
+         DROP  V                  SVARSECT                              03930000
+                                                                        03940000
+         EJECT                                                          03950000
+***************************************************************         03960000
+*                                                                       03970000
+*   LINKAGE VARIABLES ARE THOSE USED TO PROVIDE LINKAGE BETWEEN         03980000
+*   MULTIPLE APPLICATIONS.  THEY MUST (10D) BE TAGGED AS SUCH           03990000
+*   IN SYSVARIABLES.  ALL REFERENCES TO THE SAME LINKAGE                04000000
+*   (AKA GLOBAL) VARIABLES FROM MULTIPLE APPLICATIONS ARE               04010000
+*   COLLECTED IN A SINGLE NVLAVAR STRUCTURE.                            04020000
+*                                                                       04030000
+*   THE BY-VARIABLE-NAME INDEX ENSURES THAT ALL LIKE NAMED              04040000
+*   VARIABLES ARE DELIVERED TOGETHER ALLOWING THE NVLAVAR               04050000
+*   TO BE BUILT IN LOCAL WORKING STORAGE AND THEN POSTED WHEN           04060000
+*   THE VARIABLE NAME CHANGES.                                          04070000
+*                                                                       04080000
+***************************************************************         04090000
+         TM    SVARFLG1,SVARF1MA  EXPLICIT GLOBAL VARIABLE DESIGNATION? 04100000
+         BZ    VARINEXT           SKIP THIS SECTION IF NOT              04110000
+         CLC   CURRVAR,SVARNAME   SAME VAR NAME SIGNIFYING LINKAGE?     04120000
+         BE    LVADD              POST NEW ENTRY AT NAME CHANGE         04130000
+         BAS   R14,LVAPOST        ELSE CONSTRUCT FRESH ENTRY            04140000
+         MVC   CURRVAR,SVARNAME   IDENTIFY CURRENT VARIABLE NAME        04150000
+                                                                        04160000
+*--------------------------------------------------------------         04170000
+*   ENSURE LINKAGE VARIABLE NODE SPACE AVAILABLE FOR NEW ENTRY          04180000
+*--------------------------------------------------------------         04190000
+LVADD    DS    0H                                                       04200000
+         L     R8,CURRNVLA        LOC CURR APPL LINKAGE VAR NODE        04210000
+         USING NVLAVAR,R8         MAPPED                                04220000
+         MVC   NVLVNAME,CURRVAR   INIT OR REFRESH VARIABLE NAME         04230000
+         L     R0,NVLUSED         NUMBER OF VARIABLE ENTRY SLOTS        04240000
+         C     R0,NVLSLOTS        CAPACITY OF NODE EXCEEDED?            04250000
+         BL    LVINSE             CREATE NEW ENTRY IF NOT               04260000
+                                                                        04270000
+         BAS   R14,LVAREAL        REALLOCATE THE NODE                   04280000
+         L     R8,CURRNVLA        RESTORE ADDRESSABILITY                04290000
+                                                                        04300000
+LVINSE   DS    0H                                                       04310000
+         L     R1,NVLUSED         CURRENT NUMBER OF VARIABLE ENTRIES    04320000
+         LR    R2,R1              ACCOUNT FOR NEW ENTRY                 04330000
+         LA    R2,1(,R2)          BY BUMPING COUNT ACCORDINGLY          04340000
+         ST    R2,NVLUSED         SAVE UPDATED COUNT                    04350000
+         MH    R1,=AL2(NVLENTLN)  OFFSET TO NEW ENTRY                   04360000
+                                                                        04370000
+         LA    R15,NVLENTRY(R1)   NEW ENTRY ORIGIN                      04380000
+         USING NVLENTRY,R15       TEMP ADDRESSABILITY                   04390000
+         MVC   NVLRECP,NVSRECP    ASSOCIATE REF WITH APPLICATION DEF    04400000
+         MVC   NVLVUTYP,SVARUTYP  VARIABLE USAGE (INPUT, OUTPUT, ETC)   04410000
+         ST    R5,NVLSTN          RELATE LVAR TO CONTAINER STN          04420000
+         B     VARINEXT           NEXT VARIABLE                         04430000
+         DROP  R8,R15             NVLAVAR, NVLENTRY                     04440000
+                                                                        04450000
+         EJECT                                                          04460000
+***************************************************************         04470000
+*                                                                       04480000
+*   VARIABLE DEFINITION OR RELATION IN ERROR. A DESCRIPTION OF          04490000
+*   THE PROBLEM IS GENERATED AND THE VARIABLE BUFFER IS FREED.          04500000
+*   PROCESSING THEN CONTINUES WITH THE NEXT VARIABLE.                   04510000
+*                                                                       04520000
+*      R6 - ADDR OF SYSVARIABLE BUFFER                                  04530000
+*      R3 - LENGTH OF BUFFER                                            04540000
+*                                                                       04550000
+***************************************************************         04560000
+VERR_STN DS    0H                 SCREEN(SET) NOT FOUND                 04570000
+         LA    R2,004             MESSAGE CODE                          04580000
+         B     VERR_COM                                                 04590000
+                                                                        04600000
+VERR_RGN DS    0H                 NAMED REGION NOT DEFINED              04610000
+         LA    R2,006             MESSAGE CODE                          04620000
+         B     VERR_COM           COMMON ERROR CONTINUATION             04630000
+                                                                        04640000
+VERR_SSN DS    0H                 NO REGION TREE FOR SCREEN SET         04650000
+         SR    R0,R0              GENERATE HIVALUES                     04660000
+         BCTR  R0,0                                                     04670000
+         ST    R0,NVSRGN          INDICATE REGION TREE NOT AVAIL        04680000
+         LA    R2,005             MESSAGE CODE                          04690000
+                                                                        04700000
+*--------------------------------------------------------------         04710000
+*   COMMON ERROR MSG DISPOSITION AND RESUMPTION LOGIC                   04720000
+*--------------------------------------------------------------         04730000
+VERR_COM DS    0H                                                       04740000
+         MVC   RSNCODE,=A(RSN04)  INDICATE ERRORS ENCOUNTERED           04750000
+         MVC   RETCODE,=A(RC12)                                         04760000
+                                                                        04770000
+         $MSG  (R2),FIELDS=(SVARNAME,SVARSNAM,SVAREGN)                  04780000
+                                                                        04790000
+         STGRETN ADDR=(R6),LEN=(R3),QH=PRJEXSTG                         04800000
+         BNZ   ABN_STG            STORAGE MANAGEMENT FAILURE            04810000
+                                                                        04820000
+         B     VARINEXT                                                 04830000
+                                                                        04840000
+         EJECT                                                          04850000
+***************************************************************         04860000
+*                                                                       04870000
+*   RETURN TO REQUESTOR WITH NORMAL/ABNORMAL COMPLETION STATUS          04880000
+*                                                                       04890000
+***************************************************************         04900000
+NORMRET  DS    0H                                                       04910000
+         ICM   R0,15,ACCEPTS      VARIABLES ACCEPTED?                   04920000
+         BZ    ERR_NONE           NO VDB SUPPORT IF NOT                 04930000
+         BAS   R14,LVAPOST        QUEUE PENDING APPL LINKAGE VAR        04940000
+         L     R0,RSNCODE         SUPPLEMENTAL REASON CODE              04950000
+         L     R15,RETCODE        RETURN CODE                           04960000
+         B     RETURN                                                   04970000
+                                                                        04980000
+*--------------------------------------------------------------         04990000
+*   NO RECORDINGS ON FILE                                               05000000
+*--------------------------------------------------------------         05010000
+ERR_NONE DS    0H                 NO SYSREC/SYSNAV ENTRIES              05020000
+         LA    R1,009             DOCUMENT ERROR                        05030000
+         BAS   R14,DOCGEN                                               05040000
+         LA    R15,RC08           INDICATE ERROR                        05050000
+         B     RETURN                                                   05060000
+                                                                        05070000
+*--------------------------------------------------------------         05080000
+*   PROGRAM FAILURE                                                     05090000
+*--------------------------------------------------------------         05100000
+ERR_FAIL DS    0H                 PERMANENT ERROR ENCOUNTERED           05110000
+         LA    R15,RC20           RETURN FAILURE                        05120000
+         B     RETURN                                                   05130000
+                                                                        05140000
+*--------------------------------------------------------------         05150000
+*   RETURN                                                              05160000
+*--------------------------------------------------------------         05170000
+RETURN   DS    0H                                                       05180000
+                                                                        05190000
+         #EXIT ,                                                        05200000
+                                                                        05210000
+         EJECT                                                          05220000
+****************************************************************        05230000
+*                                                                       05240000
+* ROUTINE:  LVAPOST - EVALUATE AND POST LINKAGE VARIABLE TO Q           05250000
+*                                                                       05260000
+****************************************************************        05270000
+LVAPOST  DS    0H                                                       05280000
+         STM   R0,R15,REGSAVE     SAVE MAINLINE REGS                    05290000
+         ICM   R8,15,CURRNVLA     CURRENT LINKAGE VARIABLE NODE         05300000
+         BZ    LVAPINIT           SKIP INITIALIZATION                   05310000
+                                                                        05320000
+*---------------------------------------------------------------        05330000
+*   DETERMINE IF NVLAVAR NON-TRIVIAL, BUILD NODE IN PROJ STORAGE        05340000
+*---------------------------------------------------------------        05350000
+         USING NVLAVAR,R8         MAP                                   05360000
+         L     R0,NVLUSED         NUMBER OF LINKAGE VARIABLE ENTRIES    05370000
+         C     R0,=F'1'           ONLY USEFUL IF MULTIPLE APP REF       05380000
+         BNH   LVAPREI            BYPASS POST IF TRIVIAL ENTRY          05390000
+         XC    CURRNVLA,CURRNVLA  RELIEVE REINIT LOGIC OF STGRETN TASK  05400000
+                                                                        05410000
+         LTR   R8,R8              NODE BUILT IN GOTTEN STORAGE?         05420000
+         BNM   LVAPCHN            NO REALLOC REQUIRED IF NOT            05430000
+         L     R2,NVLSIZE         ELSE GET SIZE REQUIRED                05440000
+                                                                        05450000
+         STGGET (R2),QH=PRJEXSTG  ACQUIRE STORAGE FOR NODE              05460000
+         BNZ   ABN_STG            STORAGE FAILURE                       05470000
+                                                                        05480000
+         LR    R2,R1              PRESERVE STORAGE ADDR                 05490000
+         LR    R0,R1              PREPARE FOR COPY                      05500000
+         L     R1,NVLSIZE         LENGTH                                05510000
+         LA    R14,NVLAVAR        SOURCE IS MODEL                       05520000
+         LR    R15,R1             SOURCE LENGTH = TARGET LENGTH         05530000
+         MVCL  R0,R14             COPY                                  05540000
+                                                                        05550000
+         LR    R8,R2              MAP POST-READY NODE                   05560000
+                                                                        05570000
+*---------------------------------------------------------------        05580000
+*   ADD NEWLY CONSTRUCTED NODE TO LINKAGE VARIABLE LIST                 05590000
+*---------------------------------------------------------------        05600000
+LVAPCHN  DS    0H                                                       05610000
+         MVC   NVLAVNXT,PRJEXALV  ADD TO FRONT OF CHAIN                 05620000
+         ST    R8,PRJEXALV        INSERT COMPLETE                       05630000
+         DROP  R8                 NVLAVAR                               05640000
+                                                                        05650000
+*---------------------------------------------------------------        05660000
+*   REINITIALIZE LINKAGE VARIABLE DEFINITION STRUCTURES                 05670000
+*---------------------------------------------------------------        05680000
+LVAPREI  DS    0H                 REINIT                                05690000
+         ICM   R2,15,CURRNVLA     RESIDUAL, UNUSED NODE?                05700000
+         BNP   LVAPINIT           SKIP STORAGE RELEASE IF NOT           05710000
+         L     R3,NVLSIZE-NVLAVAR(,R2)                                  05720000
+                                                                        05730000
+         STGRETN ADDR=(R2),LEN=(R3),QH=PRJEXSTG                         05740000
+         BNZ   ABN_STG            STORAGE MANAGEMENT FAILURE            05750000
+                                                                        05760000
+LVAPINIT DS    0H                                                       05770000
+         XC    $NVLAVAR,$NVLAVAR  RESET COLLECTOR NODE                  05780000
+         LA    R0,L'$NVLAVAR      SIZE OF INITIAL ALLOCATION            05790000
+         ST    R0,$NVLAVAR+(NVLSIZE-NVLAVAR)                            05800000
+         LA    R0,$LVSLOTS        INITIAL SLOT ALLOCATION               05810000
+         ST    R0,$NVLAVAR+(NVLSLOTS-NVLAVAR)                           05820000
+         LA    R1,$NVLAVAR        LINKAGE VARIABLE CONSTRUCTION AREA    05830000
+         O     R1,=X'80000000'    INDICATE RESIDENCE IN LOCAL STG       05840000
+         ST    R1,CURRNVLA        POST CONSTRUCTION AREA ADDR           05850000
+                                                                        05860000
+*---------------------------------------------------------------        05870000
+*   RETURN TO REQUESTOR                                                 05880000
+*---------------------------------------------------------------        05890000
+         LM    R0,R14,REGSAVE     RESTORE MAINLINE REGS                 05900000
+         SR    R15,R15            RETURN CODE NOT DEFINED               05910000
+         BR    R14                END                                   05920000
+                                                                        05930000
+         EJECT                                                          05940000
+****************************************************************        05950000
+*                                                                       05960000
+* ROUTINE:  LVAREAL - REALLOCATE EXHAUSTED LINKAGE VAR NODE             05970000
+*                                                                       05980000
+****************************************************************        05990000
+LVAREAL  DS    0H                                                       06000000
+         STM   R0,R15,REGSAVE     SAVE MAINLINE REGS                    06010000
+         L     R8,CURRNVLA        CURRENT LINKAGE VARIABLE NODE         06020000
+         USING NVLAVAR,R8         MAP                                   06030000
+                                                                        06040000
+         ICM   R4,15,NVLSLOTS     # OF SLOTS IN CURRENT NODE            06050000
+         AR    R4,R4              DOUBLE                                06060000
+         LR    R3,R4              SLOT COUNT WORKING COPY               06070000
+         MH    R3,=AL2(NVLENTLN)  LENGTH OF NEW ENTRY SECTION           06080000
+         LA    R3,NVLPFXLN(,R3)   ACCOUNT FOR PREFIX                    06090000
+                                                                        06100000
+         STGGET (R3),QH=PRJEXSTG  ACQUIRE STORAGE FOR NODE              06110000
+         BNZ   ABN_STG            STORAGE FAILURE                       06120000
+                                                                        06130000
+*--------------------------------------------------------------         06140000
+*   RECONSTRUCT NVLAVAR PREFIX                                          06150000
+*--------------------------------------------------------------         06160000
+         LR    R2,R1              PRESERVE STORAGE ADDR                 06170000
+N        USING NVLAVAR,R2         MAP NEW COPY                          06180000
+         MVC   N.NVLAVAR(NVLPFXLN),NVLAVAR   PREFIX                     06190000
+         ST    R3,N.NVLSIZE       POST NEW CB SIZE                      06200000
+         ST    R4,N.NVLSLOTS      POST NEW SLOT COUNT                   06210000
+                                                                        06220000
+*--------------------------------------------------------------         06230000
+*   COPY APPLICATION CROSS-REFERENCE SECTION                            06240000
+*--------------------------------------------------------------         06250000
+         LA    R0,N.NVLENTRY      XREF SECTION ORIGIN IN NEW BLOCK      06260000
+         LA    R14,NVLENTRY       SAME IN MODEL BLOCK                   06270000
+         L     R1,NVLUSED         NUMBER OF ENTRIES                     06280000
+         MH    R1,=AL2(NVLENTLN)  TIMES SIZE OF EACH ENTRY              06290000
+         LR    R15,R1             SOURCE LENGTH = TARGET LENGTH         06300000
+         MVCL  R0,R14             COPY                                  06310000
+                                                                        06320000
+*--------------------------------------------------------------         06330000
+*   RELEASE MODEL BLOCK IF RESIDENT IN EXTERNAL STORAGE                 06340000
+*--------------------------------------------------------------         06350000
+         LTR   R8,R8              MODEL IN EXTERNAL STORAGE?            06360000
+         BNP   LVARFREE           SKIP IF NOT                           06370000
+         L     R3,NVLSIZE         SIZE OF MODEL                         06380000
+                                                                        06390000
+         STGRETN ADDR=(R8),LEN=(R3),QH=PRJEXSTG                         06400000
+         BNZ   ABN_STG            STORAGE MANAGEMENT FAILURE            06410000
+                                                                        06420000
+LVARFREE DS    0H                                                       06430000
+                                                                        06440000
+*--------------------------------------------------------------         06450000
+*   RELEASE MODEL BLOCK IF RESIDENT IN EXTERNAL STORAGE                 06460000
+*--------------------------------------------------------------         06470000
+         ST    R2,CURRNVLA        SAVE ADDR OF NEW BLOCK                06480000
+         LM    R0,R14,REGSAVE     RESTORE MAINLINE REGS                 06490000
+         SR    R15,R15            RETURN CODE NOT DEFINED               06500000
+         BR    R14                RETURN                                06510000
+         DROP  N,R8               NEW, MODEL VERSIONS OF NVLAVAR NODE   06520000
+                                                                        06530000
+         EJECT                                                          06540000
+***************************************************************         06550000
+*                                                                       06560000
+* ROUTINE: DOCGEN - CONSTRUCT MESSAGE AND QUEUE FOR RU RETURN           06570000
+*                                                                       06580000
+* ON ENTRY:                                                             06590000
+*                                                                       06600000
+*    R1 - NAV COMPONENT MSG ID                                          06610000
+*                                                                       06620000
+***************************************************************         06630000
+DOCGEN   DS    0H                                                       06640000
+         STM   R0,R15,REGSAVE     SAVE MAINLINE REGS                    06650000
+         LR    R2,R1              MESSAGE NUMBER                        06660000
+                                                                        06670000
+         $MSG  (R2)                                                     06680000
+                                                                        06690000
+         LM    R0,R14,REGSAVE     RESTORE MAINLINE REGS                 06700000
+         BR    R14                                                      06710000
+                                                                        06720000
+         EJECT ,                                                        06730000
+***************************************************************         06740000
+*                                                                       06750000
+*   CATASTOPHIC FAILURES, ETC.                                          06760000
+*                                                                       06770000
+***************************************************************         06780000
+ABN_TBSV DS    0H                 CATALOG / TABLE SERVICE FAILURE       06790000
+         $ABEND ABE_TBSERV,DUMP=YES,                                   X06800000
+               TITLE='TABLE SERVICE FAILURE'                            06810000
+                                                                        06820000
+ABN_STG  DS    0H                                                       06830000
+         $ABEND ABE_STORAGE,(R2),DUMP=YES,                             X06840000
+               TITLE='STORAGE MANAGEMENT FAILURE'                       06850000
+                                                                        06860000
+         EJECT ,                                                        06870000
+***************************************************************         06880000
+*                                                                       06890000
+*   LOCAL READ-ONLY STORAGE, ETC.                                       06900000
+*                                                                       06910000
+***************************************************************         06920000
+##SLOTS  EQU   1                  INITIAL PREDECESSOR/SUCCESSOR SLOTS   06930000
+                                                                        06940000
+CSTRAPPL DC    CL8'APPL'          $ENTITY APPLICATION QUALIFIER         06950000
+CSTRIMAG DC    CL8'IMAGE'         $ENTITY IMAGE QUALIFIER               06960000
+CSTRSSET DC    CL8'SSET'          $ENTITY SCREEN SET QUALIFIER          06970000
+                                                                        06980000
+         LTORG ,                                                        06990000
+                                                                        07000000
+         EJECT ,                                                        07010000
+         PRINT NOGEN                                                    07020000
+         ICVT  ,                                                        07030000
+         ITASK ,                                                        07040000
+         IPCB  ,                                                        07050000
+         END   ,                                                        07060000

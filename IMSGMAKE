@@ -1,0 +1,742 @@
+IMSGMAKE TITLE '- MESSAGE FORMATTING ROUTINE'                           00010000
+**<DOC-ON>******************************************************        00020000
+*                                                                       00030000
+* ROUTINE:  IMSGMAKE - Message formatting routine                       00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This function accepts a message construction request               00080000
+*    represented by an $MREQB request block and generates a             00090000
+*    multiline return structure described by $MSGBUF in the             00100000
+*    buffer provided by the caller, or if no buffer is                  00110000
+*    provided, in $GETSTOR storage.                                     00120000
+*                                                                       00130000
+*                                                                       00140000
+* NOTES:                                                                00150000
+*                                                                       00160000
+*    If the caller provides a message buffer, $MSBSIZE is               00170000
+*    inspected to determine whether this message is to be               00180000
+*    inserted in a previously inited area.  The caller is               00190000
+*    responsible for clearing the buffer prefix ($MSBPFXL               00200000
+*    bytes) prior to the first of a series of $MSG requests.            00210000
+*                                                                       00220000
+*                                                                       00230000
+* METHOD:                                                               00240000
+*                                                                       00250000
+*    1) Locate and trim the prefix and component id strings             00260000
+*                                                                       00270000
+*    2) Locate the message definition using the prefix, component       00280000
+*       id and message number provided                                  00290000
+*                                                                       00300000
+*    3) Determine whether the associated message class is active        00310000
+*       and accept class-defined message destinations                   00320000
+*                                                                       00330000
+*    4) Invoke IMSGSEL to convert the substitution element (SEL)        00340000
+*       list to C-ready format                                          00350000
+*                                                                       00360000
+*    5) Invoke the message formatter / editor to construct an           00370000
+*       intermediate, multiline text block                              00380000
+*                                                                       00390000
+*    6) Convert the intermediate result to $MSGBUF format in            00400000
+*       the buffer provided by the caller or in acquired storage        00410000
+*                                                                       00420000
+*                                                                       00430000
+* ON ENTRY:                                                             00440000
+*                                                                       00450000
+*    R1  contains the address of a message services request             00460000
+*        block mapped by $MREQB                                         00470000
+*        (hi-order bit on for FORCE=YES)                                00480000
+*                                                                       00490000
+*    R0  contains the address of 2K workarea                            00500000
+*                                                                       00510000
+*                                                                       00520000
+* ON EXIT:                                                              00530000
+*                                                                       00540000
+*    R15 contains one of the following return codes                     00550000
+*                                                                       00560000
+*        RC00 - messages returned in $MSGBUF format                     00570000
+*                                                                       00580000
+*               R1 - $MSGBUF address; the high order bit is set         00590000
+*                    if $MSGBUF storage was allocated by this           00600000
+*                    routine                                            00610000
+*                                                                       00620000
+*        RC04 - messages returned in $MSGBUF format.  However,          00630000
+*               the designated message id / message class is            00640000
+*               not active                                              00650000
+*                                                                       00660000
+*               R1 - $MSGBUF address or zero                            00670000
+*                                                                       00680000
+*        RC08 - the message designated by prefix, component id,         00690000
+*               and message number is not defined                       00700000
+*                                                                       00710000
+*        RC12 - message definition or processing error                  00720000
+*                                                                       00730000
+*               R1 contains one of the following reason codes           00740000
+*                                                                       00750000
+*               RSN04 - invalid prefix or component id string           00760000
+*               RSN08 - error processing substituion elements           00770000
+*               RSN12 - C function failure                              00780000
+*                                                                       00790000
+*               RSN16 - $MSGBUF return provided by requestor is         00800000
+*                       too small to contain formatted result           00810000
+*                                                                       00820000
+*    For all return codes, the destination mask byte ($MRBDDFT)         00830000
+*    byte is posted with the default message destinations               00840000
+*    derived from the message lookup table or related class             00850000
+*    tables.  Similarly, $MRBCLSC contains the class code               00860000
+*    associated with the message.                                       00870000
+*                                                                       00880000
+**<DOC-OFF>*****************************************************        00890000
+                                                                        00900000
+         EJECT                                                          00910000
+***************************************************************         00920000
+*                                                                       00930000
+* MAINTENANCE:                                                          00940000
+*                                                                       00950000
+*    04/15/93 R. Turgeon                                                00960000
+*             Initial version                                           00970000
+*                                                                       00980000
+*    03/27/95 R. Turgeon - Help Desk implementation                     00990000
+*             Message severity code override capability                 01000000
+*                                                                       01010000
+*    04/24/95 R. Turgeon  rel 2.0                                       01020000
+*             Implement LIFO / FIFO message queuing option              01030000
+*                                                                       01040000
+*    06/21/95 R. Witek (RW062195)                                       01050000
+*             Support FORCE=YES                                         01060000
+*                                                                       01070000
+***************************************************************         01080000
+                                                                        01090000
+         EJECT                                                          01100000
+         #WORK LENGTH=2048        BEGIN WORKAREA                        01110000
+                                                                        01120000
+FLAGS    DS    X                  LOCAL FLAG BYTE                       01130000
+F_INACT  EQU   X'80'                 MESSAGE IS INACTIVE                01140000
+F_FAIL   EQU   X'40'                 FAILURE, RELEASE ALL RESOURCES     01150000
+                                                                        01160000
+MSGSEQ   DS    X                  MSG SEQUENCE FLAG: 0-FIFO, /0-LIFO    01170000
+DESTMASK DS    X                  MSG ROUTING DEST MASK WORKAREA        01180000
+CLASSCOD DS    C                  MSG CLASS CODE                        01190000
+                                                                        01200000
+MSGIDLN  DS    F                  MESSAGE LINE LEAD-IN LENGTH           01210000
+MSGID    DS    CL32               MESSAGE LINE LEAD-IN STRING           01220000
+                                                                        01230000
+PFXL     DS    H                  TRUE LENGTH OF PREFIX                 01240000
+CIDL     DS    H                  TRUE LENGTH OF COMPONENT ID           01250000
+@PFX     DS    A                  ADDR OF MSG PREFIX ENTRY   (MPFX)     01260000
+@CID     DS    A                  ADDR OF COMPONENT ID ENTRY (MCOMP)    01270000
+@MSG     DS    A                  ADDR OF MSG DEFINITION     (MSGFMT)   01280000
+                                                                        01290000
+IBPTR    DS    A                  ADDR OF INTERMEDIATE RESULT BUFFER    01300000
+IBLEN    DS    F                  LENG OF INTERMEDIATE RESULT BUFFER    01310000
+AUXIBUF  DS    A                  ADDR OF AUX IBUFR                     01320000
+AUXIBUFL DS    F                  LENG OF AUX IBUFR                     01330000
+ESTSTG   DS    F                  EST STG SIZE FOR INTERMEDIATE RESULT  01340000
+                                                                        01350000
+OBPTR    DS    A                  ADDR OF MESSAGE RETURN BUFFER         01360000
+OBLEN    DS    F                  LENG OF MESSAGE RETURN BUFFER         01370000
+AUXOBUF  DS    A                  ADDR OF AUX OBUFR                     01380000
+AUXOBUFL DS    F                  LENG OF AUX OBUFR                     01390000
+                                                                        01400000
+STATREGS DS    4F                 R14-R1 PRESERVATION                   01410000
+REGSAVE  DS    16F                LOCAL REGISTER SAVEAREA               01420000
+                                                                        01430000
+SPTFPARM DS    0A                 MSG FUNCTION (SPRINTF) PARAMETER LIST 01440000
+SPTFBUFA DS    A                     ADDR OF RESULT RETURN BUFFER       01450000
+SPTFFMTA DS    A                     ADDR OF FORMAT STRING              01460000
+SPTFEDIT DS    64F                   ARGUMENT LIST                      01470000
+SPTFEDLN EQU   *-SPTFEDIT            ARGUMENT LIST LENGTH               01480000
+                                                                        01490000
+SPCOUNT  DS    F                  NUMBER OF ARGS POSTED FOR MSG FUNC    01500000
+                                                                        01510000
+WK256    DS    XL256              GENERAL PURPOSE WORKAREA              01520000
+IBUFR    DS    CL256              INTERMEDIATE RESULT BUFFER            01530000
+OBUFR    DS    XL256              MULTILINE MSG BUFFER ($MSGBUF)        01540000
+                                                                        01550000
+         #ENDWORK ,                                                     01560000
+                                                                        01570000
+         EJECT                                                          01580000
+         $MREQB ,                 MESSAGE SERVICES REQUEST BLOCK        01590000
+                                                                        01600000
+         EJECT                                                          01610000
+         $MGEN TYPE=DSECT         PREFIX, COMPONENT, MSG DEF MAPPINGS   01620000
+                                                                        01630000
+         EJECT                                                          01640000
+         $MSGBUF ,                MESSAGE RETURN BUFFER FORMAT          01650000
+                                                                        01660000
+         EJECT                                                          01670000
+         $MSGCNST ,               MESSAGE SERVICE CONSTANTS             01680000
+                                                                        01690000
+         EJECT                                                          01700000
+         EQUS  LINKAGE=COND                                             01710000
+                                                                        01720000
+         EJECT ,                                                        01730000
+IMSGMAKE #ENTER PREG=R8,WAPASS=YES                                      01740000
+                                                                        01750000
+         EJECT ,                                                        01760000
+****************************************************************        01770000
+*                                                                       01780000
+*   FETCH PASSED PARMS, EXTRACT MESSAGE HANDLING OPTIONS                01790000
+*                                                                       01800000
+****************************************************************        01810000
+                                                                        01820000
+         USING $MREQB,R8          ENTRANCE LIST                         01830000
+                                                                        01840000
+         MVC   MSGSEQ,$MRBOPTS    MESSAGE HANDLING OPTIONS              01850000
+         NI    MSGSEQ,$MRBOPT_LIFO   EXPOSE MSG SEQUENCE BIT            01860000
+                                                                        01870000
+*---------------------------------------------------------------        01880000
+*   DERIVE TRUE LENGTHS OF PREFIX AND COMPONENT ID STRINGS              01890000
+*---------------------------------------------------------------        01900000
+                                                                        01910000
+         @TRIM *$MRBPFXA,*$MRBPFXL,CHAR=NULL                            01920000
+         LTR   R1,R1              PREFIX STRING PRESENT?                01930000
+         BNP   ERR_ID             FAIL IF NOT                           01940000
+         STH   R1,PFXL            SAVE TRUE LENGTH OF PREFIX            01950000
+                                                                        01960000
+         @TRIM *$MRBCMPA,*$MRBCMPL,CHAR=NULL                            01970000
+         LTR   R1,R1              COMPONENT ID STRING PRESENT?          01980000
+         BNP   ERR_ID             FAIL IF NOT                           01990000
+         STH   R1,CIDL            SAVE TRUE LENGTH OF PREFIX            02000000
+                                                                        02010000
+*---------------------------------------------------------------        02020000
+*   LOCATE MSG PREFIX AND COMPONENT ID ENTRIES                          02030000
+*---------------------------------------------------------------        02040000
+                                                                        02050000
+         LH    R0,PFXL            R0  <== TRUE LENGTH OF PREFIX         02060000
+         L     R1,$MRBPFXA        R1  <== ORIGIN OF PREFIX              02070000
+         L     R15,$MRBTABL       R15 <== MESSAGE TABLE                 02080000
+         BAS   R14,SRCHPFX        LOCATE PREFIX ENTRY                   02090000
+         LTR   R15,R15            CORR PREFIX FOUND?                    02100000
+         BNZ   ERR_NMSG           NO SUCH PREFIX                        02110000
+                                                                        02120000
+         ST    R1,@PFX            RETAIN ADDR OF PREFIX ENTRY           02130000
+         LR    R7,R1              INSPECT PREFIX                        02140000
+         USING MPFX,R7            PREFIX FORMAT                         02150000
+         ICM   R15,15,MPFXCOMP    R15 <== ORIGIN OF COMPONENT CHAIN     02160000
+         BZ    ERR_NMSG           NO ASSOCIATED COMPONENTS              02170000
+         MVC   $MRBDDFT,MPFXDEST  DEFAULT DESTINATIONS                  02180000
+         MVC   CLASSCOD,MPFXCLAS  DEFAULT MESSAGE CLASS ASSIGNMENT      02190000
+         DROP  R7                 MPFX (PREFIX)                         02200000
+                                                                        02210000
+         LH    R0,CIDL            R0  <== TRUE LENGTH OF COMPONENT ID   02220000
+         L     R1,$MRBCMPA        R1  <== ORIGIN OF COMPONENT ID        02230000
+         BAS   R14,SRCHCID        LOCATE CORRESPONDING COMPONENT ID     02240000
+         LTR   R15,R15            CORR COMP FOUND?                      02250000
+         BNZ   ERR_NMSG           NO SUCH COMPONENT                     02260000
+                                                                        02270000
+         ST    R1,@CID            RETAIN ADDR OF COMPONENT ID ENTRY     02280000
+         LR    R6,R1              COMPONENT ENTRY BASE                  02290000
+         USING MCOMP,R6           COMPONENT FORMAT                      02300000
+         ICM   R0,1,MCOMPDST      DEFAULT DESTINATIONS                  02310000
+         BZ    *+8                NONE PROVIDED AT THIS LEVEL           02320000
+         STC   R0,$MRBDDFT        SAVE MASK                             02330000
+         TM    MCOMCLAS,BF        MESSAGE CLASS DEFINED BY COMPONENT?   02340000
+         BZ    *+10               NOT PROVIDED AT THIS LEVEL            02350000
+         MVC   CLASSCOD,MCOMCLAS  ELSE ACCEPT DEFAULT DESIGNATION       02360000
+                                                                        02370000
+*---------------------------------------------------------------        02380000
+*   DERIVE ADDR OF MSG DEF FROM COMPONENT AND MSG NUMBER                02390000
+*---------------------------------------------------------------        02400000
+                                                                        02410000
+         L     R1,$MRBMSG#        FETCH THE MESSAGE NUMBER              02420000
+         SR    R0,R0              PREPARE FOR DIVIDE                    02430000
+         D     R0,=F'100'         MESSAGES GROUPED IN HUNDREDS          02440000
+         SLL   R1,2               EACH SERIES HAS PTR                   02450000
+         L     R5,MCOMPSER(R1)    FETCH SERIES PTR                      02460000
+         LTR   R5,R5              MSG SERIES IN USE?                    02470000
+         BZ    ERR_NMSG           DONE IF NOT                           02480000
+                                                                        02490000
+         USING MSER,R5            MESSAGE SERIES DESCRIPTOR             02500000
+         SR    R2,R2              PREPARE FOR INSERT                    02510000
+         LR    R3,R0              MSG NUMBER MODULO 100                 02520000
+         IC    R2,MSERVEC(R3)     FETCH RELATIVE MSG #                  02530000
+         LTR   R2,R2              MSG DEFINED?                          02540000
+         BZ    ERR_NMSG           DONE IF NOT                           02550000
+         BCTR  R2,0               CONVERT SUBSCRIPT TO INDEX            02560000
+         SLL   R2,2               MSG PTRS ARE FWORDS                   02570000
+         L     R4,MSERPTR(R2)     FETCH MSG ENTRY PTR                   02580000
+         LTR   R4,R4              MSG DEFINED?                          02590000
+         BZ    ERR_NMSG           DONE IF NOT                           02600000
+                                                                        02610000
+         ST    R4,@MSG            RETAIN ADDR OF MSG DEFINITION         02620000
+         LR    R7,R4              MESSAGE DEFINITION                    02630000
+         USING MSGFMT,R7                                                02640000
+         ICM   R0,1,MSGFDEST      DEFAULT DESTINATIONS?                 02650000
+         BZ    *+8                NONE PROVIDED AT THIS LEVEL           02660000
+         STC   R0,$MRBDDFT        SAVE MASK / MASK PTR                  02670000
+         TM    MSGFCLAS,BF        MESSAGE CLASS DEFINED?                02680000
+         BZ    *+10               SKIP IF NOT                           02690000
+         MVC   CLASSCOD,MSGFCLAS  ELSE ACCEPT DEFAULT DESIGNATION       02700000
+         DROP  R5,R6              MSER (MSG SERIES), MCOMP (COMPONENT)  02710000
+                                                                        02720000
+*---------------------------------------------------------------        02730000
+*   SUPPRESS MESSAGES IF MESSAGE CLASS IS NOT ACTIVE                    02740000
+*---------------------------------------------------------------        02750000
+                                                                        02760000
+         MVC   $MRBCLSC,CLASSCOD  RETURN CLASS CODE                     02770000
+                                                                        02780000
+         $MSGATTR CLASSCOD,CTYPE=STD                                    02790000
+                                                                        02800000
+         LTR   R0,R0              DESTINATION OVERRIDES RETURNED?       02810000
+         BZ    *+8                SKIP IF NOT                           02820000
+         STC   R0,$MRBDDFT        ACCEPT CLASS-ASSOCIATED DESTS         02830000
+         LTR   R8,R8              FORCE=YES?                   RW062195 02840000
+         BM    ACTMSG             BRANCH IF YES                RW062195 02850000
+         LTR   R15,R15            MESSAGE IS ACTIVE?                    02860000
+         BZ    *+8                CONTINUE IF SO                        02870000
+         OI    FLAGS,F_INACT      INDICATE SELECT MSG IS INACTIVE       02880000
+                                                                        02890000
+*---------------------------------------------------------------        02900000
+*   AUGMENT DEFAULT/REQUEST MESSAGE DESTS                               02910000
+*---------------------------------------------------------------        02920000
+                                                                        02930000
+ACTMSG   DS    0H                 ACT MSG PEND. ROUTING DESTS  RW062195 02940000
+         TM    FLAGS,F_INACT      MESSAGE DESTINATIONS PROVIDED?        02950000
+         BZ    MBUILDR            ONWARD IF SO                          02960000
+         OC    DESTMASK,$MRBDMSK  EXPLICIT MSG DESTINATIONS             02970000
+         OC    DESTMASK,$MRBDDFT  DEFAULT DESTINATIONS                  02980000
+         OC    DESTMASK,$MRBDADD  INCLUDE ADDITIONAL DESTS              02990000
+         TM    DESTMASK,$BUFFER+$IMSGQ   BUFFERING OF MSG POSSIBLE?     03000000
+         BZ    WRN_NSEL           NO SELECTION CRITERA                  03010000
+                                                                        03020000
+         EJECT ,                                                        03030000
+****************************************************************        03040000
+*                                                                       03050000
+*   CONSTRUCT INTERMEDIATE RESULT IN MSG FUNCTION FORMAT                03060000
+*                                                                       03070000
+****************************************************************        03080000
+                                                                        03090000
+MBUILDR  DS    0H                                                       03100000
+         SR    R1,R1              PREPARE FOR INSERT                    03110000
+         IC    R1,$MRBVER         PLIST VERSION                         03120000
+         SLL   R1,2               CONVERT TO FWORD INDEX                03130000
+         L     R2,MREQLENG(R1)    PREFIX LENGTH                         03140000
+         LA    R2,$MREQB(R2)      LOCATE END OF PREFIX                  03150000
+                                                                        03160000
+         @CALL IMSGSEL,(*$MRBSEL#,(R2),MSGFMT,SPTFEDIT,SPTFEDLN),      X03170000
+               WKA=WK256,         WORKAREA                             X03180000
+               MF=(E,MFE_LIST)    RET R0: #PARMS, R1: SEL STG ESTIMATE  03190000
+                                                                        03200000
+         CH    R15,=AL2(RC04)     PLIST CONSTRUCTED?                    03210000
+         BH    ERR_SEL            CONVERSION ERROR                      03220000
+         ST    R0,SPCOUNT         NUMBER OF MSG FUNCTION PARMS APPENDED 03230000
+                                                                        03240000
+         AH    R1,MSGFLEN         EST EXPANDED SELS PLUS FORMAT STRING  03250000
+         LR    R0,R1              TOTAL EST SPACE REQUIRED FOR I RESULT 03260000
+         SRL   R0,1               HALF AGAIN                            03270000
+         AR    R1,R0              ESTIMAGE BECOMES (150% * ESTIMATE)    03280000
+         ST    R1,ESTSTG          CONTROLS BUFFER ALLOCATION            03290000
+                                                                        03300000
+*---------------------------------------------------------------        03310000
+*   ALLOCATE BUFFER SUFFICIENT TO HOUSE INTERMEDIATE RESULT             03320000
+*---------------------------------------------------------------        03330000
+                                                                        03340000
+         LA    R15,IBUFR          ASSUME LOCAL BUFFER SUFFICIENT        03350000
+         ST    R15,IBPTR          SAVE BUFFER PTR ACCORDINGLY           03360000
+         LA    R14,L'IBUFR        LENGTH OF LOCAL BUFFER                03370000
+         ST    R14,IBLEN          INTERMEDIATE AREA DECLARED            03380000
+         C     R14,ESTSTG         LOCAL BUFFER SUFFICIENT?              03390000
+         BNL   ALLOCIB            READY IF SO                           03400000
+                                                                        03410000
+         L     R2,ESTSTG          ELSE GET REQUIRED BUFR SIZE           03420000
+         $GETSTOR (R2)            ACQUIRE WORKING STORAGE               03430000
+                                                                        03440000
+         ST    R1,AUXIBUF         REMEMBER RESPONSIBILITIES             03450000
+         ST    R1,IBPTR           REPLACE INTERMEDIATE BUFFER           03460000
+         ST    R2,AUXIBUFL        STORAGE MUST BE RETURNED              03470000
+         ST    R2,IBLEN           LENGTH OF INTERMEDIATE                03480000
+ALLOCIB  DS    0H                                                       03490000
+                                                                        03500000
+*---------------------------------------------------------------        03510000
+*   ACQUIRE INTERMEDIATE RESULT FROM MSG FUNCTION                       03520000
+*---------------------------------------------------------------        03530000
+                                                                        03540000
+         MVC   SPTFBUFA,IBPTR     RESULT RETURN AREA                    03550000
+         SR    R15,R15            PREPARE FOR INSERT                    03560000
+         IC    R15,MSGFRTLN       LENGTH OF SUBSTITION ARRAY            03570000
+         LA    R0,MSGFRTYP        SUBSTITION ELEMENT ARRAY              03580000
+         AR    R0,R15             FORMAT STRING FOLLOWS IT              03590000
+         ST    R0,SPTFFMTA        POST FOR MSG FUNCTION                 03600000
+                                                                        03610000
+         LA    R1,SPTFPARM        IMSGFNC PARAMETER LIST                03620000
+         @CALL IMSGFNC@           INVOKE MSG FORMATTER / EDITOR         03630000
+         LTR   R15,R15            REQUEST COMPLETE?                     03640000
+         BNP   ERR_MSGF           MESSAGE FUNCTION FAILED               03650000
+         C     R15,IBLEN          RESULT OVERRUNS IBUF?                 03660000
+         BNH   *+8                OK IF NOT, TRAILING ZERO AT END       03670000
+         EX    R0,*                                                     03680000
+                                                                        03690000
+         EJECT ,                                                        03700000
+****************************************************************        03710000
+*                                                                       03720000
+*   CONSTRUCT MESSAGE RETURN BUFFER FROM INTERMEDIATE RESULT            03730000
+*                                                                       03740000
+****************************************************************        03750000
+                                                                        03760000
+         ICM   R0,1,$MRBMIDS      MSG ID SUPPRESSED?                    03770000
+         BNZ   NOMSGID            SKIP IF SO                            03780000
+                                                                        03790000
+         L     R1,@MSG            MESSAGE DEFINITION                    03800000
+         BAS   R14,BLDMSGID       BUILD A SUITABLE LEADIN STRING        03810000
+         LR    R15,R0             LENGTH OF LEADIN                      03820000
+         CH    R15,=AL2(L'MSGID)  EXCEEDS CAPACITY?                     03830000
+         BNH   *+8                SKIP IF NOT                           03840000
+         LA    R15,L'MSGID        TRUNCATE OTHERWISE                    03850000
+         ST    R15,MSGIDLN        SAVE LEAD-IN STRING LENGTH            03860000
+         BCTR  R15,0              PREPARE FOR COPY                      03870000
+         EX    R15,*+4            PRESERVE GENERATED STRING             03880000
+         MVC   MSGID(*-*),0(R1)   EX OBJECT                             03890000
+NOMSGID  DS    0H                                                       03900000
+                                                                        03910000
+*---------------------------------------------------------------        03920000
+*   CALLER PROVIDED BUFFER IS ALWAYS USED                               03930000
+*---------------------------------------------------------------        03940000
+                                                                        03950000
+         MVC   OBLEN,$MRBBUFL     BUFFER LENGTH                         03960000
+         MVC   OBPTR,$MRBBUFA     USE BUFFER PROVIDED BY CALLER         03970000
+         NI    OBPTR,X'7F'        REMOVE FLAG BIT                       03980000
+         ICM   R0,15,OBPTR        CALLER PROVIDED A BUFFER?             03990000
+         BNZ   XFORM              USE IT IF SO                          04000000
+                                                                        04010000
+XSTDBUF  DS    0H                                                       04020000
+         LA    R15,OBUFR          STANDARD ISSUE OUTPUT BUFFER          04030000
+         ST    R15,OBPTR                                                04040000
+         LA    R14,L'OBUFR        LENGTH OF STANDARD ISSUE              04050000
+         ST    R14,OBLEN                                                04060000
+         C     R14,ESTSTG         HAVE A GOOD CHANCE OF FIT?            04070000
+         BNL   XFORM              TRY IT IF SO                          04080000
+                                                                        04090000
+         MVC   OBLEN,ESTSTG       PRIME THE REALLOCATE PROCESS          04100000
+                                                                        04110000
+*---------------------------------------------------------------        04120000
+*   REALLOCATE LOCALLY ACQUIRED BUFFER IF BAD FIT                       04130000
+*---------------------------------------------------------------        04140000
+                                                                        04150000
+XFRETRY  DS    0H                 (RE)ALLOCATE MESSAGE BUFFER           04160000
+         ICM   R2,15,AUXOBUFL     BUFFER TO DISCARD?                    04170000
+         BZ    XFALLOC            SKIP IF NOT                           04180000
+                                                                        04190000
+         $RETSTOR *AUXOBUF        RELEASE BUFFER FROM LAST ATTEMPT      04200000
+                                                                        04210000
+XFALLOC  DS    0H                                                       04220000
+         L     R2,OBLEN           LAST ATTEMPT                          04230000
+         AR    R2,R2              DOUBLE FOR RETRY                      04240000
+                                                                        04250000
+         $GETSTOR (R2)            ACQUIRE CLEAR MSG BUFFER              04260000
+                                                                        04270000
+         O     R1,=X'80000000'    INDICATE ACQUIRED STORAGE             04280000
+         ST    R1,OBPTR           SAVE PTR                              04290000
+         ST    R1,AUXOBUF         REMEMBER RESPONSIBILITIES             04300000
+         ST    R2,OBLEN           MSG BUFFER LENGTH                     04310000
+         ST    R2,AUXOBUFL                                              04320000
+                                                                        04330000
+*---------------------------------------------------------------        04340000
+*   BUILD MULTILINE MSG RETURN BUFFER FROM INTERMEDIATE RESULT          04350000
+*---------------------------------------------------------------        04360000
+                                                                        04370000
+XFORM    DS    0H                                                       04380000
+         @CALL IMSGBLD,(MSGID,*MSGIDLN,*OBPTR,*OBLEN,*IBPTR,MSGSEQ),   X04390000
+               WKA=WK256,MF=(E,MFE_LIST)                                04400000
+                                                                        04410000
+         CH    R15,=AL2(RC04)     READY FOR RETURN?                     04420000
+         BL    NORM_RET           FUNCTION COMPLETE                     04430000
+         BH    ERR_DATA           CONTENT ERROR                         04440000
+                                                                        04450000
+         CLC   OBPTR,$MRBBUFA     MSG BUFFER PROVIDED BY CALLER?        04460000
+         BE    ERR_DATA           MESSAGE BUFFER IS TOO SMALL           04470000
+         B     XFRETRY            RECOVER IF RESULT BUFFER IS INTERNAL  04480000
+                                                                        04490000
+         EJECT ,                                                        04500000
+****************************************************************        04510000
+*                                                                       04520000
+*   RETURN COMPLETION STATUS AND MESSAGE BUFFER TO REQUESTOR            04530000
+*                                                                       04540000
+****************************************************************        04550000
+                                                                        04560000
+NORM_RET DS    0H                                                       04570000
+         L     R1,OBPTR           RETURN MESSAGE BUFFER                 04580000
+         LA    R15,RC00           NORMAL COMPLETION                     04590000
+                                                                        04600000
+         TM    FLAGS,F_INACT      MSG RETURNED IS ACTIVE?               04610000
+         BNO   *+8                SKIP IF SO                            04620000
+         LA    R15,RC04           ELSE NOTE THAT MSG IS INACTIVE        04630000
+         B     STDEXIT            DONE                                  04640000
+                                                                        04650000
+WRN_NSEL DS    0H                 MESSAGE NOT ACTIVE & NO RETURN BUFR   04660000
+         LA    R15,RC04           WARNING                               04670000
+         SR    R1,R1                                                    04680000
+         B     ERREXIT                                                  04690000
+                                                                        04700000
+ERR_NMSG DS    0H                 DESIGNATED MESSAGE NOT DEFINED        04710000
+         LA    R15,RC08           ERROR                                 04720000
+         SR    R1,R1              NO $MSGBUF RETURNED                   04730000
+         B     ERREXIT                                                  04740000
+                                                                        04750000
+ERR_ID   DS    0H                 INVALID PREFIX OR COMPONENT ID STRING 04760000
+         LA    R15,RC12                                                 04770000
+         LA    R1,RSN04                                                 04780000
+         B     ERREXIT                                                  04790000
+                                                                        04800000
+ERR_SEL  DS    0H                 ERROR HANDLING SUBSTITUTION ELEMENTS  04810000
+         LA    R15,RC12                                                 04820000
+         LA    R1,RSN08                                                 04830000
+         B     ERREXIT                                                  04840000
+                                                                        04850000
+ERR_MSGF DS    0H                 MESSAGE FUNCTION FAILURE              04860000
+         LA    R15,RC12                                                 04870000
+         LA    R1,RSN12                                                 04880000
+         B     ERREXIT                                                  04890000
+                                                                        04900000
+ERR_DATA DS    0H                 ERROR PROCESSING MSG FUNCTION RESULT  04910000
+         LA    R15,RC12                                                 04920000
+         LA    R1,RSN16                                                 04930000
+                                                                        04940000
+ERREXIT  DS    0H                                                       04950000
+         OI    FLAGS,F_FAIL       INDICATE FUNCTION FAILURE             04960000
+                                                                        04970000
+*---------------------------------------------------------------        04980000
+*   CLEANUP AUXILLIARY STORAGE AREAS AND RETURN                         04990000
+*---------------------------------------------------------------        05000000
+                                                                        05010000
+STDEXIT  DS    0H                                                       05020000
+         STM   R14,R1,STATREGS    PRESERVE COMPLETION STATUS            05030000
+         ICM   R2,15,AUXIBUFL     AUX INTERMEDIATE RESULT AREA ALLOC?   05040000
+         BZ    FREIBUF            SKIP IF NOT                           05050000
+                                                                        05060000
+         $RETSTOR *AUXIBUF        RELEASE ACQUIRED STORAGE              05070000
+                                                                        05080000
+FREIBUF  DS    0H                                                       05090000
+                                                                        05100000
+         TM    FLAGS,F_FAIL       FUNCTION FAILED?                      05110000
+         BNO   FRESKIP            SKIP IF NOT                           05120000
+         ICM   R2,15,AUXOBUFL     MESSAGE RETURN BUFFER ALLOCATED?      05130000
+         BZ    FRESKIP            SKIP IF NOT                           05140000
+                                                                        05150000
+         $RETSTOR *AUXOBUF        RELEASE ACQUIRED STORAGE              05160000
+                                                                        05170000
+FRESKIP  DS    0H                                                       05180000
+                                                                        05190000
+         LM    R14,R1,STATREGS    RESTORE COMPLETION STATUS             05200000
+         #EXIT ,                  DONE                                  05210000
+                                                                        05220000
+         EJECT ,                                                        05230000
+****************************************************************        05240000
+*                                                                       05250000
+* ROUTINE: SRCHPFX - LOCATE PREFIX ENTRY IN MESSAGE MODULE              05260000
+*                                                                       05270000
+* ON ENTRY:                                                             05280000
+*                                                                       05290000
+*     R0  - PREFIX STRING LENGTH                                        05300000
+*     R1  - PREFIX STRING PTR                                           05310000
+*     R15 - ORIGIN OF MESSAGE TABLE                                     05320000
+*                                                                       05330000
+* ON EXIT:                                                              05340000
+*                                                                       05350000
+*     R15 CONTAINS ONE OF THE FOLLOWING RETURN CODES                    05360000
+*                                                                       05370000
+*         RC00 - PREFIX ENTRY (MPFX) FOUND AND RETURNED VIA R1          05380000
+*         RC04 - NO MATCHING PREFIX ENTRY FOUND                         05390000
+*                                                                       05400000
+****************************************************************        05410000
+                                                                        05420000
+SRCHPFX  DS    0H                                                       05430000
+         STM   R0,R15,REGSAVE     SAVE MAINLINE REGS                    05440000
+                                                                        05450000
+         LR    R7,R15             MESSAGE STRUCTURE BASE                05460000
+         USING MPFX,R7            BEGINS WITH PREFIX LIST               05470000
+                                                                        05480000
+         LR    R3,R1              ADDR OF PREFIX STRING                 05490000
+         LR    R2,R0              LENG OF PREFIX STRING                 05500000
+         LR    R1,R0              EX READY COPY OF LENGTH               05510000
+         BCTR  R1,0               SUITABLY PREPARED                     05520000
+                                                                        05530000
+         LA    R15,RC00           PRESUME SUCCESS                       05540000
+                                                                        05550000
+SPFXTOP  DS    0H                                                       05560000
+         CLM   R2,1,MPFXLEN       MATCHING LENGTHS?                     05570000
+         BNE   SPFXNXT            ADVANCE IF NOT                        05580000
+         EX    R1,SPFXCLC         MATCHING VALUES?                      05590000
+         BE    SPFXHIT            DONE IF SO                            05600000
+                                                                        05610000
+SPFXNXT  DS    0H                 ADVANCE TO NEXT DESCRIPTOR            05620000
+         ICM   R7,15,MPFXNEXT     TRAVERSE CHAIN                        05630000
+         BNZ   SPFXTOP            RETRY                                 05640000
+         LA    R15,RC04           SEARCH FAILS                          05650000
+                                                                        05660000
+SPFXHIT  DS    0H                                                       05670000
+         LR    R1,R7              RETURN ENTRY PTR OR ZERO              05680000
+         LM    R2,R14,REGSAVE+8   RESTORE REGS                          05690000
+         BR    R14                RETURN                                05700000
+                                                                        05710000
+SPFXCLC  CLC   MPFXVAL(*-*),0(R3) EX OBJECT                             05720000
+         DROP  R7                 MPFX                                  05730000
+                                                                        05740000
+         EJECT ,                                                        05750000
+****************************************************************        05760000
+*                                                                       05770000
+* ROUTINE: SRCHCID - LOCATE COMPONENT ID ENTRY                          05780000
+*                                                                       05790000
+* ON ENTRY:                                                             05800000
+*                                                                       05810000
+*     R0  - COMPONENT ID STRING LENGTH                                  05820000
+*     R1  - COMPONENT ID STRING PTR                                     05830000
+*     R15 - ADDR OF FIRST COMPONENT ID ENTRY                            05840000
+*                                                                       05850000
+* ON EXIT:                                                              05860000
+*                                                                       05870000
+*     R15 CONTAINS ONE OF THE FOLLOWING RETURN CODES                    05880000
+*                                                                       05890000
+*         RC00 - COMP ID ENTRY (MCOMP) FOUND AND RETURNED VIA R1        05900000
+*         RC04 - NO MATCHING COMPONENT ID ENTRY FOUND                   05910000
+*                                                                       05920000
+****************************************************************        05930000
+                                                                        05940000
+SRCHCID  DS    0H                                                       05950000
+         STM   R0,R15,REGSAVE     SAVE MAINLINE REGS                    05960000
+                                                                        05970000
+         LR    R7,R15             COMPONENT ID LIST ORIGIN              05980000
+         USING MCOMP,R7           BEGINS WITH PREFIX LIST               05990000
+                                                                        06000000
+         LR    R3,R1              ADDR OF COMPONENT ID                  06010000
+         LR    R2,R0              LENG OF COMPONENT ID                  06020000
+         LR    R1,R0              EX READY COPY OF LENGTH               06030000
+         BCTR  R1,0               SUITABLY PREPARED                     06040000
+                                                                        06050000
+         LA    R15,RC00           PRESUME SUCCESS                       06060000
+                                                                        06070000
+SCIDTOP  DS    0H                                                       06080000
+         CLM   R2,1,MCOMPLEN      MATCHING LENGTHS?                     06090000
+         BNE   SCIDNXT            ADVANCE IF NOT                        06100000
+         EX    R1,SCIDCLC         MATCHING VALUES?                      06110000
+         BE    SCIDHIT            DONE IF SO                            06120000
+                                                                        06130000
+SCIDNXT  DS    0H                 ADVANCE TO NEXT DESCRIPTOR            06140000
+         ICM   R7,15,MCOMPNXT     TRAVERSE CHAIN                        06150000
+         BNZ   SCIDTOP            RETRY                                 06160000
+         LA    R15,RC04           SEARCH FAILS                          06170000
+                                                                        06180000
+SCIDHIT  DS    0H                                                       06190000
+         LR    R1,R7              RETURN PREFIX ENTRY PTR OR ZERO       06200000
+         LM    R2,R14,REGSAVE+8   RESTORE REGS                          06210000
+         BR    R14                RETURN                                06220000
+                                                                        06230000
+SCIDCLC  CLC   MCOMPVAL(*-*),0(R3)   EX OBJECT                          06240000
+         DROP  R7                 MCOMP                                 06250000
+                                                                        06260000
+         EJECT ,                                                        06270000
+****************************************************************        06280000
+*                                                                       06290000
+* ROUTINE: BLDMSGID - CONSTRUCT MESSAGE LINE LEAD-IN STRING             06300000
+*                                                                       06310000
+* DESCRIPTION:                                                          06320000
+*                                                                       06330000
+*    THIS ROUTINE CONSTRUCTS A MESSAGE LEAD-IN STRING IN WORKING        06340000
+*    STORAGE CONSISTING OF A LEADING BLANK (AVAILABLE FOR               06350000
+*    CARRIAGE CONTROL, ETC), THE MESSAGE IDENTIFIER PROPER, AND         06360000
+*    A TRAILING BLANK.                                                  06370000
+*                                                                       06380000
+*                                                                       06390000
+* ON ENTRY:                                                             06400000
+*                                                                       06410000
+*     R1 - ADDR OF MESSAGE ENTRY (MSGFMT)                               06420000
+*     $MREQB REQUEST BLOCK IS ADDRESSABLE                               06430000
+*                                                                       06440000
+*                                                                       06450000
+* ON EXIT:                                                              06460000
+*                                                                       06470000
+*     R15 CONTAINS ZERO                                                 06480000
+*                                                                       06490000
+*         R1 - ADDR OF MESSAGE IDENTIFIER                               06500000
+*         R0 - LENGTH OF IDENTIFIER                                     06510000
+*                                                                       06520000
+****************************************************************        06530000
+                                                                        06540000
+BLDMSGID DS    0H                                                       06550000
+         STM   R0,R15,REGSAVE                                           06560000
+         LR    R7,R1              MESSAGE ENTRY                         06570000
+         USING MSGFMT,R7          ENTRY FORMAT                          06580000
+                                                                        06590000
+         LA    R1,WK256           GENERAL PURPOSE WORKAREA              06600000
+                                                                        06610000
+*---------------------------------------------------------------        06620000
+*   CONCATENATE LEADING BLANK, PREFIX, AND COMPONENT ID                 06630000
+*---------------------------------------------------------------        06640000
+                                                                        06650000
+         MVI   0(R1),C' '         LEADING BLANK                         06660000
+         LA    R1,1(,R1)          ADVANCE                               06670000
+                                                                        06680000
+         ICM   R2,15,$MRBPFXA     PREFIX STRING?                        06690000
+         BZ    BLDNPFX            SKIP IF NOT                           06700000
+         LH    R3,PFXL            LENGTH OF PREFIX                      06710000
+         LTR   R3,R3              VALIDATE LENGTH                       06720000
+         BNP   BLDNPFX            NOT PROVIDED                          06730000
+                                                                        06740000
+         BCTR  R3,0               PREPARE FOR COPY                      06750000
+         EX    R3,*+4             COPY PREFIX                           06760000
+         MVC   0(*-*,R1),0(R2)    EX OBJECT                             06770000
+         LA    R1,1(R3,R1)        PREPARE FOR CONCAT                    06780000
+BLDNPFX  DS    0H                 PREFIX COMPLETE                       06790000
+                                                                        06800000
+         ICM   R2,15,$MRBCMPA     COMPONENT ID STRING?                  06810000
+         BZ    BLDNCID            SKIP IF NOT                           06820000
+         LH    R3,CIDL            LENGTH OF COMPONENT ID                06830000
+         LTR   R3,R3              VALIDATE LENGTH                       06840000
+         BZ    BLDNCID            NOT PROVIDED                          06850000
+                                                                        06860000
+         BCTR  R3,0               PREPARE FOR COPY                      06870000
+         EX    R3,*+4             COPY PREFIX                           06880000
+         MVC   0(*-*,R1),0(R2)    EX OBJECT                             06890000
+         LA    R1,1(R3,R1)        PREPARE FOR CONCAT                    06900000
+BLDNCID  DS    0H                 COMPONENT ID COMPLETE                 06910000
+                                                                        06920000
+*---------------------------------------------------------------        06930000
+*   APPEND MSG NUMBER AND SEVERITY CODE                                 06940000
+*---------------------------------------------------------------        06950000
+                                                                        06960000
+         L     R0,$MRBMSG#        FETCH MSG #                           06970000
+         CVD   R0,DWORD           DECIMAL CONVERSION                    06980000
+         MVC   FWORD,DWORD+4      RETAIN LOW ORDER PORTION              06990000
+         MVC   DWORD+2(6),=X'402120202020'                              07000000
+         ED    DWORD+2(6),FWORD+1                                       07010000
+         MVC   0(3,R1),DWORD+5    EXTRACT THREE DIGITS                  07020000
+                                                                        07030000
+         MVC   3(1,R1),MSGFSEV    AFFIX SEVERITY CODE                   07040000
+         ICM   R4,15,$MRBSEVC     SEVERITY CODE OVERRIDE?               07050000
+         BZ    BLDSEV             SKIP IF NOT                           07060000
+         TM    0(R4),BF           CODE CHAR IS NON-NULL?                07070000
+         BZ    BLDSEV             REJECT IT OTHERWISE                   07080000
+         MVC   3(1,R1),0(R4)      ACCEPT SEVERITY CODE PROVIDED         07090000
+         OI    3(R1),X'C0'        FOLD                                  07100000
+                                                                        07110000
+BLDSEV   DS    0H                                                       07120000
+         MVI   4(R1),C' '         TRAILING BLANK                        07130000
+         LA    R1,3+1+1(,R1)      ACCOUNT FOR NNNS-                     07140000
+                                                                        07150000
+*---------------------------------------------------------------        07160000
+*   RETURN MESSAGE IDENTIFIER ORIGIN AND LENGTH TO REQUESTOR            07170000
+*---------------------------------------------------------------        07180000
+                                                                        07190000
+         LR    R0,R1              MESSAGE TEXT RESUMPTION POINT         07200000
+         LA    R1,WK256           MESSAGE IDENTIFIER ORIGIN             07210000
+         SR    R0,R1              LENGTH OF FILLED/PADDED MSG ID        07220000
+         SR    R15,R15            RC UNDEFINED                          07230000
+                                                                        07240000
+         LM    R2,R14,REGSAVE+8   RESTORE CALLERS REGS                  07250000
+         BR    R14                RETURN                                07260000
+         DROP  R7                 MSGFMT                                07270000
+                                                                        07280000
+         EJECT ,                                                        07290000
+****************************************************************        07300000
+*                                                                       07310000
+*   LOCAL READ/ONLY DATA AREAS                                          07320000
+*                                                                       07330000
+****************************************************************        07340000
+                                                                        07350000
+MREQLENG DC    A($MREQBL0,$MREQBL1,$MREQBL2)                            07360000
+                                                                        07370000
+         LTORG ,                                                        07380000
+                                                                        07390000
+         PRINT NOGEN                                                    07400000
+         ICVT  ,                                                        07410000
+         END   ,                                                        07420000

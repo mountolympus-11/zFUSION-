@@ -1,0 +1,599 @@
+IMSGSERV TITLE '- MESSAGE CONSTRUCTION AND DISPOSITION'                 00010000
+***********************************************************************
+*                                                                     *
+*     COPYRIGHT Mainframe Power Corporation 2003, 2004, 2005          *
+*      ALL RIGHTS RESERVED. USE PERMISSIBLE BY LICENSE ONLY.          *
+*                                                                     *
+*      THIS DOCUMENT CONTAINS CONFIDENTIAL TRADE SECRET AND           *
+*      COPYRIGHTED INFORMATION. ANY UNAUTHORIZED USE OF ANY           *
+*			 KIND, INCLUDING, WITHOUT LIMITATION, DUPLICATION,              *
+*			 REENGINEERING, REVERSE ENGINEERING, OR DISCLOSURE,             *
+*			 IN PART OR IN WHOLE, IS PROHIBITED.                            *
+*                                                                     *
+*                                                                     *
+*     CHANGE LOG:                                                     *
+*                                                                     *
+*     DATE     BY     MOD ID                DESCRIPTION               *
+*    --------  ---   ---------   ------------------------------       *
+*   01/29/05   BXK   BK0129      OVERLAY FIX. CREATE BRANCH LABELS    *
+*                                                                     *
+***********************************************************************
+**<DOC-ON>******************************************************        00020000
+*                                                                       00030000
+* ROUTINE:  IMSGSERV - Message construction and disposition             00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This routine is invoked by the $MSG macro to construct the         00080000
+*    message lines designated by the specified prefix, component        00090000
+*    id and message number, and to deliver those lines to the           00100000
+*    specified destinations.                                            00110000
+*                                                                       00120000
+*    If the specified message cannot be constructed, the failing        00130000
+*    return and reason code are used to generate a diagnostic           00140000
+*    message in its place.  Because the caller may not be               00150000
+*    anticipating a multiline message, the diagnostic message           00160000
+*    is confined to a single line.                                      00170000
+*                                                                       00180000
+*                                                                       00190000
+* ON ENTRY:                                                             00200000
+*                                                                       00210000
+*    R1  contains the address of a $MSG request block as mapped         00220000
+*        by the $MREQB macro                                            00230000
+*                                                                       00240000
+*                                                                       00250000
+* ON EXIT:                                                              00260000
+*                                                                       00270000
+*    R15 and R0 contain a return and reason code respectively,          00280000
+*        originally provided by IMSGMAKE.  These return                 00290000
+*        codes can be interpreted generically as follows:               00300000
+*                                                                       00310000
+*           RC00 - success, messages issued and/or returned             00320000
+*           RC04 - message is not active                                00330000
+*           RC08 - specified message not defined                        00340000
+*           RC12 - processing error, consult reason code                00350000
+*           RC16 - insufficient storage                                 00360000
+*                                                                       00370000
+*        The message return buffer provided (BUFR=, BUFL=), if          00380000
+*        any, contains msgs in $MSGBUF format for both RC00             00390000
+*        and RC04 completions.                                          00400000
+*                                                                       00410000
+**<DOC-OFF>*****************************************************        00420000
+                                                                        00430000
+         EJECT                                                          00440000
+***************************************************************         00450000
+*                                                                       00460000
+* MAINTENANCE:                                                          00470000
+*                                                                       00480000
+*    04/15/93 R. Turgeon                                                00490000
+*             Initial version                                           00500000
+*                                                                       00510000
+*    04/24/95 R. Turgeon  Rel 2.0                                       00520000
+*             Implement LIFO / FIFO message queuing option              00530000
+*                                                                       00540000
+*    05/08/95 R. Turgeon  Rel 2.0                                       00550000
+*             Simplified logic dealing with overlapping                 00560000
+*             $CONSOLE, $SYSLOG, and $JOBLOG destinations.              00570000
+*                                                                       00580000
+*    05/25/95 R. Turgeon  Rel 2.0   PAR #190936                         00590000
+*             Consolidated CONSOLE and JOBLOG message dests             00600000
+*             into a single WTO with an appropriate ROUTCDE=            00610000
+*             value.  Replace the SVC 36 (WTL) call with                00620000
+*             WTO MCSFLAGS=(HRDCPY).                                    00630000
+*                                                                       00640000
+*    06/21/95 R. Witek (RW062195)                                       00650000
+*             Support FORCE= parameter                                  00660000
+*                                                                       00670000
+***************************************************************         00680000
+                                                                        00690000
+         EJECT                                                          00700000
+         #WORK LENGTH=4096        BEGIN WORKAREA                        00710000
+                                                                        00720000
+DOCMASK  DS    X                  MSG FAILURE ROUTING DESTINATIONS      00730000
+MSGSEQ   DS    X                  MSG SEQUENCE FLAG: 0-FIFO, /0-LIFO    00740000
+ROUTCDE  DS    XL2                WTO ROUTCDE= CONSTRUCTION AREA        00750000
+                                                                        00760000
+@MSGBUF  DS    A                  ADDR OF MESSAGE RETURN BUFFER         00770000
+RETC     DS    F                  MSG SERVICE RETURN CODE               00780000
+RSNC     DS    F                  MSG SERVICE REASON CODE               00790000
+                                                                        00800000
+@MSGQA   DS    A                  VER2 PLIST MSGQA= VALUE               00810000
+@STGQH   DS    A                  VER2 PLIST STGQH= VALUE               00820000
+                                                                        00830000
+CONSNAME DS    CL8                MCS CONSOLE NAME                      00840000
+CONSCART DS    XL8                MCS COMMAND RESPONSE TOKEN            00850000
+                                                                        00860000
+SAVMREQB DS    A                  $MREQB POINTER W/ FORCE FLAG RW062195 00870000
+REGSAVE  DS    16F                LOCAL SUBROUTINE SAVEAREA             00880000
+WK256    DS    XL256              MESSAGE TEXT STAGING AREA             00890000
+WTOMFL   DS    XL256              WTO PARM LIST AREA                    00900000
+SERVAREA DS    XL2048             2K WORKAREA FOR SERVICE ROUTINES      00910000
+                                                                        00920000
+         #ENDWORK ,               END WORKAREA                          00930000
+                                                                        00940000
+         EJECT                                                          00950000
+         $MSGDFT PREFIX='MSG',COMPID='DIAG',TABLE=DIAGMSGS,PRINT=NOGEN  00960000
+                                                                        00970000
+         EJECT                                                          00980000
+         EQUS  LINKAGE=COND                                             00990000
+                                                                        01000000
+         EJECT                                                          01010000
+         $MGEN TYPE=DSECT                                               01020000
+                                                                        01030000
+         EJECT                                                          01040000
+IMSGSERV #ENTER PREG=R8,AMODE=,RMODE=,WAPASS=YES                        01050000
+                                                                        01060000
+         USING ITASK,R10          STDENV                                01070000
+                                                                        01080000
+*---------------------------------------------------------------        01090000
+*   EXTRACE MESSAGE HANDLING OPTIONS                                    01100000
+*---------------------------------------------------------------        01110000
+                                                                        01120000
+         USING $MREQB,R8          LIFE OF FUNCTION ADDRESSABILITY       01130000
+         ST    R8,SAVMREQB        PTR W/POSSIBLE FORCE FLAG    RW062195 01140000
+                                                                        01150000
+         MVC   MSGSEQ,$MRBOPTS    MESSAGE HANDLING OPTIONS              01160000
+         NI    MSGSEQ,$MRBOPT_LIFO   EXPOSE MSG SEQUENCE BIT            01170000
+                                                                        01180000
+*---------------------------------------------------------------        01190000
+*   IDENTIFY MSG ROUTING OVERRIDES                                      01200000
+*---------------------------------------------------------------        01210000
+                                                                        01220000
+         MVI   $MRBDMSK,0         NO DESTINATIONS YET SELECTED          01230000
+         ICM   R2,15,$MRBDEST     DESTINATION OVERRIDES PROVIDED?       01240000
+         BZ    PREDEST1           USE MESSAGE DEFAULTS IF NOT           01250000
+         STC   R2,$MRBDMSK        ASSUME MASK IS PASSED                 01260000
+         C     R2,=A(X'FF')       MASK PTR GIVEN INSTEAD?               01270000
+         BNH   NOMSK              SKIP IF NOT                    BK0129
+
+         MVC   $MRBDMSK,0(R2)     ELSE TRAVERSE PTR TO MASK             01290000
+
+NOMSK    DS    0H                                                BK0129
+                                                                        01300000
+         ICM   R0,15,$MRBBUFA     BUFFER PROVIDED FOR EXPLICIT RETURN?  01310000
+
+         BZ    NOBUFF             SKIP IF NOT                    BK0129
+
+         OI    $MRBDMSK,$BUFFER   MAKE MSG BUFFERING REQ EXPLICIT       01330000
+
+NOBUFF   DS    0H                                                BK0129
+                                                                        01340000
+********************************                                        01350000
+*  $MREQB VERSION 1 EXTENSIONS                                          01360000
+********************************                                        01370000
+                                                                        01380000
+PREDEST1 DS    0H                                                       01390000
+         MVI   $MRBDADD,0         NO ADDITIONAL DESTINATIONS            01400000
+         CLI   $MRBVER,$MRBVER0   VERSION 0 PLIST?                      01410000
+         BNH   PRED1FIN           NOT SUPPORTED IN VERSION 0            01420000
+                                                                        01430000
+         ICM   R2,15,$MRBADDS     ADDITIONAL DESTINATIONS PROVIDED?     01440000
+         BZ    PRED1FIN           USE MESSAGE DEFAULTS IF NOT           01450000
+         STC   R2,$MRBDADD        ASSUME MASK IS PASSED                 01460000
+         C     R2,=A(X'FF')       MASK PTR GIVEN INSTEAD?               01470000
+         BNH   NOMASK                                            BK0129
+
+         MVC   $MRBDADD,0(R2)     ELSE TRAVERSE PTR TO MASK             01490000
+
+NOMASK   DS    0H                                                BK0129
+
+         MVC   @MSGQA,$MRBMQA     RETAIN COPY OF MSG Q ANCHOR PTR       01510000
+         MVC   @STGQH,$MRBSTGQ    STGMGR STORAGE POOL IDENTIFIER        01520000
+                                                                        01530000
+PRED1FIN DS    0H                                                       01540000
+                                                                        01550000
+********************************                                        01560000
+*  $MREQB VERSION 2 EXTENSIONS                                          01570000
+********************************                                        01580000
+                                                                        01590000
+         CLI   $MRBVER,$MRBVER2   VERSION 2 PLIST?                      01600000
+         BL    PRED2FIN           NOT SUPPORTED IN EARLIER VERSIONS     01610000
+                                                                        01620000
+         ICM   R2,15,$MRBCNAM     MCS CONSOLE NAME                      01630000
+         BZ    NOCONSO            BRANCH IF NONE                BK0129
+
+         MVC   CONSNAME,0(R2)                                           01650000
+
+NOCONSO  DS    0H                                                BK0129
+
+         ICM   R2,15,$MRBCART     MCS COMMAND RESPONSE TOKEN            01670000
+         BZ     PRED2FIN          BRANCH IF NONE                 BK0129
+
+         MVC   CONSCART,0(R2)                                           01690000
+                                                                        01700000
+PRED2FIN DS    0H                                                       01710000
+                                                                        01720000
+*---------------------------------------------------------------        01730000
+*   INVOKE MSG CONSTRUCTION SERVICE                                     01740000
+*---------------------------------------------------------------        01750000
+                                                                        01760000
+SENDMSG  DS    0H                                                       01770000
+         L     R1,SAVMREQB        PASS THRU REQUESTORS PLIST   RW062195 01780000
+         @CALL IMSGMAKE,WKA=SERVAREA   DEST MASK MAY CHANGE             01790000
+                                                                        01800000
+         ST    R15,RETC           SAVE RETURN CODE                      01810000
+         ST    R1,RSNC            SAVE REASON CODE                      01820000
+                                                                        01830000
+*---------------------------------------------------------------        01840000
+*   CREATE COMPOSITE MSG ROUTING MASK                                   01850000
+*---------------------------------------------------------------        01860000
+                                                                        01870000
+         ICM   R2,15,$MRBDEST     DESTINATIONS SPECIFIED IN REQUEST?    01880000
+         BNZ   NODEST             NO, BRANCH                     BK0129
+
+         OC    $MRBDMSK,$MRBDDFT  ELSE ACCEPT DEFAULTS                  01900000
+
+NODEST   DS    0H                                                BK0129
+
+         OC    $MRBDMSK,$MRBDADD  AND ANY ADDITIONAL DESTINATIONS       01910000
+                                                                        01920000
+         OC    CONSCART,CONSCART  MCS RESPONSE TOKEN ACCOMPANIES REQ?   01930000
+         BZ    NOMCS              SKIP IF NOT                    BK0129
+
+         OI    $MRBDMSK,$CONSOLE  ENSURE REQUESTER SEES THE RESPONSE    01950000
+
+NOMCS    DS    0H                                                BK0129
+                                                                        01960000
+         CLC   RETC,=A(RC04)      SUCCESSFUL COMPLETION?         BK0129 01970000
+         BH    DOCFAIL            DOCUMENT SERVICE ROUTINE FAILURE      01980000
+         BL    NRMROUT            BRANCH TO NORMAL ROUTING       BK0129
+
+         NI    $MRBDMSK,$BUFFER+$IMSGQ   BUFFER DESTINATIONS ONLY       02000000
+
+NRMROUT  DS    0H                                                BK0129
+
+         MVC   @MSGBUF,RSNC       RC00/RC04 MESSAGE BUFFER RETURNED     02020000
+         L     R1,@MSGBUF         R1 <== MSG BUFFER                     02030000
+         LA    R0,$MRBDMSK        R0 <== DESTINATION MASK PTR           02040000
+         BAS   R14,ROUTE          ROUTE MSGS TO DESTINATION             02050000
+                                                                        02060000
+SENDEND  DS    0H                 ROUTING COMPLETE                      02070000
+         B     CLEANUP            DONE                                  02080000
+                                                                        02090000
+*---------------------------------------------------------------        02100000
+*   REPLACE USER REQUEST WITH DIAGNOSTICS                               02110000
+*---------------------------------------------------------------        02120000
+                                                                        02130000
+DOCFAIL  DS    0H                                                       02140000
+         ICM   R0,1,$MRBRCUR      INTERNALLY ISSUED (RECURSIVE) REQ?    02150000
+         BNZ   CLEANUP            CANT CONTINUE IF SO                   02160000
+                                                                        02170000
+         MVC   DOCMASK,$MRBDMSK   REQUESTORS DESTINATION MASK           02180000
+         OI    DOCMASK,$LOGFILE   INCLUDE LOGFILE                       02190000
+                                                                        02200000
+         LA    R9,$MREQB          REQUEST BLOCK                         02210000
+REQ      USING $MREQB,R9          CONCURRENT ADDRESSABILITY             02220000
+                                                                        02230000
+         $MSG  001,DEST=DOCMASK,  MESSAGE AND DESTINATION              X02240000
+               FIELDS=(RETC,RSNC,                                      X02250000
+               (*REQ.$MRBPFXA,*REQ.$MRBPFXL),                          X02260000
+               (*REQ.$MRBCMPA,*REQ.$MRBCMPL),                          X02270000
+               REQ.$MRBMSG#),                                          X02280000
+               MSGQA=*@MSGQA,                                          X02290000
+               STGQH=*@STGQH,                                          X02300000
+               RECUR=YES,                                              X02310000
+               MF=(E,WK256)                                             02320000
+         DROP  REQ                                                      02330000
+                                                                        02340000
+*---------------------------------------------------------------        02350000
+*   CLEANUP AND EXIT                                                    02360000
+*---------------------------------------------------------------        02370000
+                                                                        02380000
+CLEANUP  DS    0H                                                       02390000
+         ICM   R2,15,@MSGBUF      IDENTIFY ALLOCATOR OF MSG BUFFER      02400000
+         BNM   EXIT               SKIP IF NOT LOCAL RESPONSIBILITY      02410000
+                                                                        02420000
+         $RETSTOR (R2)            RELEASE ACQUIRED STORAGE              02430000
+                                                                        02440000
+EXIT     DS    0H                                                       02450000
+         L     R15,RETC           RETURN ORIGINAL REQ RETURN CODE       02460000
+         L     R0,RSNC            RETURN ORIGINAL REQ REASON CODE       02470000
+                                                                        02480000
+         #EXIT ,                  COMPLETE                              02490000
+                                                                        02500000
+         EJECT                                                          02510000
+****************************************************************        02520000
+*                                                                       02530000
+* ROUTINE:  ROUTE - Deliver messages to specified destinations          02540000
+*                                                                       02550000
+* DESCRIPTION:                                                          02560000
+*                                                                       02570000
+*    This routine is responsible for delivering the message list        02580000
+*    provided to the selected destinations, subject to the              02590000
+*    provisions listed below.  Note that the IMSGLOG routine is         02600000
+*    responsible for $LOGFILE routing, as well as all message           02610000
+*    monitor (help desk) ITASK routing.                                 02620000
+*                                                                       02630000
+*       1) If the messages are destined for $LOGFILE, but the           02640000
+*          log file manager cannot deliver the messages, $JOBLOG        02650000
+*          is substituted.                                              02660000
+*                                                                       02670000
+*       2) If an MCS command and response token (CART) accompanies      02680000
+*          the message, the $CONSOLE destination is added.              02690000
+*                                                                       02700000
+*          MCS console destinations are now identified only by          02710000
+*          the (old) console id.  Future enhancements should            02720000
+*          reorient MCS delivery to console name.                       02730000
+*                                                                       02740000
+*       5) If $CONSOLE is specified in a TSO (debug) execution          02750000
+*          environment, $JOBLOG is added ensuring message               02760000
+*          display on the TSO session screen.                           02770000
+*                                                                       02780000
+*                                                                       02790000
+* ON ENTRY:                                                             02800000
+*                                                                       02810000
+*    R1  - addr of message buffer                                       02820000
+*    R0  - addr of destination mask byte                                02830000
+*                                                                       02840000
+****************************************************************        02850000
+                                                                        02860000
+ROUTE    DS    0H                                                       02870000
+         STM   R0,R15,REGSAVE     SAVE MAINLINE REGS                    02880000
+                                                                        02890000
+         LR    R6,R1              MESSAGE BUFFER                        02900000
+         USING $MSGBUF,R6         ADDRESSABILITY                        02910000
+         LA    R5,$MSBHDR         LOCATE FIRST ENTRY                    02920000
+         USING $MSBHDR,R5         ADDRESS STRUCTURE BY ENTRY            02930000
+                                                                        02940000
+         LR    R4,R0              DESTINATION MASK                      02950000
+         CLI   0(R4),0            ANY DESTINATIONS DEFINED?             02960000
+         BE    ROUTFIN            DONE IF NOT                           02970000
+         CLI   0(R4),$BUFFER      ONLY BUFFERRED RETURN?                02980000
+         BE    ROUTFIN            DONE IF SO                            02990000
+                                                                        03000000
+*---------------------------------------------------------------        03010000
+*   ENQUEUE MESSAGES IN STGMGR-MANAGED MSG LIST IF DEST=$IMSGQ          03020000
+*---------------------------------------------------------------        03030000
+                                                                        03040000
+         TM    0(R4),$IMSGQ       MESSAGE QUEUE DEFINED?                03050000
+         BNO   ROUTCONT           SKIP IF NOT                           03060000
+         CLI   $MRBVER,$MRBVER1   EARLIEST SUPPORTED LEVEL              03070000
+         BL    ROUTCONT           SKIP IF NO PLIST SUPPORT              03080000
+         ICM   R2,15,$MRBMQA      MESSAGE QUEUE ANCHOR PROVIDED?        03090000
+         BZ    ROUTCONT           SKIP IF NOT (RETCODE/ABEND?)          03100000
+         ICM   R3,15,$MRBSTGQ     STGMGR STORAGE POOL IDENTIFIED?       03110000
+         BZ    ROUTCONT           SKIP IF NOT (RETCODE/ABEND?)          03120000
+                                                                        03130000
+         $ENQMSG $MSGBUF,(R2),QH=(R3),QORDER=MSGSEQ                     03140000
+                                                                        03150000
+*---------------------------------------------------------------        03160000
+*   ENSURE CONSOLE DESTINATION IF CONSOLE ORIGINATED REQUEST            03170000
+*---------------------------------------------------------------        03180000
+                                                                        03190000
+ROUTCONT DS    0H                                                       03200000
+         OC    CONSCART,CONSCART  MCS CMD AND RESPONSE TOKEN?           03210000
+         BZ    MCSCMRSP           SKIP IF NOT                    BK0129
+
+         OI    0(R4),$CONSOLE     INCLUDE $CONSOLE DEST                 03230000
+
+MCSCMRSP DS    0H                                                BK0129 03240000
+
+         TM    0(R4),$CONSOLE     CONSOLE DESTINATION?                  03250000
+         BNO   NOTSO                                                    03260000
+         TM    ICTSTAT2,ICT2$TSO  TSO (DEBUG) ENVIRONMENT?              03270000
+         BZ    NOTSO              DONE IF NOT                    BK0129
+
+         OI    0(R4),$JOBLOG      ENSURE MSGS DISPLAY ON SESSION SCREEN 03290000
+                                                                        03300000
+NOTSO    DS    0H                                                       03310000
+                                                                        03320000
+****************************************************************        03330000
+*                                                                       03340000
+*   Msgs destined to $LOGFILE are sent by an implementation             03350000
+*   dependent service.  That same service is also used to               03360000
+*   dispatch messages to message-monitoring workunits, if               03370000
+*   active.  If TSKMNSEQ is not equal to ICTMNSEQ, some message         03380000
+*   monitoring status changed since the current ITASK issued            03390000
+*   its last message.                                                   03400000
+*                                                                       03410000
+****************************************************************        03420000
+                                                                        03430000
+         TM    0(R4),FF-$BUFFER-$IMSGQ MESSAGE CONSTRUCTION ONLY?       03440000
+         BZ    EMONITOR           YES, SKIP MESSAGE ROUTING             03450000
+         TM    0(R4),$LOGFILE     MSGS DESTINED FOR JOURNAL?            03460000
+         BO    MONITOR            LOGFILE IS A MESSAGE MONITOR          03470000
+         CLC   TSKMNSEQ,ICTMNSEQ  ITASK AWARE OF MSG MONITOR UPDATES?   03480000
+         BNE   MONITOR            RESYNC REQUIRED                       03490000
+         TM    TSKMNFLG,TSKMN_WATCHED   MONITORED BY FOREIGN ITASK?     03500000
+         BO    MONITOR            BROADCAST IF SO                       03510000
+         ICM   R0,15,TSKMNMSG     LOCAL MESSAGE MONITORING BY COPROC?   03520000
+         BZ    EMONITOR                                                 03530000
+                                                                        03540000
+MONITOR  DS    0H                 MESSAGE MONITOR INTERFACE             03550000
+         @CALL IMSGLOG,($MSGBUF,(R4),$MRBCLSC),                        X03560000
+               MF=(E,MFE_LIST)                                          03570000
+         LTR   R15,R15            LOGTASK ACCEPTED THE MSG?             03580000
+         BZ    EMONITOR           CONTINUE IF SO                        03590000
+                                                                        03600000
+         TM    0(R4),$LOGFILE     LOGFILE INTENDED?                     03610000
+         BNO   EMONITOR           SKIP IF NOT                           03620000
+         OI    0(R4),$JOBLOG      ELSE REROUTE UNDELIVERABLE MSG        03630000
+                                                                        03640000
+EMONITOR DS    0H                                                       03650000
+                                                                        03660000
+****************************************************************        03670000
+*                                                                       03680000
+*   ROUTE MESSAGES TO CONSOLE AND/OR JOBLOG                             03690000
+*                                                                       03700000
+****************************************************************        03710000
+                                                                        03720000
+ROUTEOUT DS    0H                                                       03730000
+         TM    0(R4),$CONSOLE+$JOBLOG+$SYSLOG                           03740000
+         BZ    ECONSOLE           NO MCS DESTINATIONS                   03750000
+                                                                        03760000
+         LH    R2,$MSBLEN         LENGTH OF MSG TEXT                    03770000
+         LTR   R2,R2              REASONABLE LENGTH                     03780000
+         BNP   ROUTENXT           SKIP OTHERWISE                        03790000
+                                                                        03800000
+*---------------------------------------------------------------        03810000
+*   COMMON WTO MESSAGE TEXT INSERTION                                   03820000
+*---------------------------------------------------------------        03830000
+                                                                        03840000
+         CH    R2,=AL2(124)       WTO LIMIT                             03850000
+         BNH   NOWTO              TRUNCATE IF NECESSARY          BK0129
+
+         LA    R2,124                                                   03870000
+
+NOWTO    DS    0H                                                BK0129
+
+         STH   R2,WK256           TEXT LENGTH                           03880000
+         LR    R1,R2              PREPARE FOR COPY                      03890000
+         BCTR  R1,0               VIA EX                                03900000
+         EX    R1,*+4             CONSTRUCT VAR LENGTH MSG              03910000
+         MVC   WK256+2(*-*),$MSBTEXT                                    03920000
+                                                                        03930000
+*---------------------------------------------------------------        03940000
+*   ROUTE CODE PREPARATION                                              03950000
+*---------------------------------------------------------------        03960000
+                                                                        03970000
+         TM    0(R4),$CONSOLE+$JOBLOG   SELECTED DESTINATIONS           03980000
+         BZ    ECONSOLE           SKIP IF NOT                           03990000
+                                                                        04000000
+         TM    0(R4),$CONSOLE     CONSOLE DESTINATION?                  04010000
+         BNO   NOCONDST           SKIP IF NOT                    BK0129
+
+         OC    ROUTCDE,$ROUTE2    INSERT APPROPRIATE ROUTE CODE         04030000
+
+NOCONDST DS    0H                                                BK0129
+                                                                        04040000
+         TM    0(R4),$JOBLOG      JOBLOG DESTINATION?                   04050000
+         BNO   NOJOBDST           SKIP IF NOT                    BK0129
+
+         OC    ROUTCDE,$ROUTE11   INSERT APPROPRIATE ROUTE CODE         04070000
+
+NOJOBDST DS    0H                                                BK0129 04080000
+
+*---------------------------------------------------------------        04090000
+*   CONSOLE IDENTIFIED, MAY INCLUDE A "CMD AND RESPONSE TOKEN"          04100000
+*---------------------------------------------------------------        04110000
+                                                                        04120000
+         ICM   R3,15,$MRBCNID     CONSOLE ID SPECIFIED?                 04130000
+         BZ    CONSALL            SHOTGUN IF NOT                        04140000
+                                                                        04150000
+         MVC   WTOMFL(WCNLISTL),WCNLIST                                 04160000
+         LA    R15,124            MAX TEXT LENGTH                       04170000
+         LA    R14,WTOMFL+4       TEXT RECEIVING AREA                   04180000
+         LH    R1,WK256           MESSAGE LENGTH                        04190000
+         ICM   R1,B'1000',=C' '   PADDING CHARACTER                     04200000
+         LA    R0,WK256+2         MESSAGE TEXT                          04210000
+         MVCL  R14,R0             COPY TEXT TO PARM LIST                04220000
+                                                                        04230000
+         SR    R0,R0              CONSID REQUIREMENT                    04240000
+         WTO   CONSID=(R3),CART=CONSCART,MF=(E,WTOMFL)                  04250000
+         B     ECONSOLE                                                 04260000
+                                                                        04270000
+*---------------------------------------------------------------        04280000
+*   SPECIFIC CONSOLE NOT IDENTIFIED, USE DYNAMIC ROUTCDE                04290000
+*---------------------------------------------------------------        04300000
+                                                                        04310000
+CONSALL  DS    0H                                                       04320000
+         MVC   WTOMFL(WTOLISTL),WTOLIST                                 04330000
+         LA    R15,124            MAX TEXT LENGTH                       04340000
+         LA    R14,WTOMFL+4       TEXT RECEIVING AREA                   04350000
+         LH    R1,WK256           MESSAGE LENGTH                        04360000
+         ICM   R1,B'1000',=C' '   PADDING CHARACTER                     04370000
+         LA    R0,WK256+2         MESSAGE TEXT                          04380000
+         MVCL  R14,R0             COPY TEXT TO PARM LIST                04390000
+                                                                        04400000
+         MVC   2(L'ROUTCDE,R14),ROUTCDE                                 04410000
+                                                                        04420000
+         SR    R0,R0              CONSID REQUIREMENT                    04430000
+         WTO   MF=(E,WTOMFL)                                            04440000
+                                                                        04450000
+ECONSOLE DS    0H                                                       04460000
+                                                                        04470000
+****************************************************************        04480000
+*                                                                       04490000
+*   ROUTE MESSAGES TO SYSLOG IF NOT PREVIOUSLY SENT TO CONSOLE          04500000
+*                                                                       04510000
+****************************************************************        04520000
+                                                                        04530000
+         TM    0(R4),$SYSLOG      DESTINATION IS SYSTEM LOG?            04540000
+         BNO   ESYSLOG            SKIP IF NOT                           04550000
+         TM    0(R4),$CONSOLE     WILL PICK IT UP VIA WTO?              04560000
+         BO    ESYSLOG            SKIP IF NOT                           04570000
+                                                                        04580000
+         MVC   WTOMFL(WTLLISTL),WTLLIST                                 04590000
+         LA    R15,124            MAX TEXT LENGTH                       04600000
+         LA    R14,WTOMFL+4       TEXT RECEIVING AREA                   04610000
+         LH    R1,WK256           MESSAGE LENGTH                        04620000
+         ICM   R1,B'1000',=C' '   PADDING CHARACTER                     04630000
+         LA    R0,WK256+2         MESSAGE TEXT                          04640000
+         MVCL  R14,R0             COPY TEXT TO PARM LIST                04650000
+                                                                        04660000
+         SR    R0,R0              CONSID REQUIREMENT                    04670000
+         WTO   MCSFLAG=(HRDCPY),MF=(E,WTOMFL)                           04680000
+                                                                        04690000
+ESYSLOG  DS    0H                                                       04700000
+                                                                        04710000
+****************************************************************        04720000
+*                                                                       04730000
+*   PROCESS ALL MSGS                                                    04740000
+*                                                                       04750000
+****************************************************************        04760000
+                                                                        04770000
+ROUTENXT DS    0H                                                       04780000
+         ICM   R5,15,$MSBLINK                                           04790000
+         BNZ   ROUTEOUT                                                 04800000
+                                                                        04810000
+ROUTFIN  DS    0H                                                       04820000
+         SR    R15,R15                                                  04830000
+         LM    R0,R14,REGSAVE                                           04840000
+         BR    R14                                                      04850000
+         DROP  R5,R6              $MSBHDR, $MSGBUF                      04860000
+                                                                        04870000
+         EJECT                                                          04880000
+****************************************************************        04890000
+*                                                                       04900000
+*   WTO LIST FORMS                                                      04910000
+*                                                                       04920000
+****************************************************************        04930000
+                                                                        04940000
+WTOLIST  WTO   '1234567890123456789012345678901234567890123456789012345+04950000
+               67890123456789012345678901234567890123456789012345678901+04960000
+               2345678901234',ROUTCDE=(2,11),MF=L                       04970000
+WTOLISTL EQU   *-WTOLIST                                                04980000
+                                                                        04990000
+WCNLIST  WTO   '1234567890123456789012345678901234567890123456789012345+05000000
+               67890123456789012345678901234567890123456789012345678901+05010000
+               2345678901234',CONSID=,CART=,ROUTCDE=(2,11),MF=L         05020000
+WCNLISTL EQU   *-WCNLIST                                                05030000
+                                                                        05040000
+WTLLIST  WTO   '1234567890123456789012345678901234567890123456789012345+05050000
+               67890123456789012345678901234567890123456789012345678901+05060000
+               2345678901234',MCSFLAG=(HRDCPY),MF=L                     05070000
+WTLLISTL EQU   *-WTLLIST                                                05080000
+                                                                        05090000
+*--------------------------------------------------------------         05100000
+*   ROUTE CODE MASK                                                     05110000
+*--------------------------------------------------------------         05120000
+                                                                        05130000
+$ROUTE2  DC    B'0100000000000000'                                      05140000
+$ROUTE11 DC    B'0000000000100000'                                      05150000
+                                                                        05160000
+         EJECT                                                          05170000
+****************************************************************        05180000
+*                                                                       05190000
+*   LOCAL READ/ONLY DATA AREAS, ETC.                                    05200000
+*                                                                       05210000
+****************************************************************        05220000
+                                                                        05230000
+DIAGMSGS DS    0A                                                       05240000
+                                                                        05250000
+   $MPREFIX MSG                                                         05260000
+                                                                        05270000
+      $MCOMPID DIAG                                                     05280000
+                                                                        05290000
+         $MTEXT 001,E,'$MSG PROCESSING FAILURE: ',                     X05300000
+               'RC<I>, RSN<I> FOR <S><S> <I:0.3>'                       05310000
+                                                                        05320000
+   $MEND ,                                                              05330000
+                                                                        05340000
+*---------------------------------------------------------------        05350000
+                                                                        05360000
+         LTORG ,                                                        05370000
+                                                                        05380000
+         PRINT NOGEN                                                    05390000
+         ICVT  ,                                                        05400000
+         ITASK ,                                                        05410000
+         END   ,                                                        05420000

@@ -1,0 +1,2362 @@
+INAVCNTL TITLE '- PLAN GENERATION AND EXECUTION CONTROL'                00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE: INAVCNTL - Plan generation and execution control             00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This routine is responsible for identifying the host appls         00080000
+*    that must be run to satisfy a VDB request, and starting or         00090000
+*    resuming those apps as needed.  When a VDB table spans             00100000
+*    multiple applications, this routine must determine (via            00110000
+*    PLNAPP) the correct order in which to run the component            00120000
+*    applications.                                                      00130000
+*                                                                       00140000
+*    Additionally, this routine acquires the navigational               00150000
+*    (access) plan for the request, either via import/export            00160000
+*    from a previously prepared statement, or via IPLNGET,              00170000
+*    the plan manager.                                                  00180000
+*                                                                       00190000
+*                                                                       00200000
+* METHOD:                                                               00210000
+*                                                                       00220000
+*    Refer to the running commentary for detailed description.          00230000
+*                                                                       00240000
+*                                                                       00250000
+* ON ENTRY:                                                             00260000
+*                                                                       00270000
+*    R1  contains the address of $NAVPARM, describing the VDB           00280000
+*        table, its columns and the corresponding session               00290000
+*        variables.                                                     00300000
+*                                                                       00310000
+*                                                                       00320000
+* ON EXIT:                                                              00330000
+*                                                                       00340000
+*       RC00 - navigation completed                                     00350000
+*                                                                       00360000
+*              RSN00 - terminal state is not exceptional                00370000
+*              RSN04 - terminal state is an exception state             00380000
+*              RSN08 - table select SARG mismatch ended plan            00390000
+*                                                                       00400000
+*       RC04 - a required host application is not defined               00410000
+*                                                                       00420000
+*       RC08 - non-zero return code presented by session start          00430000
+*                                                                       00440000
+*       RC12 - error detected during SLU driver initialization          00450000
+*                                                                       00460000
+*       RC16 - inter/intra task communication error                     00470000
+*                                                                       00480000
+*       RC20 - host application access violation                        00490000
+*                                                                       00500000
+*       RC24 - plan executor error                                      00510000
+*                                                                       00520000
+*       RC28 - plan generation failure                                  00530000
+*                                                                       00540000
+*       RC32 - error condition precluding query execution attempt       00550000
+*                                                                       00560000
+*       RC36 - query result variables not sufficient for                00570000
+*              complete result set                                      00580000
+*                                                                       00590000
+*       RC40 - ABEND encountered and logged                             00600000
+*                                                                       00610000
+*       RC44 - storage management failure                               00620000
+*                                                                       00630000
+*       RC48 - premature session termination                            00640000
+*                                                                       00650000
+**<DOC-OFF>****************************************************         00660000
+                                                                        00670000
+         EJECT                                                          00680000
+***************************************************************         00690000
+*                                                                       00700000
+* MAINTEANCE:                                                           00710000
+*                                                                       00720000
+*    02/XX/92 R. Turgeon                                                00730000
+*             Initial version                                           00740000
+*                                                                       00750000
+*    07/15/94 R. Turgeon      PAR# 120487, 127415                       00760000
+*                                                                       00770000
+*             When an implicit or explicit project switch is            00780000
+*             requested from a SQL request, all sessions that           00790000
+*             were initiated with host applications in the              00800000
+*             prior project were terminated, preventing clients         00810000
+*             from defining common sequences such as "logon"            00820000
+*             and "logoff" that could be developed once and             00830000
+*             shared by all users of an application. This update        00840000
+*             preserves the foreign session if                          00850000
+*                                                                       00860000
+*             1) the current state name is defined in the new           00870000
+*                project for the (same) application, and                00880000
+*                                                                       00890000
+*             2) image compare accepts the current image as             00900000
+*                an instance of the named state                         00910000
+*                                                                       00920000
+*             Note that, as before, all prepared plans present          00930000
+*             at the time of a project switch are purged prior          00940000
+*             to entry to this routine.                                 00950000
+*                                                                       00960000
+*    08/09/94 R. Turgeon      PAR# 136198                               00970000
+*             FIRSTPLAN / BESTPLAN options                              00980000
+*                                                                       00990000
+*    09/24/94 R. Colmone      PAR# 144663                        144663 01000000
+*             SLUHANDL now contains master planner workunit      144663 01010000
+*             token versus PCB address.  SLU driver performs     144663 01020000
+*             WULOC to obtain PCB address.                       144663 01030000
+*                                                                       01040000
+*    01/31/95 R. Turgeon      PAR# 168636                        168636 01050000
+*             Skip build of REPOSITION plan for SQLPrepare()     168636 01060000
+*                                                                       01070000
+*    05/25/95 R. Turgeon      Rel 2.0                                   01080000
+*             Accommodate postplan normalization validation             01090000
+*             failure return codes                                      01100000
+*                                                                       01110000
+*    10/10/95 R. Turgeon      Rel 2.1   - PLANCACHE                     01120000
+*             Modified to acquire plans from the plan manager           01130000
+*             IPLNGET rather than directly from the (now) lower         01140000
+*             level PLNBLD() function.  AAP cleanup formalized          01150000
+*             in INAVACLN to properly release both valid and            01160000
+*             invalid plans.  Finally, the termination cleanup          01170000
+*             pass is now deferred to the IRMXSQLW resmgr.              01180000
+*                                                                       01190000
+*    12/19/95 R. Turgeon      Rel 2.1                           R211219 01200000
+*             Accomodate two types of plan end.  The first is   R211219 01210000
+*             conveyed by ITM_RUN_PLANEND when all planned      R211219 01220000
+*             navigations are accomplished.  The second,        R211219 01230000
+*             ITM_SLU_SESSTERM occurs when the session          R211219 01240000
+*             terminates unexpectedly, from the SQL point of    R211219 01250000
+*             view.                                             R211219 01260000
+*                                                                       01270000
+*    01/12/96 R. Turgeon      Rel 2.1                                   01280000
+*             Disassociate the length of the PLAN VIEW message          01290000
+*             lines from the logfile record length.  PLAN VIEWs         01300000
+*             are not sent to the logfile.                              01310000
+*                                                                       01320000
+*    01/27/96 R. Turgeon      Rel 2.1                                   01330000
+*             Use $ENTITY to resolve current position only if           01340000
+*             the project has been changed since the last               01350000
+*             reference.                                                01360000
+*                                                                       01370000
+*    01/30/96 R. Turgeon      Rel 2.1 Beta 1                            01380000
+*             Multi-application VDB plans create inter appl             01390000
+*             linkages by modifying terminal state lists (TSLs).        01400000
+*             Ensure TSLs used are modifiable and not from the          01410000
+*             PLAN cache.                                               01420000
+*                                                                       01430000
+***************************************************************         01440000
+                                                                        01450000
+         EJECT                                                          01460000
+         IUSER ,                  USER CONTROL BLOCK                    01470000
+                                                                        01480000
+         EJECT                                                          01490000
+         IPROJ ,                  PROJECT CONTROL BLOCK                 01500000
+                                                                        01510000
+         EJECT                                                          01520000
+         NAV   ,                  NAVIGATION NETWORK STRUCTURES         01530000
+                                                                        01540000
+         EJECT                                                          01550000
+         $NAVPARM ,               QUERY / IMAGING INTERFACE REQUEST     01560000
+                                                                        01570000
+         EJECT                                                          01580000
+         QCS   ,                  QUERY CONTENT SUMMARY                 01590000
+                                                                        01600000
+         EJECT                                                          01610000
+         PLNGETP ,                GET PLAN / TSL REQUEST PLIST          01620000
+                                                                        01630000
+         EJECT                                                          01640000
+         SLUHANDL ,               APPLICATION SESSION HANDLE            01650000
+                                                                        01660000
+         EJECT                                                          01670000
+         VSESACCP ,               SESSION START COMMON PREPARATION      01680000
+                                                                        01690000
+         EJECT                                                          01700000
+         VSESTRTP ,               SESSION START COMMON EXECUTION        01710000
+                                                                        01720000
+         EJECT                                                          01730000
+         $VARMGR DSECT=YES        INTEGRATOR VARIABLE SERVICES          01740000
+                                                                        01750000
+         EJECT                                                          01760000
+         ICATALOG APPLS,VARIABLES,TABLES PROJECT CATALOG TABLES         01770000
+                                                                        01780000
+         EJECT                                                          01790000
+         $TASK DSECT=YES          $TASK REQUEST PLIST                   01800000
+                                                                        01810000
+         EJECT                                                          01820000
+         $TSEND DSECT=YES         INTERTASK MESSAGE REQUEST             01830000
+                                                                        01840000
+         EJECT                                                          01850000
+         $ENTITY DSECT=YES        ENTITY MANAGER REQUEST LIST           01860000
+                                                                        01870000
+         EJECT                                                          01880000
+         $TIMER DSECT=YES         $TIMER SERVICES                       01890000
+                                                                        01900000
+         EJECT                                                          01910000
+         PREPPLAN EQUS            PREPARED STMT - PLAN REQUEST SYMBOLS  01920000
+                                                                        01930000
+         PREPAPPS EQUS            PREPARED STMT - MULTIAPP SEQUENCING   01940000
+                                                                        01950000
+         EJECT ,                                                        01960000
+         TMSG  ,                  INTERTASK MESSAGE HEADER              01970000
+                                                                        01980000
+         EJECT                                                          01990000
+         TRACODES PRINT=NOGEN     TRACE TABLE ENTRY CODES               02000000
+                                                                        02010000
+         ABCODES PRINT=NOGEN      $ABEND CODES                          02020000
+                                                                        02030000
+         EVCODES ,                $TASK EVENT CODES                     02040000
+                                                                        02050000
+         MSGCODES ,               INTERTASK MESSAGING CODES             02060000
+                                                                        02070000
+         EQUS  ,                                                        02080000
+                                                                        02090000
+         $MSGDFT PREFIX=ICTPID,COMPID='NAV',TABLE=*#MSGS,              X02100000
+               CONID=*ICTCONID,CONNAME=ICTCONNM,                       X02110000
+               DEST=$IMSGQ,                                            X02120000
+               MSGQA=*IXRMSGQ,STGQH=*IXRQHMSG,                         X02130000
+               PRINT=NOGEN,MF=(U,$MSGMFL)                               02140000
+                                                                        02150000
+         EJECT                                                          02160000
+         #WORK PLIST=(MFE_LIST,80)                                      02170000
+                                                                        02180000
+CFLAG1   DS    X                  LOCAL FLAGS                           02190000
+CF1STOP  EQU   X'80'                 PROC STOP                          02200000
+CF1CNCL  EQU   X'40'                 PROC CANCEL                        02210000
+CF1END   EQU   X'10'                 END OF QUERY INDICATOR             02220000
+CF1KILL  EQU   X'08'                 APPLS KILLED DURING INIT           02230000
+CF1EXCP  EQU   X'04'                 PLAN TERMINATED BY EXECEPTION STN  02240000
+CF1RECOV EQU   X'02'                 RECOVERY ENVIRONMENT ESTABLISHED   02250000
+CF1PGENE EQU   X'10'                 TERMINATING PLAN GENERATION ERROR  02260000
+                                                                        02270000
+PREPFLAG DS    X                  PREPARED STATEMENT INTERFACE FLAGS    02280000
+PREPSTMT EQU   X'80'                 SET IF PREPARED STATEMENT          02290000
+PREPRUN  EQU   X'40'                 RUN PLAN CAME FROM PREPARE         02300000
+PREPPOS  EQU   X'20'                 REPOS PLAN CAME FROM PREPARE       02310000
+PREPTERM EQU   X'10'                 TERM PLAN CAME FROM PREPARE        02320000
+PREPAPPS EQU   X'08'                 PREPAPPS EXPORT PENDING            02330000
+PREPFAIL EQU   X'01'                 PLAN GENERATION FAILED FOR SOME    02340000
+*                                       APPL / PLANTYPE                 02350000
+                                                                        02360000
+BYTE     DS    X                  FLAG BYTE                             02370000
+                                                                        02380000
+SLUFLAGS DS    X                  STATUS OF ASSOCIATED SLU SESSION      02390000
+SLUF_END EQU   X'80'                 CURRENT AAP SIGNALED PLAN END      02400000
+SLUF_TRM EQU   X'40'                 CURRENT AAP SIGNALED SESS TERM     02410000
+                                                                        02420000
+RETC     DS    F                  RETURN CODE                           02430000
+RSNC     DS    F                  REASON CODE                           02440000
+                                                                        02450000
+PERETC   DS    F                  PLAN EXECUTOR RETURN CODE             02460000
+PERSNC   DS    F                  PLAN EXECUTOR REASON CODE             02470000
+INFOC    DS    F                  INFO CODE                             02480000
+QUAL1    DS    F                  QUALIFIER 1                           02490000
+QUAL2    DS    F                  QUALIFIER 2                           02500000
+                                                                        02510000
+SELCOUNT DS    F                  NUMBER OF APPLS SCHEDULED TO RUN      02520000
+PLANOPTS DS    F                  PLAN OPTS: FIRSTPLAN/BESTPLAN  136198 02530000
+                                                                        02540000
+@PCBSTG  DS    A                  ADDR OF PCB STORAGE QH                02550000
+@CURRAAP DS    A                  CURRENT AAP                           02560000
+                                                                        02570000
+TSTATES  DS    F                  # TERMINAL STATES RET FROM IPLNGET    02580000
+TSTATEL  DS    A                  TERMINAL STATE LIST FROM IPLNGET      02590000
+                                                                        02600000
+ORGSTATE DS    A                  REPOSITION PLAN INITIAL STATE         02610000
+TRMSTATE DS    A                  REPOSITION PLAN TERMINAL STATE        02620000
+                                                                        02630000
+DETAIL   DS    F                  TRUE IF PLAN DETAIL REQUIRED          02640000
+LINELEN  DS    F                  MAX LENGTH OF PLAN LINE VAR SECTION   02650000
+DEST     DS    F                  $MSG DEST OVERRIDES IN LOWORDER OR 0  02660000
+                                                                        02670000
+S0NAMEP  DS    A                  DIAGNOSTIC - ADDR OF S0 NAME          02680000
+S1NAMEP  DS    A                  DIAGNOSTIC - ADDR OF S1 NAME          02690000
+PLANTYPE DS    CL12,XL4'00'       TYPE OF PLAN UNDER CONSTRUCTION ZDLM  02700000
+USERAREA DS    XL16               $ENTITY USER DATA                     02710000
+VDBTABLE DS    CL(L'STBLNAME)     TABLE NAME RETENTION AREA             02720000
+QUERYTYP DS    C                  DML QUERY TYPE CODE                   02730000
+                                                                        02740000
+TIMERID  DS    D                  STIMERM TIMER ID                      02750000
+                                                                        02760000
+$SYSAPPL DS    XL(SYSAPLSN)       SYSAPPLS APPL DEFINITION              02770000
+                                                                        02780000
+$TASKMFL $TASK MF=(L,*)           $TASK   PLIST CONSTRUCTION AREA       02790000
+$VARMFL  $VARMGR MF=(L,*)         $VARMGR PLIST CONSTRUCTION AREA       02800000
+$TIMER   $TIMER  MF=(L,*)         $TIMER  PLIST CONSTRUCTION AREA       02810000
+$MSGMFL2 $MSG  MF=(L,*),          $MSG    LIST FORM                    X02820000
+               FIELDS=(,,,,,,,,,,)                                      02830000
+                                                                        02840000
+$MSGMFL  $MSG  MF=L,              $MSG    UPDATE FORM                  X02850000
+               FIELDS=(,,,,,,,,,,)                                      02860000
+                                                                        02870000
+$TASKMSG DS    XL(TMSGSLN)        INTERTASK MESSAGE RETURN AREA         02880000
+$PLANINF DS    XL(PINFOLN)        PLANINFO RETURN AREA                  02890000
+                                                                        02900000
+STATREGS DS    3F                 R15-R1 STATUS REGS                    02910000
+AUXREGS  DS    16F                SLU SCHEDULER, ET.AL. SAVEAREA        02920000
+REGSAVE  DS    16F                LOCAL REGISTER SAVEAREA               02930000
+MSGREGS  DS    16F                MESSAGE HANDLER SAVEAREA              02940000
+                                                                        02950000
+STATENAM DS    CL(L'NVSTNAME)     STATE NAME, SPECIAL                   02960000
+STATERR1 DS    CL(L'NVSTNAME)     STATE NAME #1 FROM FAILURE PLANINFO   02970000
+STATERR2 DS    CL(L'NVSTNAME)     STATE NAME #2 FROM FAILURE PLANINFO   02980000
+                                                                        02990000
+GENWORK  DS    XL512              GENERAL PURPOSE, VOLITILE WORKAREA    03000000
+                                                                        03010000
+         ORG   GENWORK                                                  03020000
+TSL      DS    (STNMAX)F          TERMINAL STATE LIST                   03030000
+TSLMAX   EQU   *-TSL              MAX TSL LENGTH                        03040000
+                                                                        03050000
+         ORG   GENWORK                                                  03060000
+MSGRET   DS    XL512              MESSAGE CONSTRUCTION AREA             03070000
+         ORG   ,                                                        03080000
+                                                                        03090000
+         #ENDWORK ,               PROJECT CONTROL BLOCK                 03100000
+                                                                        03110000
+         EJECT                                                          03120000
+INAVCNTL #ENTER PREG=(R8),BASE=(R12,R9)                                 03130000
+                                                                        03140000
+         USING ITASK,R10          STDENV                                03150000
+                                                                        03160000
+***************************************************************         03170000
+*                                                                       03180000
+*   General initialization                                              03190000
+*                                                                       03200000
+***************************************************************         03210000
+                                                                        03220000
+         USING $NAVPARM,R8        PROJECT RESOURCES                     03230000
+PI       USING PLANINFO,$PLANINF  PLANINFO RETURN AREA                  03240000
+                                                                        03250000
+         L     R15,IXR@TDEF       RETAIN VDB TABLE NAME                 03260000
+         MVC   VDBTABLE,STBLNAME-SYSTABLE(R15)                          03270000
+         L     R15,IXRRCVPL       LOCATE THE QUERY CONTENT SUMMARY      03280000
+         MVC   QUERYTYP,QCSQUERY-QCS(R15)                               03290000
+                                                                        03300000
+         L     R1,TSKPCBC             PROCESS MODE                      03310000
+         LA    R0,PCBSTG-IPCB(,R1)    PCB OWNED STORAGE QH              03320000
+         ST    R0,@PCBSTG             SAVE LOCAL PTR                    03330000
+         L     R6,PCBUSER-IPCB(,R1)   USER ENVIRONMENT                  03340000
+                                                                        03350000
+         USING IUSER,R6                                                 03360000
+                                                                        03370000
+         L     R7,USRPROJ         ACTIVE PROJECT                        03380000
+         USING IPROJ,R7                                                 03390000
+                                                                        03400000
+*--------------------------------------------------------------         03410000
+*   Preparation for the long haul                                       03420000
+*--------------------------------------------------------------         03430000
+                                                                        03440000
+         $MSG  MF=(I,$MSGMFL)     STANDARD MESSAGING            R211219 03450000
+                                                                        03460000
+         BAS   R14,SETMEPB        ALLOW RECEIPT OF MESSAGES             03470000
+                                                                        03480000
+         ICM   R0,15,IXRPSBA      PREPARED STATEMENT?                   03490000
+         BZ    *+8                SKIP IF NOT                           03500000
+         OI    PREPFLAG,PREPSTMT  INDICATE USE OF PREPARE               03510000
+                                                                        03520000
+*-------------------------------------------------------------- 136198  03530000
+*   IDENTIFY PLAN GENERATION OPTION:  FIRSTPLAN OR BESTPLAN     136198  03540000
+*-------------------------------------------------------------- 136198  03550000
+                                                                        03560000
+         L     R0,ICTPLIM         ASSUME BESTPLAN(<LIMIT>) OPT  136198  03570000
+         TM    ICTSTAT4,ICT4$PLN  FIRSTPLAN OR BESTPLAN?        136198  03580000
+         BNO   *+8                SKIP IF BESTPLAN (DEFAULT)    136198  03590000
+         LA    R0,1               FIRSTPLAN COST LIMIT          136198  03600000
+                                                                        03610000
+         ST    R0,PLANOPTS        PLAN COST CONTROL VALUE OR 0  136198  03620000
+                                                                        03630000
+***************************************************************         03640000
+*                                                                       03650000
+*   Establish recovery environment                                      03660000
+*                                                                       03670000
+***************************************************************         03680000
+                                                                        03690000
+         L     R2,=A(RECOVRTN)                                          03700000
+                                                                        03710000
+         $RCVRY CREATE,(R2),PARM=(R13),MF=(E,MFE_LIST)                  03720000
+                                                                        03730000
+         OI    CFLAG1,CF1RECOV    INDICATE RECOVERY ENVIRON ESTAB       03740000
+                                                                        03750000
+         EJECT                                                          03760000
+**<DOC-ON>*****************************************************         03770000
+*                                                                       03780000
+*   Appls may have terminated since the last request was                03790000
+*   processed, or subsequent examination may show that some             03800000
+*   need to be terminated because of a project change, as               03810000
+*   discussed later.  INAVACLN directs the cleanup of the AAP           03820000
+*   queue accordingly.                                                  03830000
+*                                                                       03840000
+**<DOC-OFF>****************************************************         03850000
+                                                                        03860000
+RESTART  DS    0H                                                       03870000
+         @CALL INAVACLN,CTYPE=CVT SANITIZE THE AAP QUEUE                03880000
+                                                                        03890000
+         NI    CFLAG1,FF-CF1KILL  ALL APPL TERMINATIONS COMPLETED       03900000
+                                                                        03910000
+**<DOC-ON>*****************************************************         03920000
+*                                                                       03930000
+*   APLBLD is invoked to ensure that an AAP block is built for          03940000
+*   each application that must be run to satisfy the current            03950000
+*   request.  Each scheduled AAP has raised the AAPFLAG1.AAPFSEL        03960000
+*   bit.  All others are dormant for the duration of this VDB           03970000
+*   request.                                                            03980000
+*                                                                       03990000
+**<DOC-OFF>****************************************************         04000000
+                                                                        04010000
+         $CLINK FUNC=APLBLD,                                           X04020000
+               (STRUCT*,$NAVPARM),                                     X04030000
+               (STRUCT**,USRAPPLQ),                                    X04040000
+               (CHAR*,PRJNAME),                                        X04050000
+               (STRUCT*,USRSTG)                                         04060000
+                                                                        04070000
+         LTR   R15,R15            SUCCESSFUL COMPLETION?                04080000
+         BNZ   ERR_CSRV           ENVIRONMENTAL ERROR IF NOT            04090000
+                                                                        04100000
+**<DOC-ON>*****************************************************         04110000
+*                                                                       04120000
+*   Scan the active AAP queue.  For those applications that             04130000
+*   will be selected for execution by this request, convert             04140000
+*   their symbolic current state refs to an NVSTN ptr in                04150000
+*   preparation for plan generation and execution if the                04160000
+*   project has changed since last reference.                           04170000
+*                                                                       04180000
+*   For all applications that will be run under this project            04190000
+*   but were last accessed under the NVSTN of another project,          04200000
+*   determine if the current (resumption) state is defined              04210000
+*   in the current application.  If so, a screen compare is             04220000
+*   done to determine if the state matches current expectation.         04230000
+*   If the current image mismatches or is not defined in the            04240000
+*   current project, appropriate messages are issued.  If               04250000
+*   this is a plan request only, the session is not affected.           04260000
+*   For SQL run requests, however, the session is terminated            04270000
+*   and restarted.                                                      04280000
+*                                                                       04290000
+**<DOC-OFF>****************************************************         04300000
+                                                                        04310000
+         L     R5,USRAPPLQ        APPLICATION QUEUE                     04320000
+         USING AAP,R5             MAP                                   04330000
+         SR    R2,R2              SELECTED APP COUNT                    04340000
+                                                                        04350000
+ENDAPNXT DS    0H                                                       04360000
+         LTR   R5,R5              APPLICATIONS REMAIN?                  04370000
+         BZ    ENDAPFIN           SKIP IF NOT                           04380000
+                                                                        04390000
+         NI    AAPFLAG1,FF-AAPFRUN-AAPFRAN  APPLICATION NOT YET RUN     04400000
+                                                                        04410000
+         TM    AAPFLAG1,AAPFSEL   APPLICATION SELECTED FOR RUN?         04420000
+         BNO   ENDAPADV           APPL DORMANT DURING THIS REQUEST      04430000
+         LA    R2,1(,R2)          UPDATE SELECTED APPLICATION COUNT     04440000
+                                                                        04450000
+*--------------------------------------------------------------         04460000
+*   convert current position name to stn ptr                            04470000
+*--------------------------------------------------------------         04480000
+                                                                        04490000
+         OI    AAPFLAG1,AAPFVPOS  ASSUME CURRENT POSITION IS VALID      04500000
+         TM    AAPCSTNM,BF        CURRENT STATE DEFINED?                04510000
+         BZ    ENDAPADV           SKIP IF NOT                           04520000
+                                                                        04530000
+         CLC   AAPPNSID,PRJINSID  PROJECT CHANGED SINCE LAST REF?       04540000
+         BE    ENDAPADV           CURRENT POSITION ACCEPTED IF NOT      04550000
+         MVC   AAPPNSID,PRJINSID  RETAIN CHANGE IDENTIFIER              04560000
+                                                                        04570000
+         $ENTITY EXTR,            LOCATE ENTITY                        X04580000
+               QNAME=AAPCQNAM,    LOCATE STN IMAGE/SSET                X04590000
+               ENTITY=AAPCSTNM,   STN NAME                             X04600000
+               USERDATA=USERAREA, RETURN AREA                          X04610000
+               ANCHOR=PRJEXENT,   NAVIGATION NETWORK ENTITY            X04620000
+               MF=(E,MFE_LIST)                                          04630000
+                                                                        04640000
+         BNZ   ENOSTATE           CURRENT POSITION NOT RESOLVABLE       04650000
+                                                                        04660000
+         MVC   AAPCURR,USERAREA   USERAREA(1) IS STN PTR                04670000
+                                                                        04680000
+*--------------------------------------------------------------         04690000
+*   determine resumption eligibility under the current project          04700000
+*--------------------------------------------------------------         04710000
+                                                                        04720000
+         CLC   AAPCPRJ,PRJNAME    APPL LAST ACCESSED FROM THIS PROJ?    04730000
+         BE    ENDAPADV           NO FURTHER VALIDATION REQUIRED        04740000
+                                                                        04750000
+         @CALL INAVSTNV,(AAP,IPROJ),  VERIFY CURRENT POSTION WITH ...  X04760000
+               MF=(E,MFE_LIST)        RESPECT TO THE NEW PROJECT STN    04770000
+                                                                        04780000
+         CH    R15,=AL2(RC04)     ANY STATE VALIDATION ISSUES?          04790000
+         BE    ENOMATCH               CURR STATE DOESNT SATISFY RQMTS   04800000
+         BH    ESERVERR               IMAGE PROCESSING ERROR            04810000
+                                                                        04820000
+         MVC   AAPCPRJ,PRJNAME    PROJECT SWITCH ACCEPTED               04830000
+         B     ENDAPADV           DONE HERE                             04840000
+                                                                        04850000
+**<DOC-ON>*****************************************************         04860000
+*                                                                       04870000
+*   Document termination of uncountinuable apps for one of the          04880000
+*   following reasons:                                                  04890000
+*                                                                       04900000
+*   ENOSTATE - state established by project that made last              04910000
+*              access to the AAP is not defined in the current          04920000
+*              project                                                  04930000
+*                                                                       04940000
+*   ENOMATCH - state established by project that made last              04950000
+*              access to the AAP cannot be matched to the               04960000
+*              state having the same name in the current                04970000
+*              project                                                  04980000
+*                                                                       04990000
+*   ENOVTERM - state validation after a project switch has              05000000
+*              failed                                                   05010000
+*                                                                       05020000
+**<DOC-OFF>****************************************************         05030000
+                                                                        05040000
+ENOSTATE DS    0H                 APP STATE NOT DEFINED IN PROJ         05050000
+         LA    R2,055             SELECT APPROPRIATE MSG                05060000
+         B     ENOVTERM           INDICATE TERMINATION                  05070000
+                                                                        05080000
+ENOMATCH DS    0H                 APP STATE DOES NOT CONFORM TO RQMTS   05090000
+         LA    R2,056             SELECT APPROPRIATE MSG                05100000
+         B     ENOVTERM           INDICATE TERMINATION                  05110000
+                                                                        05120000
+ESERVERR DS    0H                 SERVICE RTN FAILURE DURING STATE VERF 05130000
+         ST    R0,FWORD           SERVICE ROUTINE COMPLETION CODE       05140000
+         MVC   DWORD,0(R1)        SERVICE ROUTINE NAME                  05150000
+         LA    R2,057             SELECT APPROPRIATE MSG                05160000
+                                                                        05170000
+ENOVTERM DS    0H                 DOCUMENT AAP TERM                     05180000
+         NI    AAPFLAG1,FF-AAPFVPOS   CURRENT POSITION NOT ACCEPTABLE   05190000
+                                                                        05200000
+         $MSG  (R2),FIELDS=(AAPCSTNM,AAPCPRJ,PRJNAME,FWORD,DWORD)       05210000
+                                                                        05220000
+         $MSG  065,FIELDS=(AAPANAME)                                    05230000
+                                                                        05240000
+*--------------------------------------------------------------         05250000
+*   terminate uncontinuable apps only if sql run request                05260000
+*--------------------------------------------------------------         05270000
+                                                                        05280000
+         TM    IXRFLAG2,IXF2_NXE  EXECUTION SUPPRESSED?                 05290000
+         BO    ENDAPADV           ALSO SUPPRESS TERMINATION IF SO       05300000
+                                                                        05310000
+         LA    R1,AAP             ADDRESS OF AAP BLOCK                  05320000
+         BAS   R14,KILLAPP        TERMINATE THE APPL                    05330000
+         BNZ   ERR_COMM           PLANNER-EXECUTOR COMMUNICATION ERROR  05340000
+         OI    CFLAG1,CF1KILL     INDICATE APPLS KILLED                 05350000
+                                                                        05360000
+***************************************************************         05370000
+*                                                                       05380000
+*   Examine all appls, restart evaulation if appls killed               05390000
+*                                                                       05400000
+***************************************************************         05410000
+                                                                        05420000
+ENDAPADV DS    0H                                                       05430000
+         L     R5,AAPNEXT         ADVANCE TO NEXT AAP                   05440000
+         B     ENDAPNXT           EXAMINE ALL APPLS                     05450000
+                                                                        05460000
+ENDAPFIN DS    0H                                                       05470000
+         TM    CFLAG1,CF1KILL     APPLS TO KILL?                        05480000
+         BO    RESTART            TRY AGAIN                             05490000
+         ST    R2,SELCOUNT        SAVE NUMBER OF SELECTED APPS          05500000
+         DROP  R5                 AAP                                   05510000
+                                                                        05520000
+         EJECT                                                          05530000
+**<DOC-ON>*****************************************************         05540000
+*                                                                       05550000
+*   Determine appl execution sequence for multi-appl requests.          05560000
+*   When the target VDB definition spans multiple applications,         05570000
+*   the AAP chain is ordered so that variable linkages between          05580000
+*   these applications are available in an appropriate order.           05590000
+*   This ordering is accomplished before the subplans for the           05600000
+*   component applications are derived.  This is done by                05610000
+*   generating and augmenting a terminal state list managed             05620000
+*   outside of the normal plan caching facility (unfortunately).        05630000
+*                                                                       05640000
+**<DOC-OFF>****************************************************         05650000
+                                                                        05660000
+         CLC   SELCOUNT,=F'1'     MULTI-APPLICATION REQUEST?            05670000
+         BNH   PAPPFIN            SKIP IF NOT                           05680000
+                                                                        05690000
+         TM    PREPFLAG,PREPSTMT  SQL STATEMENT WAS PREPARED?           05700000
+         BNO   PAPPGEN            FULL PLAN DERIVATION OTHERWISE        05710000
+                                                                        05720000
+         PREPAPPS IMPORT,*SELCOUNT,PSB=*IXRPSBA                         05730000
+         BZ    PAPPFIN                                                  05740000
+                                                                        05750000
+         OI    PREPFLAG,PREPAPPS  PREPAPPS EXPORT PENDING               05760000
+                                                                        05770000
+*--------------------------------------------------------------         05780000
+*   generate terminal state list in preparation for PLNAPP()            05790000
+*--------------------------------------------------------------         05800000
+                                                                        05810000
+PAPPGEN  DS    0H                                                       05820000
+         L     R5,USRAPPLQ        APPLICATION QUEUE                     05830000
+         USING AAP,R5             MAP                                   05840000
+                                                                        05850000
+PAPPNXT  DS    0H                                                       05860000
+         LTR   R5,R5              APPLICATIONS REMAIN?                  05870000
+         BZ    PAPPCALL           SKIP IF NOT                           05880000
+         TM    AAPFLAG1,AAPFSEL   APPL SCHEDULED TO RUN?                05890000
+         BNO   PAPPADV            SKIP IF NOT                           05900000
+                                                                        05910000
+         $CLINK FUNC=PLNTSL,      EARLY GENERATION OF TERMINAL STATES  X05920000
+               (STRUCT*,$NAVPARM),                                     X05930000
+               (STRUCT*,AAP),                                          X05940000
+               (STRUCT*,TSL)                                            05950000
+                                                                        05960000
+         LTR   R2,R15             SUCCESSFUL COMPLETION?                05970000
+         BNP   ERR_CSRV           FURTHER ANALYSIS REQUIRED IF SO       05980000
+                                                                        05990000
+         STGGET TSLMAX,QH=USRSTG  ACQUIRE STORAGE                       06000000
+         BNZ   ERR_STG                                                  06010000
+                                                                        06020000
+         ST    R2,AAPTSTNS        NUMBER OF TSL ENTRIES                 06030000
+         ST    R1,AAPTSTNL        ANCHOR THE TSL                        06040000
+                                                                        06050000
+         LR    R0,R1              TARGET TSL MAY BE EXPANDED            06060000
+         SLL   R2,4               CONVERT TSL ENTRY COUNT TO LENGTH     06070000
+         LR    R1,R2              LENGTH OF TARGET                      06080000
+         LR    R15,R1             SAME AS LENGTH OF SOURCE              06090000
+         LA    R14,TSL            COPY FROM LOCAL WORKAREA              06100000
+         MVCL  R0,R14                                                   06110000
+                                                                        06120000
+PAPPADV  DS    0H                                                       06130000
+         L     R5,AAPNEXT         ADVANCE TO NEXT APP                   06140000
+         B     PAPPNXT            AGAIN                                 06150000
+         DROP  R5                 AAP                                   06160000
+                                                                        06170000
+*--------------------------------------------------------------         06180000
+*   generate multi-app ordering                                         06190000
+*--------------------------------------------------------------         06200000
+                                                                        06210000
+PAPPCALL DS    0H                                                       06220000
+         LA    R2,USRAPPLQ        APPLICATION ACTION LIST               06230000
+         L     R3,PRJEXALV        ORIGIN OF LINKAGE VAR QUEUE           06240000
+                                                                        06250000
+         $CLINK FUNC=PLNAPP,                                           X06260000
+               (STRUCT*,(R2)),(STRUCT*,(R3)),(STRUCT,$NAVPARM)          06270000
+                                                                        06280000
+         LTR   R15,R15            SUCCESSFUL COMPLETION?                06290000
+         BNZ   ERR_CSRV           MULTI-APPLICATION PREPLAN ERROR       06300000
+                                                                        06310000
+         TM    PREPFLAG,PREPAPPS  SQL STATEMENT PREPARING?              06320000
+         BNO   PAPPFIN            SKIP IF NOT                           06330000
+                                                                        06340000
+         PREPAPPS EXPORT,*SELCOUNT,PSB=*IXRPSBA                         06350000
+                                                                        06360000
+PAPPFIN  DS    0H                                                       06370000
+                                                                        06380000
+         EJECT                                                          06390000
+**<DOC-ON>*****************************************************         06400000
+*                                                                       06410000
+*   The AAP chain is now run to acquire run and repositioning           06420000
+*   plans for each application referenced by the VDB definition,        06430000
+*   as indicated by AAPFLAG1.AAPFSEL.  A 'plan' is the generic          06440000
+*   term used to refer to the collection of the run and                 06450000
+*   repositioning subplans acquired for each application.               06460000
+*                                                                       06470000
+*   All plans are generated in advance of scheduling any                06480000
+*   application.  If plan generation fails for any component            06490000
+*   application, no execution is attempted.                             06500000
+*                                                                       06510000
+*   Subplans are acquired either from an import operation               06520000
+*   directed against an associated prepared statement block,            06530000
+*   or are generated by INAVPLAN.  The constraints regarding            06540000
+*   the use of prepared subplans differ between subplan types           06550000
+*   as is discussed later.                                              06560000
+*                                                                       06570000
+**<DOC-OFF>****************************************************         06580000
+                                                                        06590000
+         L     R5,USRAPPLQ        APPLICATION QUEUE                     06600000
+         USING AAP,R5             MAP                                   06610000
+                                                                        06620000
+SELAPNXT DS    0H                                                       06630000
+         LTR   R5,R5              APPLICATIONS REMAIN?                  06640000
+         BZ    SELAPFIN           SKIP IF NOT                           06650000
+         TM    AAPFLAG1,AAPFSEL   APPL SCHEDULED TO RUN?                06660000
+         BNO   SELAPADV           SKIP IF NOT                           06670000
+         ST    R5,@CURRAAP        RETAIN CURRENT AAP ADDRESS            06680000
+                                                                        06690000
+         EJECT                                                          06700000
+**<DOC-ON>*****************************************************         06710000
+*                                                                       06720000
+*   Acquire a RUN (data) plan for the current application               06730000
+*                                                                       06740000
+*   A prepared subplan is always used if available.  First, an          06750000
+*   import is attempted.  If it fails for any reason, INAVPLAN          06760000
+*   is called to generate a new subplan.  The requester is not          06770000
+*   notified in either case.                                            06780000
+*                                                                       06790000
+**<DOC-OFF>****************************************************         06800000
+                                                                        06810000
+         LA    R4,AAPPDATA        DATA ACQUISITION PLAN                 06820000
+         USING PLAN,R4            MAPPED                                06830000
+         MVC   PLANTYPE,$RUNPLAN  IDENTIFY CANDIDATE PLAN TYPE          06840000
+                                                                        06850000
+*--------------------------------------------------------------         06860000
+*   import the RUN plan if previously prepared and saved                06870000
+*--------------------------------------------------------------         06880000
+                                                                        06890000
+         TM    PREPFLAG,PREPSTMT  SQL STATEMENT WAS PREPARED?           06900000
+         BNO   RUNOGEN            FULL PLAN GENERATION OTHERWISE        06910000
+                                                                        06920000
+         PREPPLAN IMPORT,RUN,PSB=*IXRPSBA                               06930000
+         BNZ   RUNOGEN                                                  06940000
+                                                                        06950000
+         OI    PREPFLAG,PREPRUN   RUN PLAN ACCEPTED FROM PREPARED COPY  06960000
+         B     RUNCPT             CONTINUE                              06970000
+                                                                        06980000
+*--------------------------------------------------------------         06990000
+*   RUN plan generation required, generate terminal state list          07000000
+*--------------------------------------------------------------         07010000
+                                                                        07020000
+RUNOGEN  DS    0H                                                       07030000
+         @CALL IPLNGET,(GPLN_RUN,       GENERATE A RUN PLAN            X07040000
+               $NAVPARM,                NAVIGATION PARM SUMMARY        X07050000
+               AAP,                     APPLICATION ACTION BLOCK       X07060000
+               TSTATES,                 TSL ENTRY COUNT RETURNED       X07070000
+               TSTATEL,                 TSL ORIGIN RETURNED            X07080000
+               QUERYTYP,VDBTABLE,0,0,   IDENTIFY TABLE AND DML TYPE    X07090000
+               *PLANOPTS,               COST CONSTRAINTS               X07100000
+               PLAN,                    PLAN RETURN AREA               X07110000
+               PI.PLANINFO,             INFO / ERROR RETURN AREA       X07120000
+               0,                       CURRENT STATE NOT RELAVENT     X07130000
+               USRSTG),                 SUBPOOL USED FOR PLAN STAGING  X07140000
+               MF=(E,MFE_LIST),                                        X07150000
+               CTYPE=CVT                                                07160000
+                                                                        07170000
+         LTR   R15,R15            PLAN ACQUIRED?                        07180000
+         BZ    RUNGEND            SUCCESS IF SO                         07190000
+         CH    R15,=AL2(RC08)     PLNBLD() FAILURE?                     07200000
+         BNE   ERR_GPLN           OTHER PLAN MANAGEMENT FAILURE IF NOT  07210000
+                                                                        07220000
+         LR    R15,R0             EXPOSE PLNBLD() RETURN CODE           07230000
+         LA    R1,PLAN            PLAN AS ERROR HANDLER PARM            07240000
+         LA    R0,TRUE            REQ FULL COMPLEMENT OF DIAGNOSTICS    07250000
+         B     PLNERROR           ANALYZE PLAN DIAGNOSTICS              07260000
+                                                                        07270000
+RUNGEND  DS    0H                                                       07280000
+         MVC   AAPCOSTD,PI.PIRTCOST    RETAIN COST OF PLAN GENERATION   07290000
+                                                                        07300000
+*--------------------------------------------------------------         07310000
+*   run plan generation / refresh completed without error               07320000
+*--------------------------------------------------------------         07330000
+                                                                        07340000
+RUNCPT   DS    0H                                                       07350000
+         TM    IXRFLAG2,IXF2_PLN  PLAN RETURN REQUESTED?                07360000
+         BNO   SELNFMT1           DONE IF NOT                           07370000
+                                                                        07380000
+         LA    R1,PLAN            PLAN FORMATTER                        07390000
+         LA    R0,PLANTYPE        PLAN TYPE                             07400000
+         BAS   R14,FMTPLAN        FORMAT THE PLAN FOR DISPLAY           07410000
+                                                                        07420000
+SELNFMT1 DS    0H                                                       07430000
+         DROP  R4                 RUN PLAN                              07440000
+                                                                        07450000
+         EJECT                                                          07460000
+**<DOC-ON>*****************************************************         07470000
+*                                                                       07480000
+*   Acquire a REPOSITIONing plan for the current application            07490000
+*                                                                       07500000
+*   The goal of the REPOSITIONing plan is to move from the              07510000
+*   current application state to the initial state of the               07520000
+*   RUN plan previously acquired.  It is possible that no               07530000
+*   plan is required, i.e. that the application is properly             07540000
+*   positioned as a consequence of the last operation.                  07550000
+*                                                                       07560000
+*   When a prepared statement block (PSB) is available, it              07570000
+*   is also possible that the last REPOSITIONing plan                   07580000
+*   generated can be used again.  Because RUN subplans are              07590000
+*   invariant, we can ascertain reusability by simply testing           07600000
+*   if the current state of the application matches the                 07610000
+*   current state captured in the saved plan.  If not, the              07620000
+*   saved plan is immediately deleted, opening the slot                 07630000
+*   for a new REPOSITIONing plan.                                       07640000
+*                                                                       07650000
+*   -----------------------------------------------------------         07660000
+*                                                                       07670000
+*   If the current position has been flagged invalid, the               07680000
+*   REPOSITIONing plan will be generated with a starting point          07690000
+*   of *VTAM*, allowing the requester to see the resultant plan         07700000
+*   but not forcing the session down until an actual run                07710000
+*   request is received.  If this is a run request, AAPFVPOS            07720000
+*   will always be set because the 'lost' session would have            07730000
+*   been restarted in that case by this point.                          07740000
+*                                                                       07750000
+**<DOC-OFF>****************************************************         07760000
+                                                                        07770000
+         LA    R4,AAPPDATA        DATA ACQUISITION (RUN) PLAN           07780000
+         USING PLAN,R4            ADDRESS REFRESHED                     07790000
+         TM    AAPFLAG1,AAPFVPOS  CURRENT POSITION ACCEPTED AND VALID?  07800000
+         BNO   REPOPREP           CANNOT CONTINUE FROM CURRENT STATE    07810000
+                                                                        07820000
+         L     R15,PLORGSTN       FIRST STATE VISITED BY RUN PLAN       07830000
+         LA    R15,0(,R15)        CLEAR FLAG BIT                        07840000
+         C     R15,AAPCURR        POSITIONED FOR IMMEDIATE EXEC?        07850000
+         BE    SELAPADV           NO NEED FOR REPOSITION PLAN IF SO     07860000
+                                                                        07870000
+*--------------------------------------------------------------  168636 07880000
+*   suppress reposition plan if SQLPrepare(), else defer         168636 07890000
+*--------------------------------------------------------------  168636 07900000
+                                                                        07910000
+REPOPREP DS    0H                                                168636 07920000
+         TM    IXRFLAG2,IXF2_PDE+IXF2_PLN                        168636 07930000
+         BNZ   REPOREQ            PLAN RETURN EXPLICITLY REQ'D   168636 07940000
+         TM    IXRFLAG2,IXF2_NXE  EXEC SUPPRESSED IFF PREPARE    168636 07950000
+         BO    SELAPADV           DEFER THE REPOS PLAN IF SO     168636 07960000
+                                                                        07970000
+*--------------------------------------------------------------         07980000
+*   import the repos plan if previously prepared and saved              07990000
+*--------------------------------------------------------------         08000000
+                                                                        08010000
+REPOREQ  DS    0H                                                168636 08020000
+         TM    PREPFLAG,PREPSTMT  SQL STATEMENT WAS PREPARED?           08030000
+         BNO   REPOGEN            FULL PLAN GENERATION OTHERWISE        08040000
+         TM    AAPFLAG1,AAPFVPOS  CURRENT POSITION ACCEPTED AND VALID?  08050000
+         BNO   REPODISC           DISCARD CURRENT PREPARED PLAN IF NOT  08060000
+                                                                        08070000
+         PREPPLAN IMPORT,REPOS,PSB=*IXRPSBA                             08080000
+         BNZ   REPOGEN                                                  08090000
+                                                                        08100000
+         EJECT                                                          08110000
+**<DOC-ON>*****************************************************         08120000
+*                                                                       08130000
+*   A prepared plan is accepted if the resumption states agree.         08140000
+*   If no current state has been defined, logon is required and         08150000
+*   a new positioning subplan must be generated.                        08160000
+*                                                                       08170000
+**<DOC-OFF>****************************************************         08180000
+                                                                        08190000
+REPSAME  DS    0H                                                       08200000
+         CLC   AAPCURR,AAPPPOS+(PLORGSTN-PLAN)                          08210000
+         BE    REPOCONT           PREPARED PLAN APPROPRIATE FOR USE     08220000
+                                                                        08230000
+         PREPPLAN EXPORT,REPOS,PSB=*IXRPSBA                             08240000
+                                                                        08250000
+REPODISC DS    0H                                                       08260000
+         PREPPLAN DELETE,REPOS,PSB=*IXRPSBA                             08270000
+                                                                        08280000
+         EJECT                                                          08290000
+**<DOC-ON>*****************************************************         08300000
+*                                                                       08310000
+*   Construct a terminal state list as (current-pos,                    08320000
+*   run-initial pos) and attempt to generate a plan that                08330000
+*   connects the former to the latter.  If this is not possible         08340000
+*   without a session restart, this logic can be redriven after         08350000
+*   setting AAPFVPOS to generate a provisional plan starting            08360000
+*   from *VTAM*.                                                        08370000
+*                                                                       08380000
+**<DOC-OFF>****************************************************         08390000
+                                                                        08400000
+REPOGEN  DS    0H                                                       08410000
+         LA    R4,AAPPDATA        DATA ACQUISITION (RUN) PLAN           08420000
+         USING PLAN,R4            ADDRESS REFRESHED                     08430000
+         MVC   TRMSTATE,PLORGSTN        TERMINUS IS START OF REPO PLAN  08440000
+         OC    TRMSTATE,=X'80000000'    INDICATE END OF STN TRAVERSAL   08450000
+         DROP  R4                 RUN PLAN                              08460000
+                                                                        08470000
+         L     R0,AAPCURR         ASSUME START FROM CURRENT POS         08480000
+         TM    AAPFLAG1,AAPFVPOS  POSITION ACCEPTED AND VALID?          08490000
+         BO    *+6                ONWARD IF SO                          08500000
+         SR    R0,R0              ELSE START OVER                       08510000
+         ST    R0,ORGSTATE        POST INITIAL POSITION                 08520000
+                                                                        08530000
+         LTR   R0,R0              CURRENT POSITION ESTABLISHED?         08540000
+         BNZ   REPOPLAN           ONWARD IF SO                          08550000
+         ICM   R0,15,PRJEXSTN     SESSION STARTUP CAPABILITY IN PROJ?   08560000
+         BZ    ERR_NSES           NO SESSION STARTUP CAPABILITY         08570000
+         ST    R0,ORGSTATE        POSITION FROM SESSION START           08580000
+                                                                        08590000
+*--------------------------------------------------------------         08600000
+*   generate repositioning plan                                         08610000
+*--------------------------------------------------------------         08620000
+                                                                        08630000
+REPOPLAN DS    0H                                                       08640000
+         LA    R4,AAPPPOS         REPOSITIONING PLAN                    08650000
+         USING PLAN,R4            MAPPED                                08660000
+         MVC   PLANTYPE,$REPOS    IDENTIFY CANDIDATE PLAN TYPE          08670000
+                                                                        08680000
+         @CALL IPLNGET,(GPLN_REP,       REQUEST REPOSITION PLAN        X08690000
+               0,                       NAVIGATION PARM SUMMARY        X08700000
+               AAP,                     APPLICATION ACTION BLOCK       X08710000
+               TSTATES,                 TSL ENTRY COUNT RETURNED       X08720000
+               TSTATEL,                 TSL ORIGIN RETURNED            X08730000
+               0,0,*ORGSTATE,*TRMSTATE, ORIGIN AND TERMINATE STATES    X08740000
+               *PLANOPTS,               COST CONSTRAINTS               X08750000
+               PLAN,                    PLAN RETURN AREA               X08760000
+               PI.PLANINFO,             INFO / ERROR RETURN AREA       X08770000
+               *ORGSTATE,               CURRENT STATE                  X08780000
+               USRSTG),                 SUBPOOL USED FOR PLAN STAGING  X08790000
+               MF=(E,MFE_LIST),                                        X08800000
+               CTYPE=CVT                TSL IS RETURNED                 08810000
+                                                                        08820000
+         MVC   AAPCOSTP,PI.PIRTCOST    RETAIN COST OF PLAN GENERATION   08830000
+                                                                        08840000
+         LTR   R15,R15            PLAN ACQUIRED?                        08850000
+         BZ    REPOCONT           SUCCESS                               08860000
+                                                                        08870000
+         CH    R15,=AL2(RC08)     PLNBLD() FAILURE?                     08880000
+         BNE   ERR_GPLN           OTHER PLAN MANAGEMENT FAILURE IF NOT  08890000
+                                                                        08900000
+         LR    R15,R0             EXPOSE PLNBLD() RETURN CODE           08910000
+         LA    R1,PLAN            R1 <== PLAN AS ERROR HANDLER PARM     08920000
+         LA    R0,FALSE           R0 <== DIAGNOSTICS NOT REQUIRED       08930000
+                                                                        08940000
+         C     R15,=A(CRC06N)     REPOSITION REQUIRES LOGOFF/LOGON?     08950000
+         BE    REPOFAIL           RECOVERY POSSIBLE                     08960000
+         C     R15,=A(CRC04N)     NO SUPERARCS GENNED (SAME INTERP)     08970000
+         BNE   PLNERROR           CANT RECOVER FROM OTHER ERRORS        08980000
+                                                                        08990000
+**<DOC-ON>*****************************************************         09000000
+*                                                                       09010000
+*   No REPOSITION plan can be constructed starting from the             09020000
+*   current state and ending at the first state identified in           09030000
+*   the RUN plan.  The remedy invoked on a SQL run request is           09040000
+*   to restart the application allowing for subsequent retry            09050000
+*   starting from the *VTAM* state.  If this is not a run               09060000
+*   request (plan-only or prepare), we inform the requester             09070000
+*   of the issue but do not terminate the session.                      09080000
+*                                                                       09090000
+*   Prior to terminating a session, we first export all of the          09100000
+*   subplans that have been either imported or generated to             09110000
+*   this point, ensuring that they are available for the retry.         09120000
+*                                                                       09130000
+**<DOC-OFF>****************************************************         09140000
+                                                                        09150000
+REPOFAIL DS    0H                                                       09160000
+         LA    R0,TRUE            R0 <== FULLY DIAG PLAN GEN FAILURE    09170000
+         LA    R1,PLAN            R1 <== PLAN AS ERROR HANDLER PARM     09180000
+         CLC   ORGSTATE,PRJEXSTN  REPOSITION ATTEMPTED FROM VTAM?       09190000
+         BE    PLNERROR           SESSION RESTART INAFFECTIVE IF SO     09200000
+                                                                        09210000
+         LA    R1,PLAN            R1 <== PLAN AS PARM                   09220000
+         L     R0,ORGSTATE        R0 <== INIT CANDIDATE STATE AS PARM   09230000
+         TM    IXRFLAG2,IXF2_NXE  EXECUTION SUPPRESSED?                 09240000
+         BNZ   REPONOFF           RETURN DOC ONLY                       09250000
+                                                                        09260000
+         LA    R1,AAP             R1 <== LIMIT AAP (SCANNED SO FAR)     09270000
+         BAS   R14,PEXPORT        EXPORT PLANS BACK TO THE PSB          09280000
+                                                                        09290000
+         LA    R1,AAP             ADDRESS OF AAP BLOCK                  09300000
+         BAS   R14,KILLAPP        TERMINATE THE APPLICATION             09310000
+         BNZ   ERR_COMM           INTRATASK COMMUNICATION ERROR         09320000
+         B     RESTART            AGAIN, FROM THE TOP                   09330000
+                                                                        09340000
+*--------------------------------------------------------------         09350000
+*   format the repositioning plan if requested                          09360000
+*--------------------------------------------------------------         09370000
+                                                                        09380000
+REPOCONT DS    0H                                                       09390000
+         TM    IXRFLAG2,IXF2_PLN  PLAN RETURN REQUESTED?                09400000
+         BNO   REPOFMT1           DONE IF NOT                           09410000
+                                                                        09420000
+         LA    R1,PLAN            PLAN FORMATTER                        09430000
+         LA    R0,PLANTYPE        PLAN TYPE                             09440000
+         BAS   R14,FMTPLAN        FORMAT THE PLAN FOR DISPLAY           09450000
+                                                                        09460000
+REPOFMT1 DS    0H                                                       09470000
+         CLC   PRJEXSTN,AAPPPOS+(PLORGSTN-PLAN)                         09480000
+         BNE   SELAPADV           PLAN STARTS AT PRE-ESTABLISHED POS    09490000
+         TM    IXRFLAG2,IXF2_NXE  EXECUTION SUPPRESSED?                 09500000
+         BO    SELAPADV           ADVANCE WITHOUT SESSION ACTION IF SO  09510000
+         TM    AAPFLAG1,AAPFUP    SESSION RUNNING?                      09520000
+         BO    SELAPADV           READY FOR REQUEST IF SO               09530000
+                                                                        09540000
+         OI    AAPFLAG1,AAPFSTRT  SESSION START IS REQUIRED             09550000
+                                                                        09560000
+         B     SELAPADV           ADVANCE TO NEXT COMPONENT APPLICATION 09570000
+         DROP  R4                 PLAN                                  09580000
+                                                                        09590000
+         EJECT                                                          09600000
+**<DOC-ON>*****************************************************         09610000
+*                                                                       09620000
+*   REPOSITIONing plan cannot be constructed for prepare                09630000
+*                                                                       09640000
+*   A REPOSITIONing plan could not be constructed to move from          09650000
+*   the current state to the initial state of the RUN plan.             09660000
+*   This is a frequent occurrence when circuits in the host             09670000
+*   appl have not been correctly or completely defined.  The            09680000
+*   only recourse during actual statement execution will be to          09690000
+*   force the session to end and then restart it - usually a            09700000
+*   very costly operation worthy of reflection to coop.                 09710000
+*   However, it is not necessarily inappropriate or an                  09720000
+*   indication of error.                                                09730000
+*                                                                       09740000
+*      R1  - plan addr                                                  09750000
+*      R0  - initial state (NVSTN)                                      09760000
+*                                                                       09770000
+*   The current position in the AAP is invalidated and the              09780000
+*   plan generation is redriven to produce a plan starting              09790000
+*   at *VTAM*.                                                          09800000
+*                                                                       09810000
+**<DOC-OFF>****************************************************         09820000
+                                                                        09830000
+REPONOFF DS    0H                                                       09840000
+         LR    R4,R1              PLAN IN ERROR                         09850000
+         USING PLAN,R4                                                  09860000
+         LR    R2,R0              INITIAL STATE                         09870000
+         USING NVSTN,R2                                                 09880000
+                                                                        09890000
+         BAS   R14,DOCAAP         DOCUMENT CURRENT AAP                  09900000
+                                                                        09910000
+         LA    R3,NVSTSSN         SELECT SCREEN SET NAME                09920000
+         TM    NVSTSSN,BF         SSN ASSIGNED?                         09930000
+         BNZ   *+8                ONWARD IF SO                          09940000
+         LA    R3,NVSTNAME        ELSE USE SCREEN NAME                  09950000
+                                                                        09960000
+         $MSG  076,FIELDS=(PLANTYPE,((R3),L'NVSTSSN))                   09970000
+                                                                        09980000
+         $MSG  065,FIELDS=(AAPANAME)  APPLICATION WILL BE RESTARTED     09990000
+                                                                        10000000
+         NI    AAPFLAG1,FF-AAPFVPOS   inDICATE INVALID CURRENT POSITION 10010000
+         B     REPOGEN            TRY AGAIN                             10020000
+         DROP  R2,R4              NVSTN, PLAN                           10030000
+                                                                        10040000
+         EJECT                                                          10050000
+**<DOC-ON>*****************************************************         10060000
+*                                                                       10070000
+*   Plan generation failure                                             10080000
+*                                                                       10090000
+*   Plan generation failed for the indicated subplan of the             10100000
+*   current component application.  Diagnostic messages                 10110000
+*   describing the reason for failure are generated.                    10120000
+*   Additionally, if detailed diagnostics are requested,                10130000
+*   the SUPERARC table is dumped in message format as well.             10140000
+*                                                                       10150000
+*      R1  - PLAN addr                                                  10160000
+*      R0  - TRUE if diagnostics requested                              10170000
+*      R15 - PLAN generator return code                                 10180000
+*                                                                       10190000
+*   Additionally, the PLANINFO area is addressable                      10200000
+*                                                                       10210000
+**<DOC-OFF>****************************************************         10220000
+                                                                        10230000
+PLNERROR DS    0H                                                       10240000
+         LR    R4,R1              PLAN IN ERROR                         10250000
+         USING PLAN,R4            MAPPED                                10260000
+         LPR   R2,R15             NORMALIZE C SERVICE RTN RETCODE       10270000
+         ST    R2,RSNC            SAVE PLANBLD COMPLETION CODE          10280000
+         ST    R0,FWORD           SAVE 'FULL DIAGS' FLAG                10290000
+         OI    PREPFLAG,PREPFAIL  PLAN GENERATION FAILURE               10300000
+                                                                        10310000
+         BAS   R14,DOCAAP         DOCUMENT CURRENT AAP                  10320000
+                                                                        10330000
+*--------------------------------------------------------------         10340000
+*   build standard message components                                   10350000
+*--------------------------------------------------------------         10360000
+                                                                        10370000
+         MVI   STATENAM,C' '                                            10380000
+         MVC   STATENAM+1(L'STATENAM-1),STATENAM                        10390000
+         MVC   STATENAM(L'$UNKNOWN),$UNKNOWN                            10400000
+         MVC   STATERR1(L'STATENAM),STATENAM                            10410000
+         MVC   STATERR2(L'STATENAM),STATENAM                            10420000
+                                                                        10430000
+         LA    R1,STATENAM        ACQUIRE STATE NAME                    10440000
+         ICM   R15,15,ORGSTATE    INITIAL STATE IDENTIFIED?             10450000
+         BZ    *+8                SKIP IF NOT                           10460000
+         BAS   R14,$STNAME        R1 - RETURN, R15 - STN                10470000
+                                                                        10480000
+         LA    R1,STATERR1        ERROR STATE #1 NAME                   10490000
+         ICM   R15,15,PI.PISTN1   STATE IDENTIFIED?                     10500000
+         BZ    *+8                SKIP IF NOT                           10510000
+         BAS   R14,$STNAME        R1 - RETURN, R15 - STN                10520000
+                                                                        10530000
+         LA    R1,STATERR2        ERROR STATE #2 NAME                   10540000
+         ICM   R15,15,PI.PISTN2   STATE IDENTIFIED?                     10550000
+         BZ    *+8                SKIP IF NOT                           10560000
+         BAS   R14,$STNAME        R1 - RETURN, R15 - STN                10570000
+                                                                        10580000
+*--------------------------------------------------------------         10590000
+*   build standard message components                                   10600000
+*--------------------------------------------------------------         10610000
+                                                                        10620000
+         L     R2,RSNC            ACQUIRE PLANBLD COMPLETION CODE       10630000
+         SLL   R2,2               CONVERT TO ERROR DESC INDEX           10640000
+         L     R3,EPLANMSG(R2)    SELECT APPROPRIATE MESSAGE            10650000
+                                                                        10660000
+         CH    R2,=AL2(CRC09*4)   DATA NORMALIZATION ERROR?             10670000
+         BL    PLNEMSG            SKIP IF NOT                           10680000
+                                                                        10690000
+         $MSG  (R3),FIELDS=(STATERR1,STATERR2)                          10700000
+                                                                        10710000
+         B     PLNDSARC           ONWARD                                10720000
+                                                                        10730000
+*--------------------------------------------------------------         10740000
+*   "standard" plan failure messages                                    10750000
+*--------------------------------------------------------------         10760000
+                                                                        10770000
+PLNEMSG  DS    0H                                                       10780000
+         $MSG  (R3),FIELDS=(PLANTYPE,STATENAM)                          10790000
+                                                                        10800000
+*--------------------------------------------------------------         10810000
+*   some errors are reported together with the invalid plan             10820000
+*--------------------------------------------------------------         10830000
+                                                                        10840000
+PLNDSARC DS    0H                                                       10850000
+         TM    IXRFLAG2,IXF2_PLN  PLAN RETURN REQUESTED?                10860000
+         BNO   PLNNORM            SKIP IF NOT                           10870000
+         ICM   R0,15,PLSTART      PLAN FRAGMENT GENERATED?              10880000
+         BZ    PLNNORM            SUPPRESS MSG CLUTTER IF NOT           10890000
+                                                                        10900000
+         LA    R1,PLAN            PLAN FORMATTER                        10910000
+         LA    R0,PLANTYPE        PLAN TYPE                             10920000
+         BAS   R14,FMTPLAN        FORMAT THE PLAN FOR DISPLAY           10930000
+                                                                        10940000
+*--------------------------------------------------------------         10950000
+*   generate superarc and other diagnostics if requested                10960000
+*--------------------------------------------------------------         10970000
+                                                                        10980000
+PLNNORM  DS    0H                                                       10990000
+         ICM   R0,15,FWORD        FULL DIAGNOSTICS?                     11000000
+         BZ    EPLANRET           SKIP IF NOT                           11010000
+                                                                        11020000
+         LA    R3,130             ASSUME DIAGNOSTICS AVAILABLE          11030000
+         ICM   R2,15,PLNSARC      SUPRARCS GENERATED?                   11040000
+         BNZ   *+8                DOC AVAILABLE                         11050000
+         LA    R3,131             ELSE NO DIAGNOSTICS AVAILABLE         11060000
+                                                                        11070000
+         $MSG  (R3)               APPEND DIAGNOSTIC MSG                 11080000
+                                                                        11090000
+         LTR   R2,R2              SUPRARCS TO FORMAT?                   11100000
+         BZ    EPLANRET           DONE IF NOT                           11110000
+         LA    R0,100             LIMIT STORAGE COMMITMENT              11120000
+         CR    R2,R0                                                    11130000
+         BNH   *+6                                                      11140000
+         LR    R2,R0                                                    11150000
+                                                                        11160000
+         ICM   R3,15,PLSARCL      SUPRARC TABLE ORIGIN                  11170000
+         BZ    EPLANRET           NOT AVAILABLE                         11180000
+                                                                        11190000
+*--------------------------------------------------------------         11200000
+*   superarc dump                                                       11210000
+*--------------------------------------------------------------         11220000
+                                                                        11230000
+         USING SUPRARC,R3         SUPRARC FORMAT                        11240000
+                                                                        11250000
+EPLANARC DS    0H                                                       11260000
+         $CLINK FUNC=NAVCAPS,        FMT SUPRARC S0,S1 CAPABILITIES    X11270000
+               (STRUCT*,(R3)),       SUPRARC ORIGIN                    X11280000
+               (CHAR*,MSGRET+0),     S0 ELEMENT LIST RETURN AREA       X11290000
+               (CHAR*,MSGRET+128)    S1 ELEMENT LIST RETURN AREA        11300000
+                                                                        11310000
+         L     R1,SUPS0STN        S0 STN                                11320000
+         LA    R1,NVSTNAME-NVSTN(,R1)                                   11330000
+         ST    R1,S0NAMEP         SAVE PTR                              11340000
+                                                                        11350000
+         L     R1,SUPS1STN        S1 STN                                11360000
+         LA    R1,NVSTNAME-NVSTN(,R1)                                   11370000
+         ST    R1,S1NAMEP         SAVE PTR                              11380000
+                                                                        11390000
+         $MSG  135,FIELDS=((*S0NAMEP,L'NVSTNAME),MSGRET+0,SUPS0PRI,    X11400000
+               (*S1NAMEP,L'NVSTNAME),MSGRET+128,SUPS1PRI,              X11410000
+               SUPCGRP)                                                 11420000
+                                                                        11430000
+         LA    R3,SUPARCLN(,R3)   ADVANCE TO NEXT SUPRARC               11440000
+         BCT   R2,EPLANARC        DUMP ALL SUPRARCS                     11450000
+         B     EPLANRET           DONE                                  11460000
+         DROP  R3                 SUPRARC                               11470000
+                                                                        11480000
+*--------------------------------------------------------------         11490000
+*   post plan failure and exit                                          11500000
+*--------------------------------------------------------------         11510000
+                                                                        11520000
+EPLANRET DS    0H                                                       11530000
+         LA    R15,RC28           INDICATE PLAN FAILURE                 11540000
+         ST    R15,RETC           POST RETURN CODE                      11550000
+         B     SELAPADV                                                 11560000
+         DROP  R4                 PLAN                                  11570000
+                                                                        11580000
+         EJECT                                                          11590000
+**<DOC-ON>*****************************************************         11600000
+*                                                                       11610000
+*   Acquire subplans for next component application                     11620000
+*                                                                       11630000
+*   Subplans for all component applications are acquired, even          11640000
+*   if errors that will result in suppression of application            11650000
+*   execution are encountered.  This ensures that the end user          11660000
+*   is given as much diagnostic information about the definition        11670000
+*   as is possible.                                                     11680000
+*                                                                       11690000
+**<DOC-OFF>****************************************************         11700000
+                                                                        11710000
+SELAPADV DS    0H                                                       11720000
+         L     R5,AAPNEXT         ADVANCE TO NEXT APP                   11730000
+         B     SELAPNXT           AGAIN                                 11740000
+                                                                        11750000
+SELAPFIN DS    0H                                                       11760000
+         ICM   R0,15,SELCOUNT     WORK TO DO?                           11770000
+         BZ    RETURN             CONFUSED IF NOT                       11780000
+                                                                        11790000
+         TM    IXRFLAG2,IXF2_NXE  EXECUTION SUPPRESSED?                 11800000
+         BO    RETURN                                                   11810000
+                                                                        11820000
+         ICM   R15,15,RETC        EXECUTION SUPPRESSED?                 11830000
+         BNZ   RETURN             TERMINATE IF ERROR                    11840000
+         DROP  R5                 AAP                                   11850000
+                                                                        11860000
+         EJECT                                                          11870000
+***************************************************************         11880000
+*                                                                       11890000
+*   Construct and initial-load the variable pool                        11900000
+*                                                                       11910000
+***************************************************************         11920000
+                                                                        11930000
+         $VARMGR PCREATE,                                              X11940000
+               SCOPE=$VARMGR_SCOPE_USER,                               X11950000
+               QH=USRSTG,                                              X11960000
+               ERRET=ABN_VARP,                                         X11970000
+               MF=(E,$VARMFL)                                           11980000
+                                                                        11990000
+         USING VMLIST,R1                                                12000000
+         MVC   USRVPOOL,VMLVPOOL  SAVE RETURNED POOL PTR                12010000
+         DROP  R1                 VMLIST                                12020000
+         LR    R1,R8              $NAVPARM                              12030000
+         @CALL INAVPVAR,CTYPE=STD                                       12040000
+         LTR   R15,R15                                                  12050000
+         BNZ   ERR_STG                                                  12060000
+                                                                        12070000
+***************************************************************         12080000
+*                                                                       12090000
+*   Invoke the plan executor for each application in turn until         12100000
+*   global plan has been completed or flagged for termination.          12110000
+*                                                                       12120000
+***************************************************************         12130000
+                                                                        12140000
+         L     R5,USRAPPLQ        APPLICATION QUEUE                     12150000
+         USING AAP,R5             MAP                                   12160000
+                                                                        12170000
+         SR    R0,R0              INITIALIZER                           12180000
+         ST    R0,RETC                                                  12190000
+         ST    R0,RSNC                                                  12200000
+         ST    R0,INFOC                                                 12210000
+                                                                        12220000
+*--------------------------------------------------------------         12230000
+*   run all apps until complete, early term, or failure                 12240000
+*--------------------------------------------------------------         12250000
+                                                                        12260000
+EXENXTAP DS    0H                                                       12270000
+         TM    CFLAG1,CF1STOP+CF1CNCL                                   12280000
+         BNZ   ERR_TERM           PREMATURE TERMINATION OF PLAN         12290000
+         TM    CFLAG1,CF1END      TERMINATION POSTED?                   12300000
+         BO    EXEFIN             DONE IF SO                            12310000
+                                                                        12320000
+         LTR   R5,R5              APPLICATIONS REMAIN?                  12330000
+         BZ    EXEFIN             DONE IF NOT                           12340000
+         ST    R5,@CURRAAP        RETAIN CURRENT AAP ADDRESS            12350000
+                                                                        12360000
+         TM    AAPFLAG1,AAPFSEL   APPL SELECTED AND RUN PLANNED?        12370000
+         BZ    EXEADV             SKIP IF NOT                           12380000
+                                                                        12390000
+         MVC   AAPMSGQA,IXRMSGQ   PROVIDE MSG Q TO APPL DRIVER          12400000
+         MVC   AAPQHMSG,IXRQHMSG  ASSOCIATED STORAGE MGR ANCHOR         12410000
+         ST    R8,AAPNAVP         $NAVPARM AVAILABLE TO PLAN EXEC       12420000
+                                                                        12430000
+*--------------------------------------------------------------         12440000
+*   application previously started - resume it                          12450000
+*--------------------------------------------------------------         12460000
+                                                                        12470000
+         TM    AAPFLAG1,AAPFSTRT  APPLICATION START REQUIRED?           12480000
+         BO    EXESTART           RESUMPTION OTHERWISE                  12490000
+                                                                        12500000
+         LA    R1,AAP             PLAN RESUMPTION                       12510000
+         BAS   R14,RESUMAPP       INVOKE POST/WAIT                      12520000
+         BNZ   ERR_COMM           INTRATASK COMMUNICATION ERROR         12530000
+                                                                        12540000
+         BAS   R14,WAITAPP        WAIT FOR RESPONSE                     12550000
+         B     EXEDOC                                                   12560000
+                                                                        12570000
+*--------------------------------------------------------------         12580000
+*   application not active - startup and sync                           12590000
+*--------------------------------------------------------------         12600000
+                                                                        12610000
+EXESTART DS    0H                                                       12620000
+         LA    R1,AAP             R1 <== AAP READY FOR START/RUN        12630000
+         BAS   R14,STARTAPP       START THE APPL AND RUN POSTED PLANS   12640000
+         BNZ   EXEDOC             FAILURE DOCUMENTED                    12650000
+                                                                        12660000
+         NI    AAPFLAG1,FF-AAPFSTRT  INDICATE APPLICATION STARTED       12670000
+         OI    AAPFLAG1,AAPFUP       AND IS PRESUMABLY UP               12680000
+                                                                        12690000
+         BAS   R14,WAITAPP        WAIT FOR RESPONSE                     12700000
+                                                                        12710000
+         EJECT                                                          12720000
+*************************************************************** R211219 12730000
+*                                                               R211219 12740000
+*   At this point, plan execution has completed or terminated.  R211219 12750000
+*   If the termination is abnormal, as indicated by a premature R211219 12760000
+*   SESSEND, or a PLANEND with error status, appropriate        R211219 12770000
+*   messages are produced.                                      R211219 12780000
+*                                                               R211219 12790000
+*************************************************************** R211219 12800000
+                                                                        12810000
+EXEDOC   DS    0H                                                       12820000
+         XC    AAPNAVP,AAPNAVP    RESET NAVPARM PTR                     12830000
+                                                                        12840000
+         TM    CFLAG1,CF1CNCL     CANCEL ORDER?                         12850000
+         BO    EXEADV             QUICK EXIT IF SO                      12860000
+                                                                        12870000
+         TM    SLUFLAGS,SLUF_END  PLAN END NOTIFICATION?        R211219 12880000
+         BO    EXEPE              STANDARD ANALYSIS IF SO       R211219 12890000
+                                                                        12900000
+*-------------------------------------------------------------- R211219 12910000
+*   sessterm:  document session failure                         R211219 12920000
+*-------------------------------------------------------------- R211219 12930000
+                                                                        12940000
+         TM    SLUFLAGS,SLUF_TRM  SESSTERM, AS EXPECTED?        R211219 12950000
+         BNO   EXEADV             MYSTERIOUS                    R211219 12960000
+                                                                        12970000
+         $MSG  147,FIELDS=(AAPANAME)                            R211219 12980000
+                                                                        12990000
+         LA    R15,RC48           INDICATE PREMATURE SESSTERM   R211219 13000000
+         ST    R15,RETC           POST RETURN CODE              R211219 13010000
+         XC    RSNC,RSNC          REASON CODES NOT DEFINED      R211219 13020000
+         B     EXEADV                                           R211219 13030000
+                                                                        13040000
+*--------------------------------------------------------------         13050000
+*   plan end:  capture terminal state                                   13060000
+*--------------------------------------------------------------         13070000
+                                                                        13080000
+EXEPE    DS    0H                                                       13090000
+         L     R2,AAPCURR         IDENTIFY TERMINATING STATE            13100000
+         USING NVSTN,R2           DETERMINE STATE TYPE                  13110000
+         MVC   AAPCSTNM,NVSTNAME  STATE NAME                            13120000
+                                                                        13130000
+         TM    NVSTSSN,BF         SCREEN SET?                           13140000
+         BZ    *+10               DONE HERE IF NOT                      13150000
+         MVC   AAPCSTNM,NVSTSSN   SCREEN SET NAME                       13160000
+                                                                        13170000
+*--------------------------------------------------------------         13180000
+*   analyze completion status                                           13190000
+*--------------------------------------------------------------         13200000
+                                                                        13210000
+         SR    R0,R0              PREPARE FOR INSERT OF PLANEXEC RETC   13220000
+         ICM   R0,1,PERETC+AAP_COMPLETION_CODE                          13230000
+         BZ    EXESTATE           NAVIGATION COMPLETED WITHOUT ERROR    13240000
+         MVC   BYTE,PERETC+AAP_COMPLETION_FLAGS  EXTRACT FLAG BYTE      13250000
+                                                                        13260000
+         ST    R0,RSNC                                                  13270000
+         MVC   RETC,=A(RC24)                                            13280000
+         OI    CFLAG1,CF1END      END OF QUERY                          13290000
+                                                                        13300000
+         $MSG  120,FIELDS=(AAPANAME,RSNC,PERSNC,QUAL1,QUAL2,BYTE)       13310000
+                                                                        13320000
+*--------------------------------------------------------------         13330000
+*   terminate the session if error invalidates current state            13340000
+*--------------------------------------------------------------         13350000
+                                                                        13360000
+         TM    PERETC+AAP_COMPLETION_FLAGS,AAP_COMPFLAG_POSITIONED      13370000
+         BO    EXESTATE           CURRENT POSITION KNOWN AND VALID      13380000
+                                                                        13390000
+         LA    R1,AAP             ADDRESS OF AAP BLOCK                  13400000
+         BAS   R14,KILLAPP        TSEND TO END THE APPLICATION SESSION  13410000
+         BNZ   ERR_COMM           INTRATASK COMMUNICATION ERROR         13420000
+         B     EXEADV             ERROR WILL TERMINATE EXECUTION        13430000
+                                                                        13440000
+*--------------------------------------------------------------         13450000
+*   determine whether current state is as exception state               13460000
+*--------------------------------------------------------------         13470000
+                                                                        13480000
+EXESTATE DS    0H                                                       13490000
+         CLC   PERSNC,=A(AAP_RSN_EXCEPTION)                             13500000
+         BNE   EXENSARG           CONTINUE IF NOT EXCEPTION STATE       13510000
+                                                                        13520000
+         $MSG  140,FIELDS=(AAPCSTNM,AAPANAME)                           13530000
+                                                                        13540000
+         @CALL INAVEVAR,(*USRVPOOL,*IXRMSGQ,*IXRQHMSG),                X13550000
+               CTYPE=STD,MF=(E,MFE_LIST)                                13560000
+                                                                        13570000
+         OI    CFLAG1,CF1END+CF1EXCP  SIGNAL END OF QUERY               13580000
+                                                                        13590000
+         LA    R15,RC00           NAVIGATION COMPLETED                  13600000
+         ST    R15,RETC           POST RECOMMENDED COMPLETION STATUS    13610000
+         LA    R0,RSN04           END DUE TO EXCEPTION STATE            13620000
+         ST    R0,RSNC            POST REASON                           13630000
+         B     EXERESUM                                                 13640000
+                                                                        13650000
+*--------------------------------------------------------------         13660000
+*   determine whether current state a result of a sarg mismatch         13670000
+*--------------------------------------------------------------         13680000
+                                                                        13690000
+EXENSARG DS    0H                                                       13700000
+         CLC   PERSNC,=A(AAP_RSN_TSELMATCH)                             13710000
+         BNE   EXERESUM           CONTINUE IF NOT SARG MISMATCH         13720000
+                                                                        13730000
+         $MSG  144,FIELDS=(AAPCSTNM,AAPANAME)                           13740000
+                                                                        13750000
+         OI    CFLAG1,CF1END+CF1EXCP  SIGNAL END OF QUERY               13760000
+                                                                        13770000
+         LA    R15,RC00           NAVIGATION COMPLETED                  13780000
+         ST    R15,RETC           POST RECOMMENDED COMPLETION STATUS    13790000
+         LA    R0,RSN08           END DUE TO EXCEPTION STATE            13800000
+         ST    R0,RSNC            POST REASON                           13810000
+                                                                        13820000
+         EJECT                                                          13830000
+***************************************************************         13840000
+*                                                                       13850000
+*   Convert final or resumption state ptr to symbolic reference         13860000
+*   allowing its STN entry to be recovered even if the STN              13870000
+*   is rebuilt.                                                         13880000
+*                                                                       13890000
+***************************************************************         13900000
+                                                                        13910000
+EXERESUM DS    0H                                                       13920000
+         LTR   R2,R2              CURRENT STATE KNOWN?                  13930000
+         BZ    EXERSMX            NO, CONTINUE                          13940000
+         ICM   R0,15,NVSRESUM     RESUMPTION STN DEFINED?               13950000
+         BZ    *+6                SKIP IF NOT                           13960000
+         LR    R2,R0              SHIFT FOCUS TO RESUMPTION STATE       13970000
+                                                                        13980000
+         ST    R2,AAPCURR         RETAIN RESUMPTION STN PTR             13990000
+         MVC   AAPCSTNM,NVSTNAME  STATE NAME                            14000000
+         MVC   AAPCQNAM,CSTRIMAG  ASSUME A SIMPLE IMAGE                 14010000
+                                                                        14020000
+         TM    NVSTSSN,BF         SCREEN SET?                           14030000
+         BZ    EXERSMX            DONE HERE IF NOT                      14040000
+         MVC   AAPCSTNM,NVSTSSN   SCREEN SET NAME                       14050000
+         MVC   AAPCQNAM,CSTRSSET  SCREEN SET QUALIFIER                  14060000
+                                                                        14070000
+EXERSMX  DS    0H                                                       14080000
+         DROP  R2                 NVSTN                                 14090000
+                                                                        14100000
+*--------------------------------------------------------------         14110000
+*   advance to next appl                                                14120000
+*--------------------------------------------------------------         14130000
+                                                                        14140000
+EXEADV   DS    0H                                                       14150000
+         L     R5,AAPNEXT         ADVANCE TO NEXT APPL                  14160000
+         B     EXENXTAP           AGAIN                                 14170000
+         DROP  R5                 AAP                                   14180000
+                                                                        14190000
+EXEFIN   DS    0H                                                       14200000
+         B     RETURN             DONE                                  14210000
+                                                                        14220000
+         EJECT                                                          14230000
+***************************************************************         14240000
+*                                                                       14250000
+*   Error handling, posting, COOP notification                          14260000
+*                                                                       14270000
+***************************************************************         14280000
+                                                                        14290000
+                                                                        14300000
+*--------------------------------------------------------------         14310000
+*   IPLNGET PLAN return failure, analysis required                      14320000
+*--------------------------------------------------------------         14330000
+                                                                        14340000
+ERR_GPLN DS    0H                                                       14350000
+         B     *+4(R15)           ANALYZE RETURN CODE                   14360000
+         EX    R0,*                  RC00 - PROGRAMMING ERROR           14370000
+         EX    R0,*                  RC04 - PROGRAMMING ERROR           14380000
+         EX    R0,*                  RC08 - PLNBLD() ERROR - FILTER     14390000
+         B     EGP_RC12              RC12 - PLNLOAD() ERROR             14400000
+         B     EGP_RC16              RC16 - STORAGE MANAGEMENT ERROR    14410000
+         B     EGP_RC20              RC20 - PLNTSL() FAILURE            14420000
+                                                                        14430000
+EGP_RC12 DS    0H                 PLAN MANAGEMENT ERROR                 14440000
+EGP_RC16 DS    0H                 STORAGE MANAGEMENT ERROR              14450000
+         LR    R15,R0             REFLECT TRUE SERVICE RETCODE          14460000
+         B     ERR_STG                                                  14470000
+                                                                        14480000
+EGP_RC20 DS    0H                 TERMINAL STATE LIST GENERATOR ERROR   14490000
+         LR    R15,R0             REFLECT TRUE SERVICE RETCODE          14500000
+         B     ERR_CSRV                                                 14510000
+                                                                        14520000
+*--------------------------------------------------------------         14530000
+*   cntl/run process synchronization error                              14540000
+*--------------------------------------------------------------         14550000
+                                                                        14560000
+ERR_COMM DS    0H                                                       14570000
+         ST    R15,FWORD          TSEND / RESPONSE FAILURE CODE         14580000
+         ST    R15,RSNC           SAVE AS REASON CODE                   14590000
+         LA    R15,RC16           LOCAL RETURN CODE                     14600000
+         ST    R15,RETC           SAVE FOR RETURN                       14610000
+         LA    R2,050             INTERTASK COMMUNICATION FAILURE       14620000
+         B     EMCOMMON           REJOIN                                14630000
+                                                                        14640000
+*--------------------------------------------------------------         14650000
+*   no session start capability - recordings are incomplete             14660000
+*--------------------------------------------------------------         14670000
+                                                                        14680000
+ERR_NSES DS    0H                                                       14690000
+         LA    R15,RC28           INDICATE PLAN FAILURE                 14700000
+         ST    R15,RETC           POST RETURN CODE                      14710000
+         LA    R2,003             NO SESS START CAPABILITY              14720000
+         B     EMCOMMON                                                 14730000
+                                                                        14740000
+*--------------------------------------------------------------         14750000
+*   request terminated due to STOP or CANCEL request                    14760000
+*--------------------------------------------------------------         14770000
+                                                                        14780000
+ERR_TERM DS    0H                                                       14790000
+         LA    R15,RC24           INDICATE EXECUTION FAILED             14800000
+         ST    R15,RETC           POST RETURN CODE                      14810000
+         LA    R2,079             STOP OR CANCEL RECEIVED               14820000
+         B     EMCOMMON                                                 14830000
+                                                                        14840000
+*--------------------------------------------------------------         14850000
+*   failure in C state, plan, application management routine            14860000
+*--------------------------------------------------------------         14870000
+                                                                        14880000
+ERR_CSRV DS    0H                 ENVIRONMENTAL ERROR                   14890000
+         LPR   R2,R15             POSITIVE, SMALL INTS                  14900000
+         ST    R2,RSNC            SAVE COMPLETION CODE                  14910000
+         SLL   R2,2               CONVERT TO ERROR DESC INDEX           14920000
+         L     R2,EPLANMSG(R2)    SELECT APPROPRIATE MESSAGE            14930000
+         LA    R15,RC32           INDICATE MISC FAILURE                 14940000
+         ST    R15,RETC           POST RETURN CODE                      14950000
+         B     EMCOMMON                                                 14960000
+                                                                        14970000
+*--------------------------------------------------------------         14980000
+*   abend encountered and trapped                                       14990000
+*--------------------------------------------------------------         15000000
+                                                                        15010000
+ERR_ABND DS    0H                                                       15020000
+         $MSG  045,DESTADD=$LOGFILE,mf=(E,$MSGMFL2)                     15030000
+                                                                        15040000
+         LA    R15,RC40           SAVE AS REASON CODE                   15050000
+         ST    R15,RETC           SAVE FOR RETURN                       15060000
+         B     RETURN             RETURN                                15070000
+                                                                        15080000
+*--------------------------------------------------------------         15090000
+*   storage management failure                                          15100000
+*--------------------------------------------------------------         15110000
+                                                                        15120000
+ERR_STG  DS    0H                                                       15130000
+         ST    R15,RSNC           STGMGR FUNC RETCODE AS RSNCODE        15140000
+         LA    R15,RC44           SAVE AS REASON CODE                   15150000
+         ST    R15,RETC           SAVE FOR RETURN                       15160000
+         B     RETURN             RETURN                                15170000
+                                                                        15180000
+*--------------------------------------------------------------         15190000
+*   common message issuance                                             15200000
+*--------------------------------------------------------------         15210000
+                                                                        15220000
+EMCOMMON DS    0H                                                       15230000
+         $MSG  (R2),FIELDS=(FWORD)                                      15240000
+         B     RETURN             RETURN                                15250000
+                                                                        15260000
+         EJECT                                                          15270000
+***************************************************************         15280000
+*                                                                       15290000
+*   Exit sequence - cleanup and termination                             15300000
+*                                                                       15310000
+***************************************************************         15320000
+                                                                        15330000
+RETURN   DS    0H                                                       15340000
+                                                                        15350000
+*--------------------------------------------------------------         15360000
+*   save completed plans if prepare and successful generation           15370000
+*--------------------------------------------------------------         15380000
+                                                                        15390000
+         TM    PREPFLAG,PREPSTMT  PREPARING OR PREPARED STATEMENT?      15400000
+         BNO   EPREPEXP           SKIP IF NOT                           15410000
+         TM    PREPFLAG,PREPFAIL  PLAN GENERATION, IF PERFORMED, OK?    15420000
+         BO    EPREPEXP           NOT SAVED OTHERWISE                   15430000
+                                                                        15440000
+         SR    R1,R1              R1 <== LIMIT AAP NOT DEFINED          15450000
+         BAS   R14,PEXPORT        EXPORT THE PLANS INTO PSB             15460000
+                                                                        15470000
+EPREPEXP DS    0H                                                       15480000
+                                                                        15490000
+*--------------------------------------------------------------         15500000
+*   delete variable pool                                                15510000
+*--------------------------------------------------------------         15520000
+                                                                        15530000
+         ICM   R2,15,USRVPOOL     VARIABLE POOL CREATED?                15540000
+         BZ    NXVARPOL           PREVIOUSLY CLEARED OR NOT CREATED     15550000
+         XC    USRVPOOL,USRVPOOL  CLEAR VARIABLE POOL ANCHOR            15560000
+                                                                        15570000
+         $VARMGR PDESTROY,                                             X15580000
+               SCOPE=$VARMGR_SCOPE_USER,                               X15590000
+               POOL=(R2),                                              X15600000
+               ERRET=ABN_VARP,                                         X15610000
+               MF=(E,$VARMFL)                                           15620000
+                                                                        15630000
+NXVARPOL DS    0H                                                       15640000
+                                                                        15650000
+*--------------------------------------------------------------         15660000
+*   delete recovery environment                                         15670000
+*--------------------------------------------------------------         15680000
+                                                                        15690000
+         TM    CFLAG1,CF1RECOV    RECOVERY ROUTINE ESTABLISHED?         15700000
+         BNO   NXRCVRY            DONE IF NOT                           15710000
+                                                                        15720000
+         $RCVRY DELETE,MF=(E,MFE_LIST)                                  15730000
+                                                                        15740000
+NXRCVRY  DS    0H                                                       15750000
+                                                                        15760000
+*--------------------------------------------------------------         15770000
+*   return completion status to caller                                  15780000
+*--------------------------------------------------------------         15790000
+                                                                        15800000
+         L     R15,RETC           RETURN CODE                           15810000
+         L     R0,RSNC            REASON CODE                           15820000
+         L     R1,INFOC           INFO CODE                             15830000
+                                                                        15840000
+         #EXIT ,                                                        15850000
+                                                                        15860000
+         EJECT                                                          15870000
+**<DOC-ON>*****************************************************         15880000
+*                                                                       15890000
+* ROUTINE:  PEXPORT - Export AAP-resident plans into PSB                15900000
+*                                                                       15910000
+* DESCRIPTION:                                                          15920000
+*                                                                       15930000
+*    This routine is used to export the RUN and REPOSITIONing           15940000
+*    subplans for the AAPS selected by the current VDB operation        15950000
+*    into a designated prepared statement block (PSB).                  15960000
+*                                                                       15970000
+* ON ENTRY:                                                             15980000
+*                                                                       15990000
+*    R1  contains zero or the address of the 'limit' AAP block.         16000000
+*        AAPs at and beyond the limit AAP have not had their            16010000
+*        subplans generated yet and are not eligible for                16020000
+*        export processing.                                             16030000
+*                                                                       16040000
+* ON EXIT:                                                              16050000
+*                                                                       16060000
+*    R15 contains the highest 'prepplan export' completion code         16070000
+*        encountered                                                    16080000
+*                                                                       16090000
+**<DOC-OFF>************************************************************ 16100000
+                                                                        16110000
+PEXPORT  DS    0H                                                       16120000
+         STM   R0,R15,REGSAVE     PRESERVE MAINLINE REGS                16130000
+         LR    R3,R1              LIMIT AAP IN SAFE REG                 16140000
+         SR    R2,R2              MAINTAIN HIGHEST RETCODE ENCOUNTERED  16150000
+                                                                        16160000
+         ICM   R5,15,USRAPPLQ     LOCATE START OF AAP CHAIN             16170000
+         BZ    PEXRET             STRANGE                               16180000
+         USING AAP,R5             MAPPED PER CONVENTION                 16190000
+                                                                        16200000
+*--------------------------------------------------------------         16210000
+*   export run and repositioning plans from selected aaps               16220000
+*--------------------------------------------------------------         16230000
+                                                                        16240000
+PEXNEXT  DS    0H                 TEST SUITABILITY OF CURRENT AAP       16250000
+         CR    R5,R3              LIMIT AAP REACHED?                    16260000
+         BE    PEXRET             DONE IF SO                            16270000
+         TM    AAPFLAG1,AAPFSEL   VDB COMPONENT APPLICATION?            16280000
+         BNO   PEXADV             SKIP IF NOT                           16290000
+                                                                        16300000
+*---------------------------------                                      16310000
+*   run plan                                                            16320000
+*---------------------------------                                      16330000
+                                                                        16340000
+         PREPPLAN EXPORT,RUN,PSB=*IXRPSBA                               16350000
+                                                                        16360000
+         CR    R15,R2             RETAIN HIGHEST RETCODE                16370000
+         BNH   *+6                                                      16380000
+         LR    R2,R15                                                   16390000
+                                                                        16400000
+*---------------------------------                                      16410000
+*   repostioning plan                                                   16420000
+*---------------------------------                                      16430000
+                                                                        16440000
+         PREPPLAN EXPORT,REPOS,PSB=*IXRPSBA                             16450000
+                                                                        16460000
+         CR    R15,R2             RETAIN HIGHEST RETCODE                16470000
+         BNH   *+6                                                      16480000
+         LR    R2,R15                                                   16490000
+                                                                        16500000
+*--------------------------------------------------------------         16510000
+*   examine all candidate aaps                                          16520000
+*--------------------------------------------------------------         16530000
+                                                                        16540000
+PEXADV   DS    0H                                                       16550000
+         ICM   R5,15,AAPNEXT      ADVANCE TO NEXT AAP                   16560000
+         BNZ   PEXNEXT            EXAMINE ALL CANDIDATES                16570000
+                                                                        16580000
+PEXRET   DS    0H                                                       16590000
+         LR    R15,R2             HIGHEST PLAPPREP RETCODE              16600000
+         LM    R0,R14,REGSAVE     RESTORE MAINLINE REGS                 16610000
+         BR    R14                DONE                                  16620000
+         DROP  R5                 AAP                                   16630000
+                                                                        16640000
+         EJECT                                                          16650000
+**************************************************************          16660000
+*                                                                       16670000
+* ROUTINE:  DOCAAP - Identify current application                       16680000
+*                                                                       16690000
+***************************************************************         16700000
+                                                                        16710000
+DOCAAP   DS    0H                                                       16720000
+         STM   R0,R15,REGSAVE     PRESERVE MAINLINE REGS                16730000
+         L     R5,@CURRAAP        CURRENT APPLICATION                   16740000
+         USING AAP,R5             ADDRESSABILITY                        16750000
+                                                                        16760000
+         $MSG  070,FIELDS=(AAPANAME,AAPLOGMD)                           16770000
+                                                                        16780000
+         LM    R0,R14,REGSAVE     RESTORE MAINLINE REGS                 16790000
+         BR    R14                RETURN                                16800000
+         DROP  R5                 AAP                                   16810000
+                                                                        16820000
+         EJECT                                                          16830000
+***************************************************************         16840000
+*                                                                       16850000
+* ROUTINE:  WAITAPP - Await PLANEND status from executor                16860000
+*                                                                       16870000
+* DESCRIPTION:                                                          16880000
+*                                                                       16890000
+*    This routine is used primarily to acquire plan response            16900000
+*    information from the session driver.  If execution of              16910000
+*    the plan leads to session termination (via logoff, for             16920000
+*    example) bot the PLANEND and SESSTERM mesages may be               16930000
+*    received from the SLU driver.  If a SESSTERM message               16940000
+*    arrives alone, it indicates that the session terminated            16950000
+*    unexpectedly while executing the plan.                             16960000
+*                                                                       16970000
+*    SESSTERM messages for applications other than that                 16980000
+*    represented by the given AAP are ignored.                          16990000
+*                                                                       17000000
+*    STOP and CANCEL events are captured and flagged as                 17010000
+*    described below.  CANCEL causes immediate termination.             17020000
+*                                                                       17030000
+*                                                                       17040000
+* ON ENTRY:                                                             17050000
+*                                                                       17060000
+*    R1  addr of the AAP representing the currently scheduled           17070000
+*        application                                                    17080000
+*                                                                       17090000
+*                                                                       17100000
+* ON EXIT:                                                              17110000
+*                                                                       17120000
+*    SLUFLAGS may contain either one or both of the PLANEND             17130000
+*    and SESSTERM flags.                                                17140000
+*                                                                       17150000
+*    CFLAG1 stop and/or cancel bits may have also been raised.          17160000
+*                                                                       17170000
+***************************************************************         17180000
+                                                                        17190000
+WAITAPP  DS    0H                                                       17200000
+         STM   R0,R15,AUXREGS     SAVE MAINLINE REGS                    17210000
+         USING AAP,R5             MAP                                   17220000
+                                                                        17230000
+         MVI   SLUFLAGS,0         RESET CURRENT AAP / SLU COMM FLAGS    17240000
+                                                                        17250000
+*--------------------------------------------------------------         17260000
+*   await response from session                                         17270000
+*--------------------------------------------------------------         17280000
+                                                                        17290000
+WAITTASK DS    0H                                                       17300000
+         $TASK WAIT,                                                   X17310000
+               MESSAGE=WAITMSG,                                        X17320000
+               STOP=WAITSTOP,                                          X17330000
+               CANCEL=WAITCNCL,                                        X17340000
+               MF=(E,$TASKMFL)                                          17350000
+         B     WAITTASK           UNANTICIPATED EVENT DISCARDED         17360000
+                                                                        17370000
+WAITSTOP DS    0H                 EXTERNAL STOP REQUEST                 17380000
+         OI    CFLAG1,CF1STOP     INDICATE AS SUCH                      17390000
+         B     WAITTASK           MUST WAIT FOR EXECUTOR TO COMPLETE    17400000
+                                                                        17410000
+WAITCNCL DS    0H                 EXTERNAL CANCEL REQUEST               17420000
+         OI    CFLAG1,CF1CNCL     INDICATE AS SUCH                      17430000
+         B     WAIT_FIN           ABANDON SHIP                  R211219 17440000
+                                                                        17450000
+*--------------------------------------------------------------         17460000
+*   message loop                                                        17470000
+*--------------------------------------------------------------         17480000
+                                                                        17490000
+WAITMSG  DS    0H                                                       17500000
+         BAS   R14,SETMEPB        REINIT MESSAGE EPB                    17510000
+                                                                        17520000
+WAITMNXT DS    0H                                                       17530000
+         $TRECV $TASKMSG,         ACQUIRE SESSION RESPONSE             X17540000
+               SCOPE=PCB,                                              X17550000
+               MF=(E,MFE_LIST)                                          17560000
+                                                                        17570000
+         BNZ   WAITALL            DONE IF ALL PENDING RECVD     R211219 17580000
+                                                                        17590000
+*--------------------------------------------------------------         17600000
+*   test msg type, plan end messages are synchronous                    17610000
+*--------------------------------------------------------------         17620000
+                                                                        17630000
+         LA    R2,$TASKMSG        SESSION RESPONSE MESSAGE              17640000
+         USING TMSGSTD,R2         MESSAGE FORMAT                        17650000
+                                                                        17660000
+         CLC   TMSGTYPE,=A(ITM_RUN_PLANEND)                     R211219 17670000
+         BE    WAITXTR                                          R211219 17680000
+                                                                        17690000
+         CLC   TMSGTYPE,=A(ITM_SLU_SESSTERM)                    R211219 17700000
+         BNE   WAIT_DFT                                         R211219 17710000
+                                                                        17720000
+         TM    AAPFLAG1,AAPFTERM  CURRENT APPLICATION TERMED?   R211219 17730000
+         BNO   WAITMNXT           IGNORE OTHERWISE              R211219 17740000
+         OI    SLUFLAGS,SLUF_TRM  SLU SESSTERM SIGNALED         R211219 17750000
+         B     WAITMNXT           PROCESS ALL MESSAGES          R211219 17760000
+                                                                        17770000
+WAIT_DFT DS    0H                                               R211219 17780000
+         $TMSGDFT (R2)            STANDARD HANDLING             R211219 17790000
+         B     WAITMNXT           AGAIN                         R211219 17800000
+                                                                        17810000
+*-------------------------------------------------------------- R211219 17820000
+*   extract response from plan end message                      R211219 17830000
+*-------------------------------------------------------------- R211219 17840000
+                                                                        17850000
+WAITXTR  DS    0H                                                       17860000
+         OI    SLUFLAGS,SLUF_END  PLAN END SIGNALED             R211219 17870000
+         NI    AAPFLAG1,FF-AAPFRUN                                      17880000
+                                                                        17890000
+         MVC   PERETC,TMSGW1                                            17900000
+         MVC   PERSNC,TMSGW2                                            17910000
+         MVC   QUAL1,TMSGW3                                             17920000
+         MVC   QUAL2,TMSGW4                                             17930000
+         B     WAITMNXT           DRAIN THE MESSAGE Q           R211219 17940000
+         DROP  R2                 TMSGSTD                               17950000
+                                                                        17960000
+*--------------------------------------------------------------         17970000
+*   return completion status to caller                                  17980000
+*--------------------------------------------------------------         17990000
+                                                                        18000000
+WAITALL  DS    0H                                               R211219 18010000
+         TM    SLUFLAGS,SLUF_END+SLUF_TRM  SOME STATUS GIVEN?   R211219 18020000
+         BZ    WAITTASK                                         R211219 18030000
+                                                                        18040000
+WAIT_FIN DS    0H                                                       18050000
+         LM    R2,R14,AUXREGS+8   RESTORE MAINLINE REGS                 18060000
+         SR    R15,R15            COMPLETE                              18070000
+         BR    R14                                                      18080000
+                                                                        18090000
+         EJECT                                                          18100000
+***************************************************************         18110000
+*                                                                       18120000
+* ROUTINE:  KILLAPP                                                     18130000
+*                                                                       18140000
+***************************************************************         18150000
+                                                                        18160000
+KILLAPP  DS    0H                                                       18170000
+         STM   R0,R15,AUXREGS     SAVE MAINLINE REGS                    18180000
+         LR    R5,R1              ACCEPT APPLICATION ACTION BLOCK       18190000
+         USING AAP,R5             ADDRESSABILITY                        18200000
+                                                                        18210000
+         LA    R15,RC00           ASSUME EXECUTOR HAS KILLED THE SESS   18220000
+         TM    AAPFLAG1,AAPFTERM  SESSION TERMINATED?                   18230000
+         BO    KILLRET            DONE IF SO                            18240000
+                                                                        18250000
+*--------------------------------------------------------------         18260000
+*   send session kill request to appl if its still alive                18270000
+*--------------------------------------------------------------         18280000
+                                                                        18290000
+         USING SLUHANDL,R2        MAPPED                                18300000
+         ICM   R2,15,AAPSLUH      SLUHANDL PRESENT?                     18310000
+         BZ    KILLRET            NO CORR SESSION IF NOT                18320000
+                                                                        18330000
+         L     R1,TSKPCBC         MASTER PLANNER PCB ADDRESS     144663 18340000
+         USING IPCB,R1            TEMP ADDRESSABILITY            144663 18350000
+         MVC   SLHMPTKN,PCBENTKN  MASTER PLANNER WORKUNIT TOKEN  144663 18360000
+         DROP  R1                 IPCB                           144663 18370000
+                                                                        18380000
+         $TSEND WUTOKEN=SLHSDTKN,TYPE=ITM_RUN_SESSEND,          R211219X18390000
+               REPLY=YES,                                              X18400000
+               MF=(E,MFE_LIST)                                          18410000
+         BNZ   KILLRET            ERROR                                 18420000
+                                                                        18430000
+         LR    R3,R1              ACCEPT SYSTEM EPB                     18440000
+                                                                        18450000
+         $TASK WAIT,EPB=(R3),                                          X18460000
+               MF=(E,$TASKMFL)                                          18470000
+                                                                        18480000
+         LTR   R15,R0             POST CODE                             18490000
+         BNZ   KILLRET            UNEXPECTED COMPLETION                 18500000
+                                                                        18510000
+*--------------------------------------------------------------         18520000
+*   delay allows appl time to terminate (TSO in particular)             18530000
+*--------------------------------------------------------------         18540000
+                                                                        18550000
+         $TIMER WAIT,             ESTABLISH WAIT INTERVAL              X18560000
+               TID=TIMERID,       RETURN TOKEN                         X18570000
+               INTVL=*=A(3*1000), THREE SECONDS                        X18580000
+               MF=(E,MFE_LIST)                                          18590000
+                                                                        18600000
+*--------------------------------------------------------------         18610000
+*   return completion status to requester                               18620000
+*--------------------------------------------------------------         18630000
+                                                                        18640000
+KILLRET  DS    0H                                                       18650000
+         OI    AAPFLAG1,AAPFTERM  ENSURE SESSION TERMINATES             18660000
+                                                                        18670000
+         LM    R2,R14,AUXREGS+8   RESTORE MAINLINE REGS                 18680000
+         LTR   R15,R15            REFLECT COMPLETION STATUS VIA CC      18690000
+         BR    R14                RETURN                                18700000
+         DROP  R5,R2                                                    18710000
+                                                                        18720000
+         EJECT                                                          18730000
+***************************************************************         18740000
+*                                                                       18750000
+* ROUTINE:  RESUMAPP                                                    18760000
+*                                                                       18770000
+***************************************************************         18780000
+                                                                        18790000
+RESUMAPP DS    0H                                                       18800000
+         STM   R0,R15,AUXREGS     SAVE MAINLINE REGS                    18810000
+         LR    R5,R1              ACCEPT APPLICATION ACTION BLOCK       18820000
+         USING AAP,R5             MAP                                   18830000
+                                                                        18840000
+         L     R2,AAPSLUH         SLUHANDL                              18850000
+         USING SLUHANDL,R2        MAPPED                                18860000
+                                                                        18870000
+         L     R1,TSKPCBC         MASTER PLANNER PCB ADDRESS     144663 18880000
+         USING IPCB,R1            TEMP ADDRESSABILITY            144663 18890000
+         MVC   SLHMPTKN,PCBENTKN  MASTER PLANNER WORKUNIT TOKEN  144663 18900000
+         LA    R3,SLHSDTKN        SLU DRIVER WU TOKEN PTR       R211219 18910000
+         DROP  R1,R2              IPCB, SLUHANDL                 144663 18920000
+                                                                        18930000
+*--------------------------------------------------------------         18940000
+*   if no reposition plan, indicate scrape first/only and go            18950000
+*--------------------------------------------------------------         18960000
+                                                                        18970000
+         LA    R2,ITM_RUN_PLANXEQ ASSUME STANDARD NAV & SCRAPE REQ      18980000
+         LA    R4,AAPPPOS         REPOSITIONING PLAN                    18990000
+         USING PLAN,R4            PLAN ADDRESSABILITY                   19000000
+         ICM   R0,3,PLVISITS      PLAN GENERATED?                       19010000
+         BNZ   *+8                THAT PLAN IS ALONE SUFFICIENT         19020000
+         LA    R2,ITM_RUN_SCRAPE  SCRAPE OF CURRENT STATE FIRST         19030000
+         DROP  R4                 PLAN                                  19040000
+                                                                        19050000
+*--------------------------------------------------------------         19060000
+*   post work request and await start-of-exec signal                    19070000
+*--------------------------------------------------------------         19080000
+                                                                        19090000
+         $TSEND WUTOKEN=(R3),TYPE=(R2),                                X19100000
+               REPLY=YES,                                              X19110000
+               MF=(E,MFE_LIST)                                          19120000
+         BNZ   RESUMRET           ERROR                                 19130000
+                                                                        19140000
+         LR    R2,R1              ACCEPT SYSTEM EPB                     19150000
+                                                                        19160000
+         $TASK WAIT,EPB=(R2),                                          X19170000
+               MF=(E,$TASKMFL)                                          19180000
+         LR    R15,R0             POST CODE                             19190000
+                                                                        19200000
+*--------------------------------------------------------------         19210000
+*   return start-of-exec or termination status to caller                19220000
+*--------------------------------------------------------------         19230000
+                                                                        19240000
+RESUMRET DS    0H                                                       19250000
+         LTR   R15,R15            SUCCESS?                              19260000
+         BNZ   *+8                SKIP IF NOT                           19270000
+         OI    AAPFLAG1,AAPFRUN+AAPFRAN  PLAN EXECUTION HAS BEGUN       19280000
+                                                                        19290000
+         LM    R2,R14,AUXREGS+8   RESTORE MAINLINE REGS                 19300000
+         LTR   R15,R15            REFLECT COMPLETION STATUS VIA CC      19310000
+         BR    R14                RETURN                                19320000
+                                                                        19330000
+         EJECT                                                          19340000
+***************************************************************         19350000
+*                                                                       19360000
+* ROUTINE:  STARTAPP                                                    19370000
+*                                                                       19380000
+***************************************************************         19390000
+                                                                        19400000
+STARTAPP DS    0H                                                       19410000
+         STM   R0,R15,AUXREGS     SAVE MAINLINE REGS                    19420000
+         LR    R5,R1              ACCEPT APPLICATION ACTION BLOCK       19430000
+         USING AAP,R5             MAP                                   19440000
+                                                                        19450000
+*--------------------------------------------------------------         19460000
+*   common access preparation / SYSAPPLS, SLUHANDL acquistion           19470000
+*--------------------------------------------------------------         19480000
+                                                                        19490000
+         LA    R7,$SYSAPPL        SYSAPPLS INFO RETURN AREA             19500000
+         USING SYSAPPLS,R7        WORKAREA PREVIOUSLY CLEARED           19510000
+                                                                        19520000
+         LA    R1,MFE_LIST        CONSTRUCT PARAMETER LIST IN           19530000
+         USING VSESACCP,R1        IVSESACC SERVICE ROUTINE FORMAT       19540000
+         ST    R7,VSACARET        SYSAPPLS RETURN AREA                  19550000
+         LA    R0,AAPANAME        EXTERNAL APPLICATION NAME             19560000
+         ST    R0,VSACAPPL                                              19570000
+         LA    R0,MSGRET          MESSAGE RETURN AREA                   19580000
+         ST    R0,VSACMSGB                                              19590000
+         LA    R0,L'MSGRET        MESSAGE RETURN AREA LENGTH            19600000
+         ST    R0,VSACMSGL                                              19610000
+         DROP  R1                 VSESACCP                              19620000
+                                                                        19630000
+         @CALL IVSESACC,CTYPE=CVT                                       19640000
+                                                                        19650000
+         B     *+4(R15)           ANALYZE COMPLETION STATUS             19660000
+         B     STPREPED              RC00 - PREPARATION COMPLETE        19670000
+         B     STE_APPL              RC04 - APPLICATION NOT DEFINED     19680000
+         B     STE_VIO               RC08 - APPLICATION ACCESS DENIED   19690000
+                                                                        19700000
+*--------------------------------------------------------------         19710000
+*   accept returned SLU handle and complete it                          19720000
+*--------------------------------------------------------------         19730000
+                                                                        19740000
+STPREPED DS    0H                                                       19750000
+         LR    R4,R1              ALLOCATED STORAGE                     19760000
+         ST    R4,AAPSLUH         ANCHOR THE SLUHANDL                   19770000
+         USING SLUHANDL,R4                                              19780000
+                                                                        19790000
+         ST    R5,SLHAAP          APPL ACTION BLOCK                     19800000
+         ST    R6,SLHUSER         IUSER BLOCK                           19810000
+                                                                        19820000
+         TM    AAPLOGMD,BF        LOGMODE OVERRIDDEN IN RECORDING?      19830000
+         BZ    *+10               SKIP IF NOT                           19840000
+         MVC   SLHLOGMD,AAPLOGMD  RECORDING TAKES PRECEDENCE            19850000
+                                                                        19860000
+         L     R1,TSKPCBC         MASTER PLANNER PCB ADDRESS     144663 19870000
+         USING IPCB,R1            TEMP ADDRESSABILITY            144663 19880000
+         MVC   SLHMPTKN,PCBENTKN  MASTER PLANNER WORKUNIT TOKEN  144663 19890000
+         DROP  R1                 IPCB                           144663 19900000
+                                                                        19910000
+*--------------------------------------------------------------         19920000
+*   establish session with designated application                       19930000
+*--------------------------------------------------------------         19940000
+                                                                        19950000
+         XC    MSGRET($MSBPFXL),MSGRET   DISCARD RESIDUAL MESSAGES      19960000
+                                                                        19970000
+         LA    R1,MFE_LIST        CONSTRUCT PARAMETER LIST IN           19980000
+         USING VSESTRTP,R1        IVSESTRT SERVICE ROUTINE FORMAT       19990000
+         XC    VSESTRTP(VSSTLN),VSESTRTP   OMITTED ARGUMENTS            20000000
+                                                                        20010000
+         ST    R4,VSSTSLH         SLU HANDLE                            20020000
+         ST    R7,VSSTAPPL        SYSAPPLS ENTRY ADDR                   20030000
+         LA    R0,USRPSTKN        COOP (PLU) SESSION TOKEN              20040000
+         ST    R0,VSSTPLU                                               20050000
+         LA    R0,MSGRET          MESSAGE RETURN AREA                   20060000
+         ST    R0,VSSTMSGB                                              20070000
+         LA    R0,L'MSGRET        MESSAGE RETURN AREA LENGTH            20080000
+         ST    R0,VSSTMSGL                                              20090000
+         DROP  R1                 VSESTRTP                              20100000
+                                                                        20110000
+         @CALL IVSESTRT,CTYPE=CVT                                       20120000
+                                                                        20130000
+         CH    R15,=AL2(RC04)     ANALYZE COMPLETION STATUS             20140000
+         BH    STE_STRT           UNABLE TO START THE SESSION           20150000
+                                                                        20160000
+*--------------------------------------------------------------         20170000
+*   session start completed, indicate session running                   20180000
+*--------------------------------------------------------------         20190000
+                                                                        20200000
+         LA    R15,RC00           INDICATE SUCCESS                      20210000
+         ST    R15,RETC           POST APPROPRIATE RETURN CODE          20220000
+         OI    AAPFLAG1,AAPFRUN+AAPFRAN   PLAN EXECUTION BEGINNING      20230000
+         B     STRT_FIN           DONE                                  20240000
+                                                                        20250000
+*--------------------------------------------------------------         20260000
+*   error: appl access violation                                        20270000
+*--------------------------------------------------------------         20280000
+                                                                        20290000
+STE_VIO  DS    0H                                                       20300000
+         ST    R0,RSNC            SECSYS RETURN CODE                    20310000
+         ST    R1,INFOC           SECSYS REASON CODE                    20320000
+         LA    R15,RC20           INDICATE ACCESS VIOLATION             20330000
+         ST    R15,RETC           POST COMPLETION CODE                  20340000
+         B     STRT_FIN           DONE                                  20350000
+                                                                        20360000
+*--------------------------------------------------------------         20370000
+*   error: application not defined                                      20380000
+*--------------------------------------------------------------         20390000
+                                                                        20400000
+STE_APPL DS    0H                                                       20410000
+         LA    R15,RC04           INDICATE UNKNOWN APPL                 20420000
+         ST    R15,RETC           POST COMPLETION CODE                  20430000
+         B     STRT_FIN                                                 20440000
+                                                                        20450000
+*--------------------------------------------------------------         20460000
+*   error: session start failure - return code indicates source         20470000
+*--------------------------------------------------------------         20480000
+                                                                        20490000
+STE_STRT DS    0H                                                       20500000
+         ST    R15,RETC           IVSESTRT RETURN CODE                  20510000
+         ST    R0,RSNC            IVSESTRT REASON CODE                  20520000
+         ST    R1,INFOC           IVSESTRT INFO CODE                    20530000
+                                                                        20540000
+*--------------------------------------------------------------         20550000
+*   queue failure messages on error and cleanup                         20560000
+*--------------------------------------------------------------         20570000
+                                                                        20580000
+STRT_FIN DS    0H                                                       20590000
+         ICM   R15,15,RETC        REQUEST COMPLETED?                    20600000
+         BZ    *+8                ONWARD IF SO                          20610000
+         BAS   R14,MSGFAIL        ELSE GENERATE FAILURE MSG SUMMARY     20620000
+                                                                        20630000
+*--------------------------------------------------------------         20640000
+*   return completion status to caller                                  20650000
+*--------------------------------------------------------------         20660000
+                                                                        20670000
+         LM    R2,R14,AUXREGS+8   RESTORE MAINLINE REGS                 20680000
+         L     R0,RSNC            REASON CODE                           20690000
+         L     R1,INFOC           INFO CODE                             20700000
+         ICM   R15,15,RETC        RETURN CODE AND CC                    20710000
+         BR    R14                EXIT                                  20720000
+         DROP  R5,R4              AAP, SLUHANDL                         20730000
+                                                                        20740000
+         EJECT                                                          20750000
+**<DOC-ON>*****************************************************         20760000
+*                                                                       20770000
+* ROUTINE:  FMTPLAN                                                     20780000
+*                                                                       20790000
+* DESCRIPTION:                                                          20800000
+*                                                                       20810000
+*    Return plans to the caller, if requested.  If SQLTRACE is          20820000
+*    active, all RUN plans are written to thier designated msg          20830000
+*    class.  Otherwise, a destination override is made to               20840000
+*    ensure that messages are written only to the requester.            20850000
+*    Unlike other C-service requests made elsewhere, the plan           20860000
+*    print is built in PCB storage, allowing it to be freed             20870000
+*    by the SQL requester.                                              20880000
+*                                                                       20890000
+* ON ENTRY:                                                             20900000
+*                                                                       20910000
+*    AAP      - addressable (via R5) per convention                     20920000
+*    IXRFLAG2 - image of IXRFLAG2: plan return format options           20930000
+*                                                                       20940000
+*    R1 - addr of PLAN                                                  20950000
+*    R0 - plan type name                                                20960000
+*                                                                       20970000
+**<DOC-OFF>****************************************************         20980000
+                                                                        20990000
+FMTPLAN  DS    0H                                                       21000000
+         STM   R0,R15,AUXREGS     PRESERVE MAINLINE REGS                21010000
+         USING AAP,R5             APPL ACTION BLOCK                     21020000
+         LR    R4,R1              ACCEPT PLAN PTR                       21030000
+         USING PLAN,R4            MAPPED                                21040000
+         ST    R0,FWORD           RETAIN PLAN NAME                      21050000
+                                                                        21060000
+         MVC   DETAIL,=A(FALSE)   ASSUME DETAIL NOT REQUIRED            21070000
+         TM    IXRFLAG2,IXF2_PDE  DETAIL REQUESTED?                     21080000
+         BNO   *+10               SKIP IF NOT                           21090000
+         MVC   DETAIL,=A(TRUE)    INDICATE SUCH OTHERWISE               21100000
+                                                                        21110000
+*--------------------------------------------------------------         21120000
+*   determine plan dump requirement and dump content                    21130000
+*--------------------------------------------------------------         21140000
+                                                                        21150000
+         L     R0,=F'128'         ELSE TRUNCATE                         21160000
+         ST    R0,LINELEN         SAVE FOR FORMATTER                    21170000
+                                                                        21180000
+         TM    ICTSTAT4,ICT4$SQL  INTENSIVE SQL TRACING?                21190000
+         BO    *+10               NO DEST MODIFICATION                  21200000
+         MVC   DEST,=A($BUFFER)                                         21210000
+                                                                        21220000
+*--------------------------------------------------------------         21230000
+*   format the plan, issue warning if some states not visited           21240000
+*--------------------------------------------------------------         21250000
+                                                                        21260000
+         LR    R0,R5              R0 <== AAP                            21270000
+         LR    R1,R4              R1 <== PLAN                           21280000
+         BAS   R14,PREVIEW        ANALYZE SUITABILITY OF PLAN           21290000
+                                                                        21300000
+         L     R2,@PCBSTG         PCB OWNED STORAGE - QH                21310000
+                                                                        21320000
+         $CLINK FUNC=NAVDUMP,                                          X21330000
+               (STRUCT*,AAP),     APPL DESCRIPTOR                      X21340000
+               (STRUCT*,(R4)),    PLAN ORIGIN                          X21350000
+               (LONG,PI.PIRTCOST),   TOTAL COST OF PLAN GENERATION     X21360000
+               (LONG,IXRMSGQ),    MESSAGE Q ANCHOR WORD                X21370000
+               (LONG,FWORD),      TYPE OF PLAN FOR DUMP HEADER         X21380000
+               (INT,DETAIL),      PLAN DETAIL OPTION                   X21390000
+               (INT,LINELEN),     MSG LINE LENGTH CONSTRAINT           X21400000
+               (INT,DEST),        MSG DESTINATION OVERRIDES            X21410000
+               (STRUCT*,(R2))                                           21420000
+                                                                        21430000
+*--------------------------------------------------------------         21440000
+*   return to requester                                                 21450000
+*--------------------------------------------------------------         21460000
+                                                                        21470000
+FMTEXIT  DS    0H                                                       21480000
+         LM    R0,R14,AUXREGS     RESTORE MAINLINE REGS                 21490000
+         SR    R15,R15            NO RETURN CODE DEFINED                21500000
+         BR    R14                RETURN                                21510000
+         DROP  R4,R5              PLAN, AAP                             21520000
+                                                                        21530000
+         EJECT                                                          21540000
+***************************************************************         21550000
+*                                                                       21560000
+* ROUTINE: PREVIEW - Test plan suitability for source VDB req           21570000
+*                                                                       21580000
+* ON ENTRY:                                                             21590000
+*                                                                       21600000
+*    R0 - addr of AAP                                                   21610000
+*    R1 - addr of PLAN                                                  21620000
+*                                                                       21630000
+***************************************************************         21640000
+                                                                        21650000
+PREVIEW  DS    0H                                                       21660000
+         STM   R0,R15,REGSAVE     SAVE MAINLINE REGS                    21670000
+                                                                        21680000
+         LR    R5,R0              ACCEPT AAP                            21690000
+         USING AAP,R5                                                   21700000
+                                                                        21710000
+         LR    R4,R1              ACCEPT PLAN                           21720000
+         USING PLAN,R4                                                  21730000
+                                                                        21740000
+         LA    R15,RC00           ASSUME SUCCESS                        21750000
+                                                                        21760000
+         L     R2,TSTATES         NUMBER OF TERM STATES                 21770000
+         LH    R3,PLVISITS        NUMBER OF STATES VISITED              21780000
+         CR    R2,R3              ALL STATES COVERED?                   21790000
+         BNH   PREVEXIT           ONWARD IF SO                          21800000
+                                                                        21810000
+         $MSG  080,FIELDS=((R3),(R2))                                   21820000
+                                                                        21830000
+         LA    R15,RC04           WARNINGS ISSUED                       21840000
+                                                                        21850000
+PREVEXIT DS    0H                                                       21860000
+         LM    R0,R14,REGSAVE     RESTORE MAINLINE REGS                 21870000
+         LTR   R15,R15            COMPLETION STATUS                     21880000
+         BR    R14                RETURN                                21890000
+         DROP  R4,R5              PLAN, AAP                             21900000
+                                                                        21910000
+         EJECT                                                          21920000
+***************************************************************         21930000
+*                                                                       21940000
+* ROUTINE:  MSGFAIL - Construct generic "request failed" msg            21950000
+*                                                                       21960000
+***************************************************************         21970000
+                                                                        21980000
+MSGFAIL  DS    0H                                                       21990000
+         STM   R0,R14,MSGREGS     SAVE MAINLINE REGS                    22000000
+         L     R5,@CURRAAP        CURRENT AAP                           22010000
+         USING AAP,R5             MAPPED                                22020000
+                                                                        22030000
+         $MSG  001,COMPID='VSE',FIELDS=(AAPANAME,RETC),                X22040000
+               MF=(E,$MSGMFL2)                                          22050000
+                                                                        22060000
+*--------------------------------------------------------------         22070000
+*   attach associated messages contained in message buffer              22080000
+*--------------------------------------------------------------         22090000
+                                                                        22100000
+         LA    R3,MSGRET          LOCAL MESSAGE BUFFER                  22110000
+         USING $MSGBUF,R3                                               22120000
+         ICM   R3,15,$MSGQF       LOCATE FIRST MESSAGE                  22130000
+         BZ    MSG_FIN            END OF MESSAGES                       22140000
+         USING $MSBHDR,R3         ADDRESS MSG INSTANCES                 22150000
+                                                                        22160000
+MSGFNXT  DS    0H                                                       22170000
+         LH    R2,$MSBLEN         MESSAGE TEXT LENGTH                   22180000
+                                                                        22190000
+         $MSG  098,FIELDS=(($MSBTEXT,(R2))),MSGID=NO,                  X22200000
+               MF=(E,$MSGMFL2)                                          22210000
+                                                                        22220000
+         ICM   R3,15,$MSBLINK     MESSAGES REMAIN?                      22230000
+         BNZ   MSGFNXT            AGAIN IF SO                           22240000
+         DROP  R3                 $MSBHDR                               22250000
+                                                                        22260000
+MSG_FIN  DS    0H                                                       22270000
+         XC    MSGRET($MSBPFXL),MSGRET                                  22280000
+                                                                        22290000
+         LM    R0,R14,MSGREGS     RESTORE MAINLINE REGS                 22300000
+         BR    R14                RETURN                                22310000
+         DROP  R5                 AAP                                   22320000
+                                                                        22330000
+         EJECT                                                          22340000
+***************************************************************         22350000
+*                                                                       22360000
+* ROUTINE: $STNAME - Extract screen(set) name from STN                  22370000
+*                                                                       22380000
+* ON ENTRY:                                                             22390000
+*                                                                       22400000
+*    R15 - NVSTN pointer                                                22410000
+*    R1  - screen(set) name return area                                 22420000
+*                                                                       22430000
+***************************************************************         22440000
+                                                                        22450000
+$STNAME  DS    0H                                                       22460000
+         ST    R14,FWORD          PRESERVE RETURN ADDR                  22470000
+         USING NVSTN,R15          TEMPORARY MAPPING                     22480000
+                                                                        22490000
+         LA    R14,NVSTSSN        SCREEN SET NAME ASSIGNED?             22500000
+         TM    0(R14),BF                                                22510000
+         BNZ   *+8                                                      22520000
+         LA    R14,NVSTNAME       SELECT SCREEN NAME OTHERWISE          22530000
+         MVC   0(L'NVSTNAME,R1),0(R14)                                  22540000
+                                                                        22550000
+         L     R14,FWORD          RESTORE RETURN ADDR                   22560000
+         BR    R14                RETURN                                22570000
+         DROP  R15                NVSTN                                 22580000
+                                                                        22590000
+         EJECT                                                          22600000
+*************************************************************** R211219 22610000
+*                                                               R211219 22620000
+* ROUTINE: SETMEPB - PREPARE FOR RECEIPT OF MESSAGES            R211219 22630000
+*                                                               R211219 22640000
+*************************************************************** R211219 22650000
+                                                                        22660000
+SETMEPB  DS    0H                                                       22670000
+         ST    R14,FWORD          PRESERVE RETURN ADDRESS       R211219 22680000
+                                                                        22690000
+         L     R2,TSKPCBC         LOCATE OUR PCB                        22700000
+         LA    R2,PCBMEPB-IPCB(,R2)    MESSAGE EPB                      22710000
+                                                                        22720000
+         $TASK SETEPB,            INITIALIZE MESSAGE EPB               X22730000
+               EPB=(R2),          MESSAGE EPB                          X22740000
+               ECODE=EC$MSG,                                           X22750000
+               SCOPE=LOCAL,                                            X22760000
+               ERRET=ABN_TASK,    SERVICE ROUTINE FAILURE              X22770000
+               MF=(E,$TASKMFL)                                          22780000
+                                                                        22790000
+         L     R14,FWORD          RESTORE RETURN ADDRESS        R211219 22800000
+         BR    R14                                              R211219 22810000
+                                                                        22820000
+         EJECT                                                          22830000
+***************************************************************         22840000
+*                                                                       22850000
+* ROUTINE: RECOVRTN - INAVCNTL ABEND RECOVERY                           22860000
+*                                                                       22870000
+* DESCRIPTION:                                                          22880000
+*                                                                       22890000
+*    This process recovery routine establishes a recovery               22900000
+*    environment for INAVCNTL and all services invoked by               22910000
+*    INAVCNTL.  If a recoverable ABEND occurs, registers are            22920000
+*    restored to the intial INAVCNTL entry state and an error           22930000
+*    continuation point is selected.                                    22940000
+*                                                                       22950000
+***************************************************************         22960000
+                                                                        22970000
+RECOVRTN DS    0H                                                       22980000
+         PUSH  USING                                                    22990000
+         USING INAVCNTL,R12                                             23000000
+         STM   R2,R12,TSKERCVR+(R2*4)                                   23010000
+         ST    R1,TSKERCVR+(R13*4)                                      23020000
+         L     R15,=A(ERR_ABND)                                         23030000
+         BR    R14                                                      23040000
+         POP   USING                                                    23050000
+                                                                        23060000
+         EJECT                                                          23070000
+***************************************************************         23080000
+*                                                                       23090000
+*   Catastrophic errors                                                 23100000
+*                                                                       23110000
+***************************************************************         23120000
+                                                                        23130000
+ABN_VARP DS    0H                                                       23140000
+         $ABEND ABE_VARPOOL,DUMP=YES,PRINT=GEN,                        X23150000
+               TITLE='VARIABLE POOL MGMT FAILURE'                       23160000
+                                                                        23170000
+ABN_TASK DS    0H                                                       23180000
+         STM   R15,R1,STATREGS                                          23190000
+         $ABEND ABE_$TASK,*STATREGS+0,*STATREGS+8,DUMP=YES,            X23200000
+               TITLE='ERROR RETURNED FROM $TASK FUNCTION'               23210000
+                                                                        23220000
+         EJECT                                                          23230000
+***************************************************************         23240000
+*                                                                       23250000
+*   Local read-only storage, etc.                                       23260000
+*                                                                       23270000
+***************************************************************         23280000
+                                                                        23290000
+CSTRIMAG DC    CL8'IMAGE'         $ENTITY IMAGE QUALIFIER               23300000
+CSTRSSET DC    CL8'SSET'          $ENTITY SCREEN SET QUALIFIER          23310000
+                                                                        23320000
+$RUNPLAN DC    CL12'RUN',X'00'                                          23330000
+$REPOS   DC    CL12'REPOSITION',X'00'                                   23340000
+$TERM    DC    CL12'TERMINATION',X'00'                                  23350000
+$SLUDRV  DC    CL8'ISLUDRV'                                             23360000
+$UNKNOWN DC    CL8'UNKNOWN'                                             23370000
+                                                                        23380000
+         LTORG ,                                                        23390000
+                                                                        23400000
+EPLANMSG DS    0F                 RETCODES DELIVERED BY PLN* AND APL*   23410000
+         DC    A(0)                0 - UNUSED                           23420000
+         DC    A(071)              1 - REQUEST IN ERROR / UNSATISFIABLE 23430000
+         DC    A(072)              2 - STORAGE MANAGEMENT FAILURE       23440000
+         DC    A(073)              3 - CAPACITY EXCEEDED                23450000
+         DC    A(074)              4 - NAVIGATIONAL INFO INCOMPLETE     23460000
+         DC    A(069)              5 - CIRCULAR, MULTI-APP LINKAGE      23470000
+         DC    A(076)              6 - UNABLE TO START AT NAMED STATE   23480000
+         DC    A(077)              7 - NONINPUT TERM STATE NOT FOUND    23490000
+         DC    A(078)              8 - NO RUN PLAN GENERATED            23500000
+         DC    A(081)              9 - SCALAR VARS FOLLOW REPEATERS     23510000
+         DC    A(082)             10 - MULTIPLE REPEATING VARS IN PATH  23520000
+                                                                        23530000
+         EJECT ,                                                        23540000
+         PRINT NOGEN                                                    23550000
+         ICVT  ,                                                        23560000
+         ITASK ,                                                        23570000
+         IPCB  ,                                                        23580000
+         IVTAMCVT ,                                                     23590000
+         ISTDBIND ,                                                     23600000
+         ISESS ,                                                        23610000
+         END   ,                                                        23620000

@@ -1,0 +1,785 @@
+IMSGMON TITLE 'IMSGMON - $MSGMON MESSAGE MONITOR REQUESTS'              00010000
+**<DOC-ON>*****************************************************         00020000
+*                                                                       00030000
+* ROUTINE: IMSGMON - $MSGMON Message ($MSG) monitor requests            00040000
+*                                                                       00050000
+* DESCRIPTION:                                                          00060000
+*                                                                       00070000
+*    This routine implements the services defined by the                00080000
+*    $MSGMON API.  It allows a process to establish $MSG                00090000
+*    monitoring for the current ITASK, or for a named ITASK             00100000
+*    referred to as a foreign ITASK in the commentary below,            00110000
+*    or for all ITASKs.                                                 00120000
+*                                                                       00130000
+*    Monitoring can be activated for messages by destination,           00140000
+*    class, or both.  When ADD requests omit both class and             00150000
+*    destination masks, all destinations and classes are                00160000
+*    selected and cause monitoring of all messages issued by            00170000
+*    the designated ITASK(s).  When DEL requests omit both              00180000
+*    class and destination masks, the entry for the designated          00190000
+*    ITASK(s) is deleted.  When either destination and/or class         00200000
+*    masks are provided, they are used to update an existing            00210000
+*    entry, or to create a new entry (ADD,REP).                         00220000
+*                                                                       00230000
+*    The RESET service is provided primarily for use in $RESMGR         00240000
+*    routines and allows all monitoring entries created on              00250000
+*    behalf of a workunit to be deleted in a single request.            00260000
+*                                                                       00270000
+* METHOD:                                                               00280000
+*                                                                       00290000
+*    A $MONMSG block is used to link a monitored ITASK to its           00300000
+*    monitoring workunit (a process).  Local and global $MONMSG         00310000
+*    queues (linked lists) are maintained in the requesters             00320000
+*    ITASK and in the ICVT, respectively.  The local queue              00330000
+*    anchored in TSKMNMSG contains entries for all $MSG monitoring      00340000
+*    established by processes under a particular ITASK.  The            00350000
+*    ICTMNMSG queue contains entries that link monitored ITASKs         00360000
+*    to their monitoring ITASKS.  Refer to the $MONMSG macro            00370000
+*    prolog for details.                                                00380000
+*                                                                       00390000
+*    For all services (ADD, REP, DEL, and RESET), changes are           00400000
+*    posted first to the local queue and are then reflected in          00410000
+*    the global queue if the request designates a foreign ITASK         00420000
+*    or all ITASKs.                                                     00430000
+*                                                                       00440000
+*    When a process first establishes monitoring events for a           00450000
+*    foreign ITASK, a $RESMGR routine is established to ensure          00460000
+*    that all of its events are deleted when the process                00470000
+*    terminates.  The $RESMGR entry is never deleted and remains        00480000
+*    in affect for the life of the process.                             00490000
+*                                                                       00500000
+*                                                                       00510000
+* ON ENTRY:                                                             00520000
+*                                                                       00530000
+*    R1  contains the address of a parameter list described by          00540000
+*        the MMREQP mapping expanded by $MSGMON DSECT=YES               00550000
+*                                                                       00560000
+* ON EXIT:                                                              00570000
+*                                                                       00580000
+*    R15 contains one of the following return codes                     00590000
+*                                                                       00600000
+*        RC00 - request complete                                        00610000
+*                                                                       00620000
+*        RC04 - DEL request, but the designated ITASK entry             00630000
+*               was not found                                           00640000
+*                                                                       00650000
+*        RC08 - Global scope request but AUTH=NO specified              00660000
+*                                                                       00670000
+**<DOC-OFF>****************************************************         00680000
+                                                                        00690000
+         EJECT                                                          00700000
+***************************************************************         00710000
+*                                                                       00720000
+* MAINTENANCE:                                                          00730000
+*                                                                       00740000
+*    08/16/94 R. Turgeon                                                00750000
+*             Initial version                                           00760000
+*                                                                       00770000
+***************************************************************         00780000
+                                                                        00790000
+         EJECT                                                          00800000
+         #WORK ,             BEGIN WORKAREA                             00810000
+                                                                        00820000
+REQFLAGS DS    X             REQUEST FLAGS                              00830000
+REQ_LCL  EQU   X'80'            LOCAL SCOPE                             00840000
+REQ_GBL  EQU   X'40'            GLOBAL SCOPE                            00850000
+REQ_ALL  EQU   X'20'            ALL-TASKS REFERENCE                     00860000
+                                                                        00870000
+CNTLFLGS DS    X             CONTROL FLAGS                              00880000
+CNTLDISP EQU   X'80'            DISP LOCK OWNED                         00890000
+CNTLDREL EQU   X'40'            DISP LOCK RELEASE REQUIRED              00900000
+CNTLNDST EQU   X'08'            DEST MASK IS NULL                       00910000
+CNTLNCLS EQU   X'04'            CLASS MASK IS NULL                      00920000
+                                                                        00930000
+BYTE     DS    X             ONE BYTE WORKAREA                          00940000
+RSV1     DS    X             RESERVED                                   00950000
+                                                                        00960000
+TASKNAME DS    CL8           MONITORED TASK NAME                        00970000
+                                                                        00980000
+LPTRPREV DS    A             LOCAL  'PREVIOUS' $MONMSG ENTRY PTR        00990000
+LPTRCURR DS    A             LOCAL  'CURRENT'  $MONMSG ENTRY PTR        01000000
+GPTRPREV DS    A             GLOBAL 'PREVIOUS' $MONMSG ENTRY PTR        01010000
+GPTRCURR DS    A             GLOBAL 'CURRENT'  $MONMSG ENTRY PTR        01020000
+                                                                        01030000
+INDEST   DS    XL(L'$MMIDEST)   DESTINATION MASK PROVIDED ON INPUT      01040000
+INCLASS  DS    XL(L'$MMICLSM)   CLASS MASK INPUT IN STANDARD ALPHA FORM 01050000
+                                                                        01060000
+DESTMASK DS    XL(L'$MMIDEST)   DESTINATION MASK CONSTRUCTION AREA      01070000
+CLASMASK DS    CL(L'$MMICLSM)   CLASS MASK CONSTRUCTION AREA            01080000
+                                                                        01090000
+$RESMFL  $RESMGR MF=L        $RESMGR REQUEST PLIST                      01100000
+                                                                        01110000
+RETREGS  DS    3F            STATUS RETURN REGS R15-R1                  01120000
+REGSAVE  DS    16F           LOCAL SUBROUTINE SAVEAREA                  01130000
+                                                                        01140000
+         #ENDWORK ,          END WORKAREA                               01150000
+                                                                        01160000
+         EJECT                                                          01170000
+         $MSGMON DSECT=YES   REQUEST BLOCK                              01180000
+                                                                        01190000
+         EJECT                                                          01200000
+         $MONMSG ,           GLOBAL/LOCAL MESSAGE MONITOR QUEUE ENTRY   01210000
+                                                                        01220000
+         EJECT                                                          01230000
+         $RESMGR DSECT=YES   RESOURCE MANAGER PLIST FORMAT              01240000
+                                                                        01250000
+         EJECT                                                          01260000
+         EQUS  ,                                                        01270000
+                                                                        01280000
+         EJECT                                                          01290000
+IMSGMON  #ENTER PREG=R8                                                 01300000
+                                                                        01310000
+         USING ITASK,R10          STDENV                                01320000
+         L     R9,TSKPCBC         PROCESS MODE                          01330000
+         USING IPCB,R9                                                  01340000
+                                                                        01350000
+         EJECT                                                          01360000
+***************************************************************         01370000
+*                                                                       01380000
+*   FETCH PARAMETERS - DETERMINE SCOPE OF REQUEST                       01390000
+*                                                                       01400000
+***************************************************************         01410000
+         USING MMREQP,R8          REQUEST BLOCK                         01420000
+                                                                        01430000
+         ICM   R2,15,MMRSCOPE     MONITORED ITASK NAME                  01440000
+         BNZ   FPTASK             SPECIFIC TASK IDENTIFIED              01450000
+         OI    REQFLAGS,REQ_GBL+REQ_ALL                                 01460000
+         B     FPFIN                                                    01470000
+                                                                        01480000
+FPTASK   DS    0H                                                       01490000
+         MVI   BYTE,REQ_LCL       ASSUME LOCAL SCOPE                    01500000
+         MVC   TASKNAME,0(R2)     LOCAL COPY OF TASK NAME               01510000
+         CLC   TASKNAME,TSKNAME   REFERENCE TO CURRENT TASK?            01520000
+         BE    *+8                SKIP IF SO                            01530000
+         MVI   BYTE,REQ_GBL       GLOBAL SCOPE                          01540000
+         OC    REQFLAGS,BYTE      POST SCOPE FLAG                       01550000
+                                                                        01560000
+FPFIN    DS    0H                                                       01570000
+         L     R4,MMRFUNC         FETCH FUNCTION CODE                   01580000
+         C     R4,=A(MMRFUNC_RESET)                                     01590000
+         BE    RESET              RESET FUNCTION PROCESSED UNIQUELY     01600000
+                                                                        01610000
+*--------------------------------------------------------------         01620000
+*   LOCATE INSERTION/DELETION POSITION IN LOCAL $MONMSG QUEUE           01630000
+*--------------------------------------------------------------         01640000
+         LA    R0,TASKNAME        R0  <== TARGET ITASK NAME OR NULLS    01650000
+         LA    R1,TSKMNMSG        R1  <== LOCAL MONMSG QUEUE ANCHOR     01660000
+         LA    R15,IPCB           R15 <== PROCESS IS OWNER IN LOCAL Q   01670000
+         BAS   R14,LOCIDP         LOCATE INSERTION/DELETION POINT       01680000
+         ST    R0,LPTRPREV        PREDECESSOR IN LINKED LIST            01690000
+         ST    R1,LPTRCURR        ENTRY CORRESPONDING TO ITASK          01700000
+                                                                        01710000
+*--------------------------------------------------------------         01720000
+*   VALIDATE REQUESTER AUTHORIZATION FOR GLOBAL REQUESTS                01730000
+*--------------------------------------------------------------         01740000
+         TM    REQFLAGS,REQ_GBL   REQUEST HAS GLOBAL SCOPE?             01750000
+         BNO   FUNCANAL           DONE HERE IF NOT                      01760000
+                                                                        01770000
+         LA    R15,RC08           ASSUME REQUESTER NOT AUTHORIZED       01780000
+         ICM   R0,15,MMRAUTH      REQUESTER AUTHORIZED FOR GLOBAL REQS? 01790000
+         BZ    RETURN             ERROR IF NOT                          01800000
+                                                                        01810000
+*--------------------------------------------------------------         01820000
+*   LOCATE INSERTION/DELETION POSITION IN GLOBAL $MONMSG QUEUE          01830000
+*--------------------------------------------------------------         01840000
+         BAS   R14,DISPLOCK       ACQUIRE DISP LOCK                     01850000
+                                                                        01860000
+         LA    R0,TASKNAME        R0  <== TARGET ITASK NAME OR NULLS    01870000
+         LA    R1,ICTMNMSG        R1  <== GLOBAL MONMSG QUEUE ANCHOR    01880000
+         LA    R15,ITASK          R15 <== ITASK IS OWNER IN GLOBAL Q    01890000
+         BAS   R14,LOCIDP         LOCATE INSERTION/DELETION POINT       01900000
+         ST    R0,GPTRPREV        PREDECESSOR IN LINKED LIST            01910000
+         ST    R1,GPTRCURR        ENTRY CORRESPONDING TO ITASK          01920000
+                                                                        01930000
+*--------------------------------------------------------------         01940000
+*   CONVERT INPUT DEST/CLASS MASKS TO INTERNAL FORMAT                   01950000
+*--------------------------------------------------------------         01960000
+FUNCANAL DS    0H                                                       01970000
+         ICM   R1,15,MMRDEST      DESTINATION MASKS                     01980000
+         BZ    EDEST              NOT PROVIDED                          01990000
+         ST    R1,INDEST          PRESUME CODED AS BIT FLAGS            02000000
+         LA    R1,0(,R1)          CLEAR FLAG BIT                        02010000
+         C     R1,=A(256)         ADDRESS OR MASK?                      02020000
+         BNH   EDEST              MASK                                  02030000
+         SR    R0,R0              PREPARE FOR INSERT                    02040000
+         IC    R0,0(,R1)          FETCH MASK                            02050000
+         ST    R0,INDEST          SAVE MASK                             02060000
+EDEST    DS    0H                                                       02070000
+                                                                        02080000
+         ICM   R1,15,MMRCLASS     CLASS MASK PTR                        02090000
+         BZ    ECLASS             NOT PROVIDED                          02100000
+         MVC   INCLASS,0(R1)      RETAIN TRUTH VALUED MASK              02110000
+         TR    INCLASS,HIVALTAB   CONVERT TRUE TO FF                    02120000
+         NC    INCLASS,CLASSTAB   THEN TO EBCDIC ALPHA REPRESENTATION   02130000
+ECLASS   DS    0H                                                       02140000
+                                                                        02150000
+*--------------------------------------------------------------         02160000
+*   DETERMINE REQUESTED FUNCTION AND PROCEED                            02170000
+*--------------------------------------------------------------         02180000
+         L     R4,MMRFUNC         FETCH FUNCTION CODE                   02190000
+         B     *+4(R4)            DETERMINE FUNCTION CODE               02200000
+         B     ADDREP                ADD ENTRY                          02210000
+         B     ADDREP                REPLACE ENTRY                      02220000
+         B     DELETE                DELETE ENTRY                       02230000
+                                                                        02240000
+*--------------------------------------------------------------         02250000
+*   DESTINATION MASK AND CLASS MASK CONVERSION AREAS                    02260000
+*--------------------------------------------------------------         02270000
+HIVALTAB DC    0F'0',X'00',255X'FF'                                     02280000
+                                                                        02290000
+CLASSTAB DC    0F'0',XL(L'INCLASS)'00'                                  02300000
+         ORG   CLASSTAB+C'A'-C'A'                                       02310000
+         DC    C'ABCDEFGHI'                                             02320000
+         ORG   CLASSTAB+C'J'-C'A'                                       02330000
+         DC    C'JKLMNOPQR'                                             02340000
+         ORG   CLASSTAB+C'S'-C'A'                                       02350000
+         DC    C'STUVWXYZ'                                              02360000
+         ORG   ,                                                        02370000
+                                                                        02380000
+         EJECT                                                          02390000
+**<DOC-ON>*****************************************************         02400000
+*                                                                       02410000
+*   ADD and REPLACE functions                                           02420000
+*                                                                       02430000
+*   Add or update the destinations and classes in an active             02440000
+*   monitoring configuration.  If the dest and class masks are          02450000
+*   null, an existing entry becomes inactive and is deleted.            02460000
+*   Otherwise, if no $MONMSG exists for the monitored-ITASK /           02470000
+*   monitoring-process pair, a new entry is created and queued.         02480000
+*   The change is then propogated to the global queue if                02490000
+*   applicable.                                                         02500000
+*                                                                       02510000
+**<DOC-OFF>****************************************************         02520000
+                                                                        02530000
+ADDREP   DS    0H                                                       02540000
+         OC    DESTMASK,INDEST    ACCEPT DESTINATIONS                   02550000
+         BNZ   *+8                NONE PROVIDED                         02560000
+         OI    CNTLFLGS,CNTLNDST  NO DESTS PROVIDED                     02570000
+                                                                        02580000
+         OC    CLASMASK,INCLASS   ACCEPT CLASSES                        02590000
+         BNZ   *+8                NONE PROVIDED                         02600000
+         OI    CNTLFLGS,CNTLNCLS  NO DESTS PROVIDED                     02610000
+                                                                        02620000
+*-------------------------------------------------------------          02630000
+*   ADD REQUESTS WITH NULL DEST AND CLASS LISTS ARE CONVERTED           02640000
+*   TO REQUESTS FOR ALL DESTINATIONS AND CLASSES.  UPDATE               02650000
+*   REQUESTS WITH NULL LISTS CAUSE DELETION OF THE INACTIVATED          02660000
+*   ENTRY                                                               02670000
+*-------------------------------------------------------------          02680000
+         TM    CNTLFLGS,CNTLNDST+CNTLNCLS                               02690000
+         BNO   ADDREPGO           SOME DEST OR CLASS VALUES PROVIDED    02700000
+         CLC   MMRFUNC,=A(MMRFUNC_REP)                                  02710000
+         BE    ADDRDEL            NO WORK                               02720000
+                                                                        02730000
+         MVC   CLASMASK,CLASSTAB  ALL CLASSES SELECTED BY DEFAULT       02740000
+         MVI   DESTMASK+3,FF      ALL DESTINATIONS SELECTED BY DEFAULT  02750000
+         B     ADDREPGO           REJOIN COMMON ADD/REP ENTRY UPDATES   02760000
+                                                                        02770000
+*--------------------------------------------------------------         02780000
+*   DELETE $MONMSG ENTRY WHEN MASKS REPLACED BY NULLS                   02790000
+*--------------------------------------------------------------         02800000
+ADDRDEL  DS    0H                                                       02810000
+         L     R6,LPTRPREV        LOCATE PREDECESSOR ENTRY              02820000
+P        USING $MONMSG,R6         STANDARD PREV ADDRESSABILITY          02830000
+         ICM   R7,15,LPTRCURR     MODIFIED ENTRY                        02840000
+         BZ    ADDREPX            NO WORK OTHERWISE                     02850000
+C        USING $MONMSG,R7         STANDARD CURR ADDRESSABILITY          02860000
+         MVC   P.$MMNEXT,C.$MMNEXT   DECHAIN                            02870000
+                                                                        02880000
+         $RETSTOR (R7),OWNER=ITASK   DELETE ENTRY                       02890000
+                                                                        02900000
+         B     ADDRGBL            PROPOGATE UPDATES TO GLOBAL QUEUE     02910000
+                                                                        02920000
+*--------------------------------------------------------------         02930000
+*   UPDATE PREVIOUSLY ESTABLISHED $MONMSG ENTRY                         02940000
+*--------------------------------------------------------------         02950000
+ADDREPGO DS    0H                                                       02960000
+C        USING $MONMSG,R7         STANDARD ADDRESSABILITY               02970000
+         ICM   R7,15,LPTRCURR     MONITORING ACTIVE?                    02980000
+         BZ    ADDREPNW           BUILD NEW ENTRY IF NOT                02990000
+                                                                        03000000
+         CLC   MMRFUNC,=A(MMRFUNC_REP)   IDENTIFY REPLACE OR ADD        03010000
+         BE    ADDREPUP           CLASS AND DEST MASK REPLACED IF REP   03020000
+         OC    DESTMASK,C.$MMIDEST                                      03030000
+         OC    CLASMASK,C.$MMICLSM                                      03040000
+         B     ADDREPUP                                                 03050000
+                                                                        03060000
+*--------------------------------------------------------------         03070000
+*   CREATE AND ENQUEUE A NEW $MONMSG ENTRY ON THE LOCAL QUEUE           03080000
+*--------------------------------------------------------------         03090000
+ADDREPNW DS    0H                 BUILD LOCAL QUEUE ENTRY               03100000
+         ICM   R0,15,PCBMNRMX     MONITOR CLEANUP PREV ESTABLISHED?     03110000
+         BNZ   ADDRISRT           LIFE OF PROCESS                       03120000
+                                                                        03130000
+         $RESMGR ADD,                                                  X03140000
+               TOKEN=PCBMNRMX,    SAVE TOKEN IN WORKAREA               X03150000
+               OWNER=IPCB,        ASSOCIATE WITH MONITORING WORKUNIT   X03160000
+               ROUTINE=*#RMXMMON, RESOURCE RELEASE ON FAILURE          X03170000
+               MF=(E,$RESMFL)     PLIST CONSTRUCTION AREA               03180000
+                                                                        03190000
+         BZ    *+8                ASSERT SUCCESSFUL COMPLETION          03200000
+         EX    R0,*               DENIED                                03210000
+                                                                        03220000
+ADDRISRT DS    0H                                                       03230000
+         $GETSTOR $MONMSGL,OWNER=ITASK                                  03240000
+                                                                        03250000
+W        USING $MONMSG,R1              $MONMSG CONSTRUCTION AREA        03260000
+         MVC   W.$MMID,=CL8'MONLOCAL'  CONTROL BLOCK IDENTIFIER         03270000
+         MVC   W.$MMITSK,TASKNAME      MONITORED TASK                   03280000
+         MVC   W.$MMOWU,PCBNAME        MONITORING PROCESS NAME          03290000
+         MVC   W.$MMOWUA,TSKPCBC       MONITORING PROCESS IPCB ADDRESS  03300000
+                                                                        03310000
+P        USING $MONMSG,R6         CHAIN FROM PREDECESSOR ENTRY          03320000
+         L     R6,LPTRPREV        PREDECESSOR ENTRY ADDRESS             03330000
+         MVC   W.$MMNEXT,P.$MMNEXT                                      03340000
+         LA    R7,W.$MONMSG       NEW ENTRY IS CURRENT ENTRY            03350000
+         ST    R7,P.$MMNEXT                                             03360000
+         DROP  W                  $MONMSG CONSTRUCTION AREA             03370000
+                                                                        03380000
+*--------------------------------------------------------------         03390000
+*   POST DESTINATION AND CLASS MASK UPDATES                             03400000
+*--------------------------------------------------------------         03410000
+ADDREPUP DS    0H                                                       03420000
+         MVC   C.$MMIDEST,DESTMASK   UPDATE DESTINATION MASK            03430000
+         MVC   C.$MMICLSM,CLASMASK   UPDATE CLASS MASK                  03440000
+                                                                        03450000
+*--------------------------------------------------------------         03460000
+*   PROPOGATE UPDATES TO GLOBAL QUEUE                                   03470000
+*--------------------------------------------------------------         03480000
+ADDRGBL  DS    0H                                                       03490000
+         TM    REQFLAGS,REQ_GBL   GLOBAL REQUEST                        03500000
+         BNO   *+8                SKIP IF NOT                           03510000
+         BAS   R14,GBLPOST        REFLECT UPDATES IN GLOBAL QUEUE       03520000
+                                                                        03530000
+*--------------------------------------------------------------         03540000
+*   ADD / REPLACE COMPLETE                                              03550000
+*--------------------------------------------------------------         03560000
+ADDREPX  DS    0H                                                       03570000
+         LA    R15,RC00           REQUEST COMPLETE                      03580000
+         SR    R0,R0              REASON CODE NOT DEFINED               03590000
+         B     RETURN             DONE                                  03600000
+         DROP  P,C                $MONMSG PREV, CURR ENTRIES            03610000
+                                                                        03620000
+         EJECT                                                          03630000
+**<DOC-ON>*****************************************************         03640000
+*                                                                       03650000
+*   DELETE function                                                     03660000
+*                                                                       03670000
+*   Remove $MSG destinations and/or classes from an active              03680000
+*   monitoring configuration.  If neither dest nor class masks          03690000
+*   are provided, monitoring for the designated ITASK ends.             03700000
+*   The deletion is made from the local queue and the                   03710000
+*   propogated to the global queue if applicable.                       03720000
+*                                                                       03730000
+**<DOC-OFF>****************************************************         03740000
+                                                                        03750000
+DELETE   DS    0H                                                       03760000
+         LA    R15,RC04           ASSUME ENTRY NOT FOUND                03770000
+         ICM   R0,15,LPTRCURR     LOCAL ENTRY EXISTS (RSNCODE = 0)?     03780000
+         BZ    DELFIN             NO WORK IF NOT                        03790000
+         LR    R7,R0              STANDARD CURR ENTRY ADDRESSABILITY    03800000
+C        USING $MONMSG,R7                                               03810000
+                                                                        03820000
+         L     R0,MMRDEST         DESTINATION MASK                      03830000
+         O     R0,MMRCLASS        SMUSH TOGETHER WITH CLASS MASK PTR    03840000
+         BZ    DELENTRY           DELETION OF ENTIRE ENTRY REQUESTED    03850000
+                                                                        03860000
+*--------------------------------------------------------------         03870000
+*   UPDATE CLASS AND DESTINATION MASKS PER REQUEST                      03880000
+*--------------------------------------------------------------         03890000
+         MVC   CLASMASK,CLASSTAB  ALL CLASSES RETAINED BY DEFAULT       03900000
+         MVI   DESTMASK+3,FF      ALL DESTINATIONS RETAINED BY DEFAULT  03910000
+         XC    DESTMASK,INDEST    REMOVE UNWANTED DESTINATIONS          03920000
+         XC    CLASMASK,INCLASS   REMOVE UNWANTED CLASSES               03930000
+                                                                        03940000
+         NC    C.$MMIDEST,DESTMASK   POST DEST MASK UPDATES             03950000
+         BNZ   *+8                SOME DESTS REMAIN                     03960000
+         OI    CNTLFLGS,CNTLNDST  NO DESTS REMAIN                       03970000
+                                                                        03980000
+         NC    C.$MMICLSM,CLASMASK   POST CLASS MASK UPDATES            03990000
+         BNZ   *+8                SOME CLASSES REMAIN                   04000000
+         OI    CNTLFLGS,CNTLNCLS  NO CLASSES REMAIN                     04010000
+                                                                        04020000
+         TM    CNTLFLGS,CNTLNDST+CNTLNCLS  MONITORING ACTIVE FOR ITASK? 04030000
+         BNO   DELGPOST           SKIP IF SO                            04040000
+                                                                        04050000
+*--------------------------------------------------------------         04060000
+*   DELETE INACTIVE $MONMSG ENTRY                                       04070000
+*--------------------------------------------------------------         04080000
+DELENTRY DS    0H                                                       04090000
+         L     R6,LPTRPREV        ELSE LOCATE PREDECESSOR ENTRY         04100000
+P        USING $MONMSG,R6         STANDARD ADDRESSABILITY               04110000
+         MVC   P.$MMNEXT,C.$MMNEXT   DECHAIN                            04120000
+                                                                        04130000
+         $RETSTOR (R7),OWNER=ITASK   DELETE IT                          04140000
+                                                                        04150000
+*--------------------------------------------------------------         04160000
+*   REFLECT CHANGES IN THE GLOBAL QUEUE IF APPLICABLE                   04170000
+*--------------------------------------------------------------         04180000
+DELGPOST DS    0H                                                       04190000
+         TM    REQFLAGS,REQ_GBL   GLOBAL REQUEST                        04200000
+         BNO   *+8                SKIP IF NOT                           04210000
+         BAS   R14,GBLPOST        REFLECT UPDATES IN GLOBAL QUEUE       04220000
+         LA    R15,RC00           REQUEST COMPLETE                      04230000
+                                                                        04240000
+*--------------------------------------------------------------         04250000
+*   POST COMPLETION STATUS AND EXIT                                     04260000
+*--------------------------------------------------------------         04270000
+DELFIN   DS    0H                                                       04280000
+         SR    R0,R0              REASON CODE NOT DEFINED               04290000
+         B     RETURN             DONE                                  04300000
+         DROP  P,C                $MONMSG PREV, CURR ENTRIES            04310000
+                                                                        04320000
+         EJECT                                                          04330000
+**<DOC-ON>*****************************************************         04340000
+*                                                                       04350000
+*   RESET function                                                      04360000
+*                                                                       04370000
+*   All local queue $MONMSGs associated with the current                04380000
+*   workunit (ITASK or process) are deleted and the global              04390000
+*   queue is updated accordingly.  If the requester is not              04400000
+*   running in process mode, all local queue $MONMSGs are               04410000
+*   removed and, consequently, the global queue will be purged          04420000
+*   of all monitors designating the requesting ITASK.                   04430000
+*                                                                       04440000
+**<DOC-OFF>****************************************************         04450000
+                                                                        04460000
+RESET    DS    0H                                                       04470000
+         LA    R6,TSKMNMSG-($MMNEXT-$MONMSG)                            04480000
+P        USING $MONMSG,R6         STANDARD PREV ADDRESSABILITY          04490000
+                                                                        04500000
+*--------------------------------------------------------------         04510000
+*   LOCATE NEXT LOCAL $MONMSG FOR THE CURRENT WORKUNIT                  04520000
+*--------------------------------------------------------------         04530000
+RESLNEXT DS    0H                                                       04540000
+         ICM   R7,15,P.$MMNEXT    LOCATE NEXT CANDIDATE $MONMSG         04550000
+         BZ    RESFIN             NO LOCAL QUEUE                        04560000
+C        USING $MONMSG,R7         STANDARD CURR ADDRESSABILITY          04570000
+                                                                        04580000
+         ICM   R0,15,TSKPCBC      PROCESS MODE?                         04590000
+         BZ    RESLDEL            DELETE ENTIRE LOCAL QUEUE IF NOT      04600000
+         C     R0,C.$MMOWUA       MONITOR ENTRY FOR RESETTING IPCB?     04610000
+         BE    RESLDEL            DELETE IT IF SO                       04620000
+         LR    R6,R7              CONTINUE SCAN OF LOCAL QUEUE          04630000
+         B     RESLNEXT                                                 04640000
+                                                                        04650000
+*--------------------------------------------------------------         04660000
+*   DELETE ENTRY FOR CURR WORKUNIT AND REFLECT IN GLOBAL QUEUE          04670000
+*--------------------------------------------------------------         04680000
+RESLDEL  DS    0H                 DELETE MONITOR ASSOCIATED WITH WU     04690000
+         MVC   P.$MMNEXT,C.$MMNEXT   DECHAIN DELETED ENTRY              04700000
+         MVC   TASKNAME,C.$MMITSK    RETAIN MONITORED ITASK NAME        04710000
+                                                                        04720000
+         $RETSTOR (R7),OWNER=ITASK   RELEASE LOCAL $MONMSG ENTRY        04730000
+                                                                        04740000
+         CLC   TASKNAME,TSKNAME   MONITORNING A FOREIGN ITASK?          04750000
+         BE    RESLNEXT           AGAIN, DONE HERE IF NOT               04760000
+                                                                        04770000
+*--------------------------------------------------------------         04780000
+*   LOCATE INSERTION/DELETION POSITION IN GLOBAL $MONMSG QUEUE          04790000
+*--------------------------------------------------------------         04800000
+         BAS   R14,DISPLOCK       ACQUIRE DISP LOCK                     04810000
+                                                                        04820000
+         LA    R0,TASKNAME        R0  <== TARGET ITASK NAME OR NULLS    04830000
+         LA    R1,ICTMNMSG        R1  <== GLOBAL MONMSG QUEUE ANCHOR    04840000
+         LA    R15,ITASK          R15 <== ITASK IS OWNER IN GLOBAL Q    04850000
+         BAS   R14,LOCIDP         LOCATE INSERTION/DELETION POINT       04860000
+         ST    R0,GPTRPREV        PREDECESSOR IN LINKED LIST            04870000
+         ST    R1,GPTRCURR        ENTRY CORRESPONDING TO ITASK          04880000
+                                                                        04890000
+         BAS   R14,GBLPOST        REFLECT UPDATES IN GLOBAL QUEUE       04900000
+         B     RESLNEXT           CONTINUE SCAN                         04910000
+                                                                        04920000
+*--------------------------------------------------------------         04930000
+*   POST COMPLETION STATUS AND EXIT                                     04940000
+*--------------------------------------------------------------         04950000
+RESFIN   DS    0H                                                       04960000
+         LA    R15,RC00           REQUEST COMPLETE                      04970000
+         SR    R0,R0              REASON CODE NOT DEFINED               04980000
+         B     RETURN             DONE                                  04990000
+         DROP  P,C                $MONMSG PREV, CURR ENTRIES            05000000
+                                                                        05010000
+         EJECT                                                          05020000
+***************************************************************         05030000
+*                                                                       05040000
+*   RETURN COMPLETION STATUS TO CALLER                                  05050000
+*                                                                       05060000
+***************************************************************         05070000
+RETURN   DS    0H                                                       05080000
+         STM   R15,R1,RETREGS     PRESERVE RETURN REGS                  05090000
+                                                                        05100000
+         BAS   R14,DISPUNLK       RELEASE LOCK                          05110000
+                                                                        05120000
+         LM    R15,R1,RETREGS     RESTORE  RETURN REGS                  05130000
+                                                                        05140000
+         #EXIT ,                                                        05150000
+                                                                        05160000
+         EJECT                                                          05170000
+**<DOC-ON>*****************************************************         05180000
+*                                                                       05190000
+* ROUTINE: GBLPOST - Post local queue summary to global queue           05200000
+*                                                                       05210000
+* DESCRIPTION:                                                          05220000
+*                                                                       05230000
+*    The caller has determined that updates made to the local           05240000
+*    $MONMSG queue must be reflected in the global queue.  The          05250000
+*    global queue is assumed to contain a single $MONMSG entry          05260000
+*    relating a monitored foreign ITASK to the current monitoring       05270000
+*    ITASK.                                                             05280000
+*                                                                       05290000
+*    The local queue is run constructing composite destination          05300000
+*    and class masks summarizing every process-level monitor            05310000
+*    of the designated ITASK.  If the composite masks are both          05320000
+*    null, the global queue entry is deleted.  Otherwise, it is         05330000
+*    added/updated to reflect the events monitored by any process       05340000
+*    running under the current, monitoring ITASK.                       05350000
+*                                                                       05360000
+*                                                                       05370000
+* ON ENTRY:                                                             05380000
+*                                                                       05390000
+*    TASKNAME contains the name of the monitored ITASK                  05400000
+*                                                                       05410000
+*    GPTRPREV - global queue entry prev ptr                             05420000
+*    GPTRCURR - global queue entry curr ptr or zero                     05430000
+*                                                                       05440000
+**<DOC-OFF>****************************************************         05450000
+                                                                        05460000
+GBLPOST  DS    0H                                                       05470000
+         STM   R0,R15,REGSAVE     PRESERVE RETURN ADDRESS               05480000
+                                                                        05490000
+         XC    DESTMASK,DESTMASK  CLEAR DESTINATION MASK                05500000
+         XC    CLASMASK,CLASMASK  CLEAR CLASS MASK                      05510000
+         MVI   BYTE,0             CLASS / DEST SPEC FLAGS               05520000
+                                                                        05530000
+         NI    TSKMNFLG,FF-TSKMN_WATCHING   STATUS TO BE DETERMINED     05540000
+                                                                        05550000
+*--------------------------------------------------------------         05560000
+*   SUMMARIZE REQUIREMENTS FOR DESIGNATED (ITASK) WORKUNIT              05570000
+*--------------------------------------------------------------         05580000
+         ICM   R7,15,TSKMNMSG     LOCAL $MONMSG QUEUE                   05590000
+         BZ    GBLSTAT            QUEUE HAS BEEN CLEARED                05600000
+C        USING $MONMSG,R7         STANDARD ADDRESSABILITY               05610000
+                                                                        05620000
+GBLNEXT  DS    0H                                                       05630000
+         CLC   TASKNAME,C.$MMITSK ENTRY FOR DESIGNATED ITASK?           05640000
+         BNE   GBLADV             SKIP IF NOT, OTHERWISE ACCUMULATE     05650000
+         OC    DESTMASK,C.$MMIDEST                                      05660000
+         OC    CLASMASK,C.$MMICLSM                                      05670000
+                                                                        05680000
+GBLADV   DS    0H                 SCAN ENTIRE LOCAL QUEUE               05690000
+         CLC   TSKNAME,C.$MMITSK  ENTRY FOR FOREIGN ITASK?              05700000
+         BE    *+8                SKIP IF ITS OUR OWN ITASK             05710000
+         OI    TSKMNFLG,TSKMN_WATCHING   NOTE MONITORING FOREIGN ITASKS 05720000
+         ICM   R7,15,C.$MMNEXT    ADVANCE TO NEXT ENTRY                 05730000
+         BNZ   GBLNEXT            CONTINUE                              05740000
+                                                                        05750000
+*--------------------------------------------------------------         05760000
+*   REMOVE GLOBAL QUEUE ENTRY IF MONITORING DEACTIVATED                 05770000
+*--------------------------------------------------------------         05780000
+GBLSTAT  DS    0H                                                       05790000
+         OC    DESTMASK,DESTMASK  DESTINATIONS REMAIN?                  05800000
+         BNZ   *+8                SKIP IF SO                            05810000
+         OI    BYTE,CNTLNDST      INDICATE NO DESTINATIONS MONITORED    05820000
+                                                                        05830000
+         OC    CLASMASK,CLASMASK  CLASSES REMAIN?                       05840000
+         BNZ   *+8                SKIP IF SO                            05850000
+         OI    BYTE,CNTLNCLS      INDICATE NO CLASSES MONITORED         05860000
+                                                                        05870000
+         TM    BYTE,CNTLNDST+CNTLNCLS                                   05880000
+         BNO   GBLUPDAT           CHG REQUIRED IF MONITOR STATUS CHG    05890000
+                                                                        05900000
+         L     R6,GPTRPREV        PREDECESSOR ENTRY                     05910000
+P        USING $MONMSG,R6         STANDARD ADDRESSABILITY               05920000
+         ICM   R7,15,GPTRCURR     ITASK SUMMARY ENTRY                   05930000
+         BZ    GBLRET             NOTHING TO DO                         05940000
+C        USING $MONMSG,R7         STANDARD ADDRESSABILITY               05950000
+         MVC   P.$MMNEXT,C.$MMNEXT   DEQUEUE DELETED ENTRY              05960000
+                                                                        05970000
+         $RETSTOR (R7),OWNER=ITASK   DELETE                             05980000
+                                                                        05990000
+         B     GBLFIN             DONE                                  06000000
+                                                                        06010000
+*--------------------------------------------------------------         06020000
+*   UPDATE THE CURRENT ENTRY IF AVAILABLE                               06030000
+*--------------------------------------------------------------         06040000
+GBLUPDAT DS    0H                                                       06050000
+C        USING $MONMSG,R7         STANDARD ADDRESSABILITY               06060000
+         ICM   R7,15,GPTRCURR     MONITORING ACTIVE?                    06070000
+         BNZ   GBLSMRY            UPDATE EXISTING ENTRY IF SO           06080000
+                                                                        06090000
+*--------------------------------------------------------------         06100000
+*   CREATE A NEW ENTRY                                                  06110000
+*--------------------------------------------------------------         06120000
+GBLNEW   DS    0H                                                       06130000
+         $GETSTOR $MONMSGL,OWNER=ITASK                                  06140000
+                                                                        06150000
+W        USING $MONMSG,R1              $MONMSG CONSTRUCTION AREA        06160000
+         MVC   W.$MMID,=CL8'MONGLOBL'  CONTROL BLOCK IDENTIFIER         06170000
+         MVC   W.$MMITSK,TASKNAME      MONITORED ITASK                  06180000
+         MVC   W.$MMOWU,TSKNAME        MONITORING ITASK NAME            06190000
+         ST    R10,W.$MMOWUA           MONITORING ITASK ADDRESS         06200000
+                                                                        06210000
+P        USING $MONMSG,R6         CHAIN FROM PREDECESSOR ENTRY          06220000
+         L     R6,GPTRPREV        PREDECESSOR ENTRY ADDRESS             06230000
+         MVC   W.$MMNEXT,P.$MMNEXT                                      06240000
+         LA    R7,W.$MONMSG       NEW ENTRY IS CURRENT ENTRY            06250000
+         ST    R7,P.$MMNEXT                                             06260000
+         DROP  W                  $MONMSG CONSTRUCTION AREA             06270000
+                                                                        06280000
+*--------------------------------------------------------------         06290000
+*   POST DESTINATION AND CLASS MASK UPDATES                             06300000
+*--------------------------------------------------------------         06310000
+GBLSMRY  DS    0H                                                       06320000
+         MVC   C.$MMIDEST,DESTMASK     UPDATE DESTINATION MASK          06330000
+         MVC   C.$MMICLSM,CLASMASK     UPDATE CLASS MASK                06340000
+                                                                        06350000
+*--------------------------------------------------------------         06360000
+*   UPDATE OR CLEAR THE GLOBAL MONITORING QUEUE SEQUENCE ID             06370000
+*--------------------------------------------------------------         06380000
+GBLFIN   DS    0H                 POST GLOBAL QUEUE UPDATE              06390000
+         L     R1,ICTMNSEQ        UPDATE SEQUENCE ID                    06400000
+         LA    R1,1(,R1)          ROLL IT                               06410000
+         LTR   R1,R1              UNFORTUNATE RESULT?                   06420000
+         LA    R1,1               SET STARTER                           06430000
+         ST    R1,ICTMNSEQ                                              06440000
+                                                                        06450000
+         ICM   R1,15,ICTMNMSG     GLOBAL QUEUE CONTAINS ENTRIES?        06460000
+         BNZ   *+8                SKIP IF SO                            06470000
+         ST    R1,ICTMNSEQ        INDICATE EMPTY QUEUE                  06480000
+                                                                        06490000
+*--------------------------------------------------------------         06500000
+*   REQUEST COMPLETE                                                    06510000
+*--------------------------------------------------------------         06520000
+GBLRET   DS    0H                                                       06530000
+         LA    R15,RC00           SUCCESSFUL COMPLETION                 06540000
+         SR    R0,R0              REASON CODE NOT DEFINED               06550000
+         LM    R0,R14,REGSAVE     RESTORE MAINLINE                      06560000
+         BR    R14                                                      06570000
+         DROP  P,C                $MONMSG PREV, CURR ENTRIES            06580000
+                                                                        06590000
+         EJECT                                                          06600000
+**<DOC-ON>*****************************************************         06610000
+*                                                                       06620000
+* ROUTINE: LOCIDP - Locate $MONMSG entry insert/delete entries          06630000
+*                                                                       06640000
+* DESCRIPTION:                                                          06650000
+*                                                                       06660000
+*    Operations on the global and local message monitor queues          06670000
+*    require insertion, update, and deletion of entries in a            06680000
+*    linked structure.  This routine acquires the location of           06690000
+*    the entry for the named ITASK / requesting workunit and            06700000
+*    its predecessor.                                                   06710000
+*                                                                       06720000
+*                                                                       06730000
+* ON ENTRY:                                                             06740000
+*                                                                       06750000
+*    R0 -  addr of ITASK name, an all-tasks request is indicated        06760000
+*          by a blank or null ITASK name                                06770000
+*                                                                       06780000
+*    R1 -  $MONMSG queue anchor word address                            06790000
+*                                                                       06800000
+*    R15 - owning workunit addr                                         06810000
+*                                                                       06820000
+*                                                                       06830000
+* ON EXIT:                                                              06840000
+*                                                                       06850000
+*    R0 -  'previous' node ptr or anchor word cast in $MONMSG           06860000
+*          format                                                       06870000
+*                                                                       06880000
+*    R1 -  'current' node ptr or zero if ITASK name not matched         06890000
+*                                                                       06900000
+**<DOC-OFF>****************************************************         06910000
+                                                                        06920000
+LOCIDP   DS    0H                                                       06930000
+         STM   R0,R15,REGSAVE     PRESERVE CALLERS REGS                 06940000
+         LR    R2,R0              ITASK NAME                            06950000
+         LR    R3,R15             REQUESTING WORKUNIT (ITASK,IPCB) ADDR 06960000
+                                                                        06970000
+         LR    R6,R1              $MONMSG QUEUE ANCHOR                  06980000
+         SH    R6,=AL2($MMNEXT-$MONMSG)   CAST AS $MONMSG NODE          06990000
+P        USING $MONMSG,R6         PREV NODE                             07000000
+                                                                        07010000
+LOCINEXT DS    0H                 LOCATE ENTRY BY ITASK NAME            07020000
+         ICM   R7,15,P.$MMNEXT    ADVANCE CURRENT ENTRY PTR             07030000
+         BZ    LOCICURR           END OF LIST ENCOUNTERED W/O MATCH     07040000
+C        USING $MONMSG,R7         CURRENT ENTRY CANDIDATE               07050000
+         CLC   C.$MMITSK,0(R2)    REQUESTED ENTRY?                      07060000
+         BL    LOCIADV            FURTHER ON                            07070000
+         BH    LOCISRT            ORDERED BY ITASK NAME                 07080000
+         C     R3,C.$MMOWUA       ENTRY BELONGS TO OUR WORKUNIT(S)?     07090000
+         BE    LOCICURR           MATCH FOUND IF SO                     07100000
+                                                                        07110000
+LOCIADV  DS    0H                 NO MATCH, CANDIDATES AVAILABLE        07120000
+         LR    R6,R7              ADVANCE PREV PTR                      07130000
+         B     LOCINEXT           TRY AGAIN                             07140000
+                                                                        07150000
+LOCISRT  DS    0H                 NO MATCH, IDENTIFY INSERTION POINT    07160000
+         SR    R7,R7              CLEAR 'CURRENT' PTR                   07170000
+                                                                        07180000
+LOCICURR DS    0H                 RETURN PREV AND CURR PTRS             07190000
+         LR    R1,R7              CURR PTR                              07200000
+         LR    R0,R6              PREV PTR                              07210000
+         LM    R2,R14,REGSAVE+8   RESTORE CALLERS REGS                  07220000
+         BR    R14                                                      07230000
+         DROP  P,C                $MONMSG PREV, CURR ENTRIES            07240000
+                                                                        07250000
+         EJECT                                                          07260000
+***************************************************************         07270000
+*                                                                       07280000
+* ROUTINE: DISPLOCK - ACQUIRE DISP LOCK                                 07290000
+*                                                                       07300000
+***************************************************************         07310000
+DISPLOCK DS    0H                                                       07320000
+         TM    CNTLFLGS,CNTLDISP  DISP LOCK PREVIOUSLY ACQUIRED/OWNED   07330000
+         BOR   R14                DONE IF SO                            07340000
+         ST    R14,FWORD          PRESERVE RETURN ADDRESS               07350000
+                                                                        07360000
+         $SER  OBTAIN,DISP        ACQUIRE DISP LOCK                     07370000
+                                                                        07380000
+         B     *+4(R15)           ANALYZE COMPLETION                    07390000
+         B     DISPLACQ              LOCK ACQUIRED                      07400000
+         B     DISPLOWN              LOCK ALREADY OWNED                 07410000
+         EX    R0,*                  LOCK FAILURE                       07420000
+                                                                        07430000
+DISPLACQ DS    0H                                                       07440000
+         OI    CNTLFLGS,CNTLDREL  LOCK ACQUIRED AND MUST BE RELEASED    07450000
+                                                                        07460000
+DISPLOWN DS    0H                                                       07470000
+         OI    CNTLFLGS,CNTLDISP  DISP LOCK OWNED                       07480000
+                                                                        07490000
+         L     R14,FWORD          RESTORE RETURN ADDRESS                07500000
+         BR    R14                RETURN                                07510000
+                                                                        07520000
+         EJECT                                                          07530000
+***************************************************************         07540000
+*                                                                       07550000
+* ROUTINE: DISPUNLK - RELEASE DISP LOCK                                 07560000
+*                                                                       07570000
+***************************************************************         07580000
+DISPUNLK DS    0H                                                       07590000
+         ST    R14,FWORD          PRESERVE RETURN ADDRESS               07600000
+         SR    R15,R15            PRESUME SUCCESS                       07610000
+                                                                        07620000
+         TM    CNTLFLGS,CNTLDREL  LOCK RELEASE REQUIRED?                07630000
+         BNO   DISPUNX            NO RELEASE OTHERWISE                  07640000
+                                                                        07650000
+         $SER  RELEASE,DISP       RELEASE DISP LOCK                     07660000
+         NI    CNTLFLGS,FF-CNTLDISP-CNTLDREL                            07670000
+                                                                        07680000
+DISPUNX  DS    0H                                                       07690000
+         L     R14,FWORD          RESTORE RETURN ADDRESS                07700000
+         BR    R14                RETURN                                07710000
+                                                                        07720000
+         EJECT                                                          07730000
+***************************************************************         07740000
+*                                                                       07750000
+*   LOCAL READ/ONLY DATA AREAS, ETC.                                    07760000
+*                                                                       07770000
+***************************************************************         07780000
+         LTORG ,                                                        07790000
+                                                                        07800000
+         PRINT NOGEN                                                    07810000
+         ICVT  ,                                                        07820000
+         ITASK ,                                                        07830000
+         IPCB  ,                                                        07840000
+         END   ,                                                        07850000

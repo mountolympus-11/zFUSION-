@@ -1,0 +1,437 @@
+         TITLE 'IMSGSEL - CVT SUB-ELEMENTS TO MESSAGE FUNCTION PARMS'   00010000
+         #WORK LENGTH=256    BEGIN WORKAREA                             00020000
+CURRTYPE DS    C             CURRENT SUBSTITUTION ELEMENT TYPE          00030000
+                                                                        00040000
+FLAGS    DS    X             LOCAL FLAG BYTE                            00050000
+FTIMESVC EQU   X'80'            TIME MACRO ISSUED                       00060000
+                                                                        00070000
+TIMEDATE DS    0F            TIME AND DATE RETENTION                    00080000
+SAVETIME DS    F             TIME AS HHMMSSTH                           00090000
+SAVEDATE DS    F             DATE AS **DDYYYF                           00100000
+                                                                        00110000
+SELCOUNT DS    F             # SUBSTITUTION ELEMENTS PASSED             00120000
+SELTYPA  DS    A             PTR TO NEXT SEL TAG IN MSG DEFINITION      00130000
+SELTYP#  DS    F             MAX # SEL TAGS IN MSG DEFINITION           00140000
+                                                                        00150000
+RETLIST  DS    A             ADDR OF MSG FUNCTION PLIST ORIGIN          00160000
+RETLIM   DS    F             TOTAL WORDS AVAIL IN PLIST                 00170000
+RETUSED  DS    F             WORDS USED SO FAR                          00180000
+                                                                        00190000
+WIDTH    DS    F             STRING WIDTH                               00200000
+PREC     DS    F             STRING PRECISION (# CHARS SELECTED)        00210000
+EDITLEN  DS    F             EXPECTED LENGTH OF EDITTED SEL'S           00220000
+POSTLIST DS    4F            UP TO FOUR VALUES PER SUB-ELEMENT          00230000
+                                                                        00240000
+EYEDATE  DS    CL5           YYDDD                                      00250000
+EYETIME  DS    CL7           HHMMSS*                                    00260000
+FMTDATE  DS    CL6           FORMATTED JULIAN DATE - YY.DDD             00270000
+FMTTIME  DS    CL8           FORMATTED 24 HR TIME  - HH:MM:SS           00280000
+         #ENDWORK ,          END WORKAREA                               00290000
+                                                                        00300000
+         EJECT                                                          00310000
+         $MGEN TYPE=DSECT    MESSAGE DEFINITION FORMATS                 00320000
+         EJECT                                                          00330000
+         EQUS  LINKAGE=COND                                             00340000
+         EJECT ,                                                        00350000
+                                                                        00360000
+**<DOC-ON>*****************************************************         00370000
+*                                                                       00380000
+* ROUTINE: IMSGSEL - CONVERT SUBSTITUTION ELEMENTS                      00390000
+*                                                                       00400000
+* DESCRIPTION:                                                          00410000
+*                                                                       00420000
+*    THIS ROUTINE IS USED TO CONVERT THE SUBSTITUTION ELEMENTS          00430000
+*    DEFINED FOR A PARTICULAR MESSAGE INTO A FORM USABLE BY A           00440000
+*    MESSAGE EDITTING FUNCTION (SPRINTF, FOR EXAMPLE). THE              00450000
+*    CALLER PROVIDES A SUBSTITUTION ELEMENT LIST WHICH                  00460000
+*    CORRESPONDS TO THE SUB-ELEMENTS DEFINED IN THE MESSAGE             00470000
+*    TEXT.  AS EACH SUB-ELEMENT IN THE TEXT IS PROCESSED, THE           00480000
+*    CORRESPONDING SOURCE SUB-ELEMENT IS EXTRACTED TO DERIVE            00490000
+*    APPROPRIATE TEXT SUBSTITUTION DATA.  THE AMOUNT AND TYPE           00500000
+*    OF DATA SAVED IN THE MSG FUNCTION PLIST DEPENDS ON THE             00510000
+*    DATA TYPE OF EACH SUB-ELEMENT ENCOUNTERED.                         00520000
+*                                                                       00530000
+*    SIMILARLY, THE SIZE OF THE EDITTED MESSAGE PRODUCED USING          00540000
+*    THESE SEL'S DEPENDS ON DATA TYPES AND CHAR STRING LENGTHS.         00550000
+*    THIS ROUTINE RETURNS A (ROUGH) ESTIMATE OF THE TOTAL STG           00560000
+*    THAT WILL BE CONSUMED BY THE EDITTED SEL'S.  APPLY A               00570000
+*    SUITABLE UNCERTAINTY FACTOR TO ANY CALCULATIONS BASED ON           00580000
+*    THIS ESTIMATE.                                                     00590000
+*                                                                       00600000
+*                                                                       00610000
+* ON ENTRY:                                                             00620000
+*                                                                       00630000
+*    R1 CONTAINS THE ADDR OF A PLIST CONSTRUCTED AS FOLLOWS:            00640000
+*                                                                       00650000
+*          +00 - NUMBER OF SELECTION ELEMENTS FROM REQ                  00660000
+*          +04 - ORIGIN OF SELECTION ELEMENT LIST (PTR,LEN)             00670000
+*          +08 - ADDR OF MSG FORMAT ENTRY (MSGFMT)                      00680000
+*          +12 - MSG FUNCTION PLIST CONSTRUCTION AREA                   00690000
+*          +16 - MSG FUNCTION PLIST CONSTRUCTION AREA LENGTH            00700000
+*                                                                       00710000
+*    R0 CONTAINS THE ADDR OF A 256 BYTE WORKAREA                        00720000
+*                                                                       00730000
+*                                                                       00740000
+* ON EXIT:                                                              00750000
+*                                                                       00760000
+*    R15 CONTAINS ONE OF THE FOLLOWING RETURN CODES                     00770000
+*                                                                       00780000
+*          RC00 - PLIST CONSTRUCTION COMPLETED WITHOUT ERROR            00790000
+*                                                                       00800000
+*                 R0 - # WORDS USED FOR MSG FUNCTION PLIST              00810000
+*                 R1 - STORAGE ESTIMATE FOR ALL RESOLVED SEL'S          00820000
+*                                                                       00830000
+*          RC04 - # SEL'S PROVIDED EXCEEDS # MSG PLACEHOLDERS           00840000
+*                                                                       00850000
+*          RC08 - # MSG PLACEHOLDERS EXCEEDS # SEL'S PROVIDED           00860000
+*                                                                       00870000
+*          RC12 - FUNCTION PLIST IS NOT LARGE ENOUGH                    00880000
+*                                                                       00890000
+*          RC16 - UNKNOWN SEL TYPE FOUND IN MSG DEFINITION              00900000
+*                                                                       00910000
+**<DOC-OFF>****************************************************         00920000
+                                                                        00930000
+***************************************************************         00940000
+*                                                                       00950000
+* MAINTENANCE:                                                          00960000
+*                                                                       00970000
+*    04/15/93 R. TURGEON                                                00980000
+*             INITIAL VERSION                                           00990000
+*                                                                       01000000
+***************************************************************         01010000
+                                                                        01020000
+         EJECT ,                                                        01030000
+IMSGSEL  #ENTER PREG=R8,WAPASS=YES                                      01040000
+                                                                        01050000
+         LM    R3,R7,0(R8)        FETCH PASSED PARAMETERS               01060000
+         ST    R3,SELCOUNT        SUBSTITUTION ELEMENT COUNT            01070000
+         LR    R9,R4              PTR TO CURR SEL (ADDR,LEN) PAIR       01080000
+         ST    R6,RETLIST         MSG FUNCTION PLIST ORIGIN             01090000
+         SRL   R7,2               NUMBER OF FULLWORD ENTRIES AVAIL      01100000
+         ST    R7,RETLIM          SAVE SIZE IN USEFUL QUANTA            01110000
+                                                                        01120000
+         USING MSGFMT,R5          MESSAGE ENTRY FORMAT                  01130000
+         LA    R1,MSGFRTYP        SUBSTITUTION ELEMENT TYPE LIST        01140000
+         ST    R1,SELTYPA         SELECTION ELEMENT TYPE LIST PTR       01150000
+         SR    R0,R0              PREPARE FOR INSERT                    01160000
+         IC    R0,MSGFRTLN        NUMBER OF SUBSTITION ELEMENTS         01170000
+         ST    R0,SELTYP#         SCAN LIMIT                            01180000
+         DROP  R5                 MSGFMT                                01190000
+                                                                        01200000
+         EJECT ,                                                        01210000
+***************************************************************         01220000
+*                                                                       01230000
+*   SCAN THE SUBSTITUTION ELEMENT TYPES STORED WITH THE MESSAGE         01240000
+*   DEFINITION, EXTRACTING DATA FROM THE SOURCE SUB-ELEMENT             01250000
+*   LIST AS NEEDED.  NOTE THAT SOME SUBSTITUTION ELEMENTS SUCH          01260000
+*   AS <TIME> AND <DATE> ARE SELF-DEFINING AND DO NOT DRAW UPON         01270000
+*   THE SUB-ELEMENT LIST PASSED.  EACH SUB-ELEMENT IN THE MSG           01280000
+*   DEFINITION IS REFLECTED IN THE MSG FUNCTION PLIST AS EITHER:        01290000
+*                                                                       01300000
+*      (VALUE)          - INTEGER AND STRING0,  FOR EXAMPLE             01310000
+*      (PREC,PTR)       - TRIMMED STRING, FOR EXAMPLE                   01320000
+*      (WIDTH,PREC,PTR) - TRIMMED AND JUSTIFIED STRINGS                 01330000
+*                                                                       01340000
+*   NOTE THAT A SOURCE INTEGER SPECIFIED WITHOUT A LENGTH               01350000
+*   INDICATES THAT THE INT PTR ITSELF IS THE INTEGRAL VALUE             01360000
+*   DESIRED.  REF <REG> NOTATION DESCRIBED IN $MSG.                     01370000
+*                                                                       01380000
+***************************************************************         01390000
+NEXTSEL  DS    0H                                                       01400000
+         ICM   R2,15,SELTYP#      SEL ARRAY COMPLETELY PROCESSED?       01410000
+         BZ    FIN                DONE IF SO                            01420000
+         BCTR  R2,0               ACCOUNT FOR THIS PASS                 01430000
+         ST    R2,SELTYP#         UPDATE                                01440000
+                                                                        01450000
+         L     R3,SELTYPA         SEL ARRAY TYPE CODE                   01460000
+         TM    0(R3),BF           ALL SEL'S IN MSG ACCOUNTED FOR?       01470000
+         BZ    FIN                DONE IF SO                            01480000
+         MVC   CURRTYPE,0(R3)     ELSE RETAIN LOCAL COPY OF CODE        01490000
+         LA    R0,1(,R3)          ADVANCE PREPARATION                   01500000
+         ST    R0,SELTYPA         FOR NEXT PASS                         01510000
+                                                                        01520000
+*** DATA TYPES NOT REQUIRING SOURCE SEL                                 01530000
+                                                                        01540000
+         CLI   0(R3),MSGF$D       DATE                                  01550000
+         BE    DATE                                                     01560000
+                                                                        01570000
+         CLI   0(R3),MSGF$T       TIME                                  01580000
+         BE    TIME                                                     01590000
+                                                                        01600000
+*** DATA TYPES THAT REQUIRE SOURCE SEL                                  01610000
+                                                                        01620000
+         ICM   R15,15,SELCOUNT    NUMBER PASSED SEL'S REMAINING         01630000
+         BNP   ERR_NSEL           INSUFFICIENT                          01640000
+         BCTR  R15,0              ACCOUNT FOR THIS PASS                 01650000
+         ST    R15,SELCOUNT       UPDATE                                01660000
+                                                                        01670000
+         CLI   0(R3),MSGF$I       SIGNED INTEGER                        01680000
+         BE    ISIGN                                                    01690000
+                                                                        01700000
+         CLI   0(R3),MSGF$U       UNSIGNED INTEGER                      01710000
+         BE    USIGN                                                    01720000
+                                                                        01730000
+         CLI   0(R3),MSGF$S       TRIMMED STRING                        01740000
+         BE    STRJUST                                                  01750000
+                                                                        01760000
+         CLI   0(R3),MSGF$Z       ZERO TERMINATED STRING                01770000
+         BE    STRZTERM                                                 01780000
+                                                                        01790000
+         CLI   0(R3),MSGF$J       TRIMMED STRING JUST LEFT OR RIGHT     01800000
+         BE    STRJUST                                                  01810000
+         B     ERR_TYPE                                                 01820000
+                                                                        01830000
+*--------------------------------------------------------------         01840000
+*   JULIAN DATE                                                         01850000
+*--------------------------------------------------------------         01860000
+DATE     DS    0H                                                       01870000
+         BAS   R14,TIMESVC        GET TIME AND DATE                     01880000
+                                                                        01890000
+         UNPK  EYEDATE,SAVEDATE+1(3)                                    01900000
+         MVC   FMTDATE+0(2),EYEDATE+0                                   01910000
+         MVI   FMTDATE+2,C'.'                                           01920000
+         MVC   FMTDATE+3(3),EYEDATE+2                                   01930000
+                                                                        01940000
+         LA    R0,L'FMTDATE       USED FOR STORAGE ESTIMATES            01950000
+         LA    R1,FMTDATE                                               01960000
+         B     POST_PTR           POST STRING OF PREDETERMINED LENGTH   01970000
+                                                                        01980000
+*--------------------------------------------------------------         01990000
+*   24-HOUR TIME                                                        02000000
+*--------------------------------------------------------------         02010000
+TIME     DS    0H                                                       02020000
+         BAS   R14,TIMESVC        GET TIME AND DATE                     02030000
+                                                                        02040000
+         UNPK  EYETIME,SAVETIME                                         02050000
+         MVC   FMTTIME+0(2),EYETIME+0                                   02060000
+         MVI   FMTTIME+2,C':'                                           02070000
+         MVC   FMTTIME+3(2),EYETIME+2                                   02080000
+         MVI   FMTTIME+5,C':'                                           02090000
+         MVC   FMTTIME+6(2),EYETIME+4                                   02100000
+                                                                        02110000
+         LA    R0,L'FMTTIME       USED FOR STORAGE ESTIMATES            02120000
+         LA    R1,FMTTIME                                               02130000
+         B     POST_PTR           POST STRING OF PREDETERMINED LENGTH   02140000
+                                                                        02150000
+*--------------------------------------------------------------         02160000
+*   SIGNED INTEGER                                                      02170000
+*--------------------------------------------------------------         02180000
+ISIGN    DS    0H                                                       02190000
+         L     R1,0(,R9)          PTR TO VALUE OR ACTUAL VALUE          02200000
+         ICM   R2,15,4(R9)        VALUE LENGTH                          02210000
+         LA    R9,8(,R9)          (PTR,LEN) CONSUMED BY OPERATION       02220000
+         BZ    POST_INT           POST INTEGER VALUE                    02230000
+                                                                        02240000
+         CH    R2,=H'4'           VALID LENGTH?                         02250000
+         BNH   *+8                SKIP IF SO                            02260000
+         LA    R2,4               ELSE TRUNCATE                         02270000
+         BCTR  R2,0               CONVERT LENGTH TO NDX                 02280000
+         SLL   R2,2               RS INSTRUCTION INDEX                  02290000
+         LR    R3,R1              PTR TO INTEGER                        02300000
+         SR    R1,R1              PREPARE FOR RECEPTION                 02310000
+         EX    *-*,IFETCH(R2)     FETCH SIGNED VALUE                    02320000
+         B     POST_INT           DONE                                  02330000
+                                                                        02340000
+IFETCH   DS    0H                 INTEGER FETCH WITH SIGN EXTENSION     02350000
+         ICM   R1,1,0(R3)                                               02360000
+         LH    R1,0(,R3)          SIGN EXTENDING                        02370000
+         ICM   R1,7,0(R3)                                               02380000
+         ICM   R1,15,0(R3)                                              02390000
+                                                                        02400000
+*--------------------------------------------------------------         02410000
+*   UNSIGNED INTEGER                                                    02420000
+*--------------------------------------------------------------         02430000
+USIGN    DS    0H                                                       02440000
+         L     R1,0(,R9)          PTR TO VALUE OR ACTUAL VALUE          02450000
+         ICM   R2,15,4(R9)        VALUE LENGTH                          02460000
+         LA    R9,8(,R9)          (PTR,LEN) CONSUMED BY OPERATION       02470000
+         BZ    POST_INT           POST INTEGER VALUE                    02480000
+                                                                        02490000
+         CH    R2,=H'4'           VALID LENGTH?                         02500000
+         BNH   *+8                SKIP IF SO                            02510000
+         LA    R2,4               ELSE TRUNCATE                         02520000
+         BCTR  R2,0               CONVERT LENGTH TO NDX                 02530000
+         SLL   R2,2               RS INSTRUCTION INDEX                  02540000
+         LR    R3,R1              PTR TO INTEGER                        02550000
+         SR    R1,R1              PREPARE FOR RECEPTION                 02560000
+         EX    *-*,UFETCH(R2)     FETCH SIGNED VALUE                    02570000
+         B     POST_INT           DONE                                  02580000
+                                                                        02590000
+UFETCH   DS    0H                 INTEGER FETCH, NO SIGN EXTENSION      02600000
+         ICM   R1,1,0(R3)                                               02610000
+         ICM   R1,3,0(R3)                                               02620000
+         ICM   R1,7,0(R3)                                               02630000
+         ICM   R1,15,0(R3)                                              02640000
+                                                                        02650000
+*--------------------------------------------------------------         02660000
+*   C-LIKE ZERO TERMINATED STRING, SUPPLIED LENGTH IS NOT USED          02670000
+*--------------------------------------------------------------         02680000
+STRZTERM DS    0H                                                       02690000
+         L     R3,0(,R9)          STRING0 ORIGIN                        02700000
+         LR    R4,R3              MODIFIABLE COPY                       02710000
+         LA    R9,8(,R9)          (PTR,LEN) CONSUMED BY OPERATION       02720000
+                                                                        02730000
+STRZSCAN DS    0H                                                       02740000
+         TRT   0(256,R4),ZSCANTAB LOCATE END OF STRING                  02750000
+         BC    HITS,STRZCALC      DLM FOUND                             02760000
+         LA    R4,256(,R4)        ELSE CONTINUE SCAN                    02770000
+         B     STRZSCAN           CONTINUE SCAN                         02780000
+                                                                        02790000
+STRZCALC DS    0H                                                       02800000
+         LR    R2,R1              DLM LOCATION                          02810000
+         SR    R2,R3              STORAGE ESTIMATE FOR RESULT           02820000
+         LA    R0,1               SINGLE PARM CONTRIBUTED TO PLIST      02830000
+         ST    R3,POSTLIST+0      STRING PTR IS PARM                    02840000
+         B     PMSGFUNC           POST RESULTS                          02850000
+                                                                        02860000
+*--------------------------------------------------------------         02870000
+*   STRING WITH OR WITHOUT JUSTIFICATION                                02880000
+*--------------------------------------------------------------         02890000
+STRJUST  DS    0H                                                       02900000
+         XC    WIDTH,WIDTH        FIELD WIDTH                           02910000
+         XC    PREC,PREC          PRECISION (# CHARS ACCEPTED)          02920000
+                                                                        02930000
+         L     R1,0(,R9)          STRING ORIGIN                         02940000
+         ICM   R2,15,4(R9)        MAX LENGTH OF STRING                  02950000
+         LA    R9,8(,R9)          (PTR,LEN) CONSUMED BY OPERATION       02960000
+         BZ    POST_STR           POST WIDTH / PRECISION                02970000
+                                                                        02980000
+         CH    R2,=H'256'         EXCEEDS REASONABLE MAX?               02990000
+         BNH   *+8                SKIP IF NOT                           03000000
+         LA    R2,256             ELSE TRUNCATE                         03010000
+         ST    R2,WIDTH           SOURCE LENGTH IS FIELD WIDTH          03020000
+         LA    R3,0(R2,R1)        END OF STRING + 1                     03030000
+                                                                        03040000
+STRTRIM  DS    0H                 TRIM                                  03050000
+         BCTR  R3,0               BACK SCAN                             03060000
+         TM    0(R3),BF           SIGNIFICANT BYTE?                     03070000
+         BNZ   *+8                SKIP IF OTHER THAN BLANK OR NULL      03080000
+         BCT   R2,STRTRIM         RETRY AS NEEDED                       03090000
+         ST    R2,PREC            POST TRIMMED LENGTH AS PRECISION      03100000
+         B     POST_STR           POST STRING WIDTH/PRECISION           03110000
+                                                                        03120000
+         EJECT ,                                                        03130000
+***************************************************************         03140000
+*                                                                       03150000
+*   POST PARAMETER (SET) FOR MESSAGE FUNCTION                           03160000
+*                                                                       03170000
+***************************************************************         03180000
+POST_INT DS    0H                 POST INTEGER IN R1                    03190000
+         LA    R0,10              STORAGE ESTIMATE FOR RESULT           03200000
+                                                                        03210000
+POST_PTR DS    0H                 POST POINTER IN R1, R0 HAS ESTIMATE   03220000
+         LR    R2,R0              STORAGE ESTIMATE                      03230000
+         ST    R1,POSTLIST        SAVE IN POST LIST                     03240000
+         LA    R0,1               SINGLE ELEMENT CONTRIBUTED            03250000
+         B     PMSGFUNC                                                 03260000
+                                                                        03270000
+*--------------------------------------------------------------         03280000
+*   JUSTIFIED AND UNPADDED STRINGS                                      03290000
+*--------------------------------------------------------------         03300000
+POST_STR DS    0H                 STRING DESCRIBED BY WIDTH/PRECISION   03310000
+         CLI   CURRTYPE,MSGF$J    JUSTIFIED STRING?                     03320000
+         BE    PJUSTSTR           ELSEWHERE IF SO                       03330000
+                                                                        03340000
+         L     R2,PREC            SPACE ESTIMATE                        03350000
+         ST    R2,POSTLIST+0      PRECISION (# CHARS)                   03360000
+         ST    R1,POSTLIST+4      STRING ORIGIN                         03370000
+         LA    R0,2               PLIST CONTRIBUTION                    03380000
+         B     PMSGFUNC                                                 03390000
+                                                                        03400000
+PJUSTSTR DS    0H                                                       03410000
+         L     R2,PREC            # CHARS SELECTED                      03420000
+         C     R2,WIDTH           EXCEEDS WIDTH?                        03430000
+         BNL   *+8                USE IT IF SO                          03440000
+         L     R2,WIDTH           ELSE CHOOSE THE LARGER                03450000
+                                                                        03460000
+         MVC   POSTLIST+0,WIDTH   FIELD WIDTH                           03470000
+         MVC   POSTLIST+4,PREC    PRECISION (# CHARS)                   03480000
+         ST    R1,POSTLIST+8      STRING ORIGIN                         03490000
+         LA    R0,3               PLIST CONTRIBUTION                    03500000
+         B     PMSGFUNC                                                 03510000
+                                                                        03520000
+*--------------------------------------------------------------         03530000
+*   ASSIMILATE NEW SERIES OF MSG FUNCTION PARMS INTO PLIST              03540000
+*--------------------------------------------------------------         03550000
+PMSGFUNC DS    0H                 R0 <== #PARMS, R2 <== RESULT LENGTH   03560000
+         L     R15,RETUSED        PLIST ENTRIES (WORDS) USED SO FAR     03570000
+         AR    R15,R0             ACCOUNT FOR THIS BATCH                03580000
+         C     R15,RETLIM         CAPACITY EXCEEDED?                    03590000
+         BH    ERR_LIM            FAIL IF SO                            03600000
+         ST    R15,RETUSED        ACCOUNT FOR NEW CONTRIBUTION          03610000
+                                                                        03620000
+         A     R2,EDITLEN         ACCUMULATE EDITTED SEL STG ESTIMATE   03630000
+         ST    R2,EDITLEN         SAVE TOTAL STORAGE ESTIMATE           03640000
+                                                                        03650000
+         LR    R2,R0              NUMBER OF NEW ENTRIES                 03660000
+         SLL   R2,2               CONVERT TO BYTES                      03670000
+         BCTR  R2,0               PREPARE FOR COPY                      03680000
+         L     R3,RETLIST         RESUMPTION POINT                      03690000
+         EX    R2,*+4             APPEND NEW PARMS                      03700000
+         MVC   0(*-*,R3),POSTLIST                                       03710000
+                                                                        03720000
+         LA    R3,1(R2,R3)        UPDATE PLIST PTR FOR NEXT PASS        03730000
+         ST    R3,RETLIST         SAVE UPDATED POSITION                 03740000
+         B     NEXTSEL            PROCESS NEXT ENTRY                    03750000
+                                                                        03760000
+         EJECT ,                                                        03770000
+***************************************************************         03780000
+*                                                                       03790000
+*   RETURN COMPLETION STATUS AND MESSAGE BLOCK TO REQUESTOR             03800000
+*                                                                       03810000
+***************************************************************         03820000
+FIN      DS    0H                                                       03830000
+         L     R0,RETUSED         # WORDS IN MSG FUNCTION PLIST         03840000
+         L     R1,EDITLEN         STG ESTIMATE OF EDITTED SEL'S         03850000
+         LA    R15,RC00           NORMAL COMPLETION PRESUMED            03860000
+         ICM   R2,15,SELCOUNT     ALL SELECTION ELEMENTS ACCEPTED?      03870000
+         BZ    *+8                SKIP IF SO                            03880000
+         LA    R15,RC04           SOME SOURCE DATA NOT USED             03890000
+         B     EXIT               WARNING ONLY                          03900000
+                                                                        03910000
+ERR_NSEL DS    0H                 INSUFFIC # SOURCE TEXT SELS PROVIDED  03920000
+         LA    R15,RC08                                                 03930000
+         B     EXIT                                                     03940000
+                                                                        03950000
+ERR_LIM  DS    0H                 MSG FUNCTION PLIST CAPACITY EXCEEDED  03960000
+         LA    R15,RC12                                                 03970000
+         B     EXIT                                                     03980000
+                                                                        03990000
+ERR_TYPE DS    0H                 INVALID SEL TYPE IN MSG DEF           04000000
+         LA    R15,RC16                                                 04010000
+         B     EXIT                                                     04020000
+                                                                        04030000
+EXIT     DS    0H                                                       04040000
+         #EXIT ,                  RETURN                                04050000
+                                                                        04060000
+         EJECT ,                                                        04070000
+***************************************************************         04080000
+*                                                                       04090000
+* ROUTINE:  TIMESVC - ACQUIRE SINGLE COPY OF DATE & TIME                04100000
+*                                                                       04110000
+***************************************************************         04120000
+TIMESVC  DS    0H                                                       04130000
+         TM    FLAGS,FTIMESVC     TIME ALREADY ACQUIRED?                04140000
+         BOR   R14                                                      04150000
+                                                                        04160000
+         TIME  ,                  ACQUIRE TIME AND DATE                 04170000
+         STM   R0,R1,TIMEDATE     SAVE RESULTS                          04180000
+                                                                        04190000
+         OI    FLAGS,FTIMESVC     SINGLE EXECUTION                      04200000
+         BR    R14                RETURN                                04210000
+                                                                        04220000
+         EJECT ,                                                        04230000
+***************************************************************         04240000
+*                                                                       04250000
+*   LOCAL READ/ONLY DATA AREAS, ETC.                                    04260000
+*                                                                       04270000
+***************************************************************         04280000
+ZSCANTAB DS    0F                 TRT FOR STRING DLM CHAR               04290000
+         DC    AL1(4)                                                   04300000
+         DC    255AL1(0)                                                04310000
+                                                                        04320000
+         LTORG ,                                                        04330000
+                                                                        04340000
+         PRINT NOGEN                                                    04350000
+         ICVT  ,                                                        04360000
+         END   ,                                                        04370000
